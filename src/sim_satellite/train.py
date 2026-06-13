@@ -158,7 +158,7 @@ def _load_manifest_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSampl
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Training manifest not found: {manifest_path}. "
-            "Run `sim-satellite data openearthmap` first."
+            "Run `sim-satellite openearthmap` first."
         )
 
     dataset = SatelliteDataset(manifest_path, split=config.split, shuffle_seed=config.seed)

@@ -15,7 +15,7 @@ The project is written in Python with uv. It uses Modal by default for training 
 ```bash
 uv sync
 uv run sim-satellite --help
-uv run sim-satellite data openearthmap
+uv run sim-satellite openearthmap
 uv run sim-satellite train --target modal
 uv run sim-satellite infer --target modal
 ```

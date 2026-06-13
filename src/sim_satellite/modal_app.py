@@ -1,7 +1,7 @@
 """Modal entrypoints for training and inference.
 
-The project defaults to Modal for execution, while these helpers preserve a
-local fallback so the scaffold remains useful before Modal is configured.
+The project defaults to Modal for execution, while local targets remain useful
+for small PyTorch debugging runs.
 """
 
 from __future__ import annotations
@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import modal
 
 from sim_satellite.infer import (
     InferenceConfig,
@@ -29,69 +31,52 @@ MODAL_DATA_ROOT = Path("/data")
 MODAL_GPU = "T4"
 
 
-try:
-    import modal
-except ModuleNotFoundError:
-    modal = None
-
-
 def _ignore_modal_data_path(path: Path) -> bool:
     return "raw" in path.parts or path.suffix == ".zip"
 
 
-if modal is not None:
-    app = modal.App(APP_NAME)
-    image = (
-        modal.Image.debian_slim(python_version="3.12")
-        .pip_install("click", "pillow", "torch")
-        .add_local_python_source("sim_satellite")
+app = modal.App(APP_NAME)
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("click", "pillow", "torch")
+    .add_local_python_source("sim_satellite")
+)
+if LOCAL_DATA_ROOT.exists():
+    image = image.add_local_dir(
+        LOCAL_DATA_ROOT,
+        str(MODAL_DATA_ROOT),
+        copy=False,
+        ignore=_ignore_modal_data_path,
     )
-    if LOCAL_DATA_ROOT.exists():
-        image = image.add_local_dir(
-            LOCAL_DATA_ROOT,
-            str(MODAL_DATA_ROOT),
-            copy=False,
-            ignore=_ignore_modal_data_path,
-        )
 
-    artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
-
-    @app.function(
-        image=image,
-        timeout=900,
-        gpu=MODAL_GPU,
-        volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
-    )
-    def train_remote(config: dict[str, Any]) -> dict[str, Any]:
-        result = run_training(TrainingConfig.from_dict(config)).to_dict()
-        artifact_volume.commit()
-        result["execution_target"] = "modal"
-        return result
-
-    @app.function(
-        image=image,
-        timeout=300,
-        gpu=MODAL_GPU,
-        volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
-    )
-    def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
-        artifact_volume.reload()
-        result = run_inference(InferenceConfig.from_dict(config)).to_dict()
-        artifact_volume.commit()
-        result["execution_target"] = "modal"
-        return result
-
-else:
-    app = None
-    train_remote = None
-    infer_remote = None
+artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 
 
-def require_modal() -> None:
-    if app is None or train_remote is None or infer_remote is None:
-        raise RuntimeError(
-            "Modal is required for this command. Install dependencies with `uv sync`."
-        )
+@app.function(
+    image=image,
+    timeout=900,
+    gpu=MODAL_GPU,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def train_remote(config: dict[str, Any]) -> dict[str, Any]:
+    result = run_training(TrainingConfig.from_dict(config)).to_dict()
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=300,
+    gpu=MODAL_GPU,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
+    artifact_volume.reload()
+    result = run_inference(InferenceConfig.from_dict(config)).to_dict()
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
 
 
 def run_training_target(
@@ -105,7 +90,6 @@ def run_training_target(
         return result
     if target != "modal":
         raise ValueError(f"Unsupported training target: {target}")
-    require_modal()
     modal_config = _modal_training_config(config)
     with app.run():
         return train_remote.remote(modal_config)
@@ -122,7 +106,6 @@ def run_inference_target(
         return result
     if target != "modal":
         raise ValueError(f"Unsupported inference target: {target}")
-    require_modal()
     modal_config = _modal_inference_config(config)
     with app.run():
         return infer_remote.remote(modal_config)

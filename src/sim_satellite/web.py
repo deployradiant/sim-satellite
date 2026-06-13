@@ -128,7 +128,7 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Web app manifest not found: {manifest_path}. "
-            "Run `sim-satellite data openearthmap` first."
+            "Run `sim-satellite openearthmap` first."
         )
     if not INDEX_PATH.exists():
         raise FileNotFoundError(f"Web app HTML not found: {INDEX_PATH}")

@@ -171,7 +171,7 @@ def _resolve_mask_path(config: InferenceConfig) -> Path:
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Inference manifest not found: {manifest_path}. "
-            "Pass --mask-path or run `sim-satellite data openearthmap` first."
+            "Pass --mask-path or run `sim-satellite openearthmap` first."
         )
     dataset = SatelliteDataset(manifest_path, split=config.split)
     if len(dataset) == 0:
