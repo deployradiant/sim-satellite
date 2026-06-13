@@ -1,0 +1,21 @@
+[project]
+name = "sim-satellite"
+version = "0.1.0"
+description = "End-to-end exploration of conditional satellite-image diffusion."
+readme = "Readme.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.scripts]
+sim-satellite = "sim_satellite.cli:cli"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
