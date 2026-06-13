@@ -23,7 +23,6 @@ from sim_satellite.infer import GenerationConfig  # noqa: E402
 
 def test_web_state_and_mask_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = _write_web_fixture(tmp_path)
-    monkeypatch.setattr(web, "load_generator", _fake_load_generator)
     app = web.create_app(config)
 
     state = _request(app, "GET", "/api/state")
@@ -37,6 +36,23 @@ def test_web_state_and_mask_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert mask.status_code == 200
     assert mask.headers["content-type"] == "image/png"
     assert mask.content.startswith(b"\x89PNG")
+
+
+def test_web_create_app_does_not_load_generator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+
+    def broken_load_generator(checkpoint_path: str, *, device: str) -> object:
+        raise RuntimeError("stale checkpoint")
+
+    monkeypatch.setattr(web, "load_generator", broken_load_generator)
+
+    app = web.create_app(config)
+    state = _request(app, "GET", "/api/state")
+
+    assert state.status_code == 200
 
 
 def test_web_generate_uses_generation_config_without_output_path(
@@ -61,6 +77,7 @@ def test_web_generate_uses_generation_config_without_output_path(
     monkeypatch.setattr(web, "generate_image_with_model", fake_generate)
     monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
     app = web.create_app(config)
+    assert load_calls == []
 
     response = _request(
         app,
@@ -87,7 +104,6 @@ def test_web_generate_rejects_bad_request_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, _ = _write_web_fixture(tmp_path)
-    monkeypatch.setattr(web, "load_generator", _fake_load_generator)
     app = web.create_app(config)
 
     bad_index = _request(app, "POST", "/api/generate", json_body={"index": 99})
@@ -140,7 +156,6 @@ def test_web_generate_rejects_invalid_edited_mask_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, _ = _write_web_fixture(tmp_path)
-    monkeypatch.setattr(web, "load_generator", _fake_load_generator)
     app = web.create_app(config)
 
     response = _request(
@@ -152,6 +167,66 @@ def test_web_generate_rejects_invalid_edited_mask_image(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "maskImage must be a PNG data URI"
+
+
+def test_web_generate_rejects_unmapped_edited_mask_color(
+    tmp_path: Path,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    app = web.create_app(config)
+    edited_mask = Image.new("RGB", (4, 4), (1, 2, 3))
+
+    response = _request(
+        app,
+        "POST",
+        "/api/generate",
+        json_body={"index": 0, "maskImage": _png_data_uri(edited_mask)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Mask contains unmapped RGB color: (1, 2, 3)"
+
+
+def test_web_generate_rejects_wrong_size_edited_mask(
+    tmp_path: Path,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    app = web.create_app(config)
+    edited_mask = Image.new("RGB", (2, 2), OPENEARTHMAP_RGB["building"])
+
+    response = _request(
+        app,
+        "POST",
+        "/api/generate",
+        json_body={"index": 0, "maskImage": _png_data_uri(edited_mask)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "mask image must be 4x4 pixels"
+
+
+def test_web_generate_rejects_oversized_mask_payload_before_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+
+    def broken_decode(encoded: str, validate: bool) -> bytes:
+        raise AssertionError("oversized payload should not be decoded")
+
+    monkeypatch.setattr(web.base64, "b64decode", broken_decode)
+    app = web.create_app(config)
+    oversized_payload = "data:image/png;base64," + ("A" * 5000)
+
+    response = _request(
+        app,
+        "POST",
+        "/api/generate",
+        json_body={"index": 0, "maskImage": oversized_payload},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "maskImage is too large"
 
 
 def test_web_generate_keeps_server_errors_as_server_errors(

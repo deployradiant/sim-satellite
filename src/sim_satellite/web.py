@@ -30,8 +30,8 @@ DEFAULT_MAX_SAMPLES = 32
 DEFAULT_WEB_CHECKPOINT_PATH = "artifacts/tiny-sim-satellite-modal.pt"
 STATIC_DIR = Path(__file__).with_name("web_static")
 INDEX_PATH = STATIC_DIR / "index.html"
+MASK_DATA_URI_PREFIX = "data:image/png;base64,"
 MASK_COLORS = tuple(OPENEARTHMAP_RGB[name] for name in OPENEARTHMAP_CLASSES)
-MASK_COLOR_IDS = {color: index for index, color in enumerate(MASK_COLORS)}
 
 
 @dataclass(frozen=True)
@@ -72,8 +72,14 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     config = config or WebConfig()
     _validate_checkpoint_path(config)
     samples = _load_samples(config)
-    loaded_generator = load_generator(config.checkpoint_path, device=config.device)
+    loaded_generator: Any | None = None
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
+
+    def generator() -> Any:
+        nonlocal loaded_generator
+        if loaded_generator is None:
+            loaded_generator = load_generator(config.checkpoint_path, device=config.device)
+        return loaded_generator
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -107,7 +113,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
 
         try:
             generated = generate_image_with_model(
-                loaded_generator,
+                generator(),
                 GenerationConfig(
                     seed=seed,
                     checkpoint_path=config.checkpoint_path,
@@ -237,14 +243,25 @@ def _write_request_mask(mask_image: str, config: WebConfig) -> Path:
 
 
 def _request_mask_labels(mask_image: str, config: WebConfig) -> Image.Image:
-    image = _decode_mask_data_uri(mask_image)
+    image = _decode_mask_data_uri(mask_image, config)
     try:
-        if image.width < 1 or image.height < 1:
-            raise HTTPException(status_code=400, detail="mask image must not be empty")
-        if image.width > config.display_size * 4 or image.height > config.display_size * 4:
-            raise HTTPException(status_code=400, detail="mask image is too large")
+        expected_size = (config.display_size, config.display_size)
+        if image.size != expected_size:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "mask image must be "
+                    f"{config.display_size}x{config.display_size} pixels"
+                ),
+            )
 
-        class_ids = [_nearest_class_id(pixel) for pixel in _image_data(image)]
+        try:
+            class_ids = mask_to_class_ids(
+                image,
+                ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         labels = Image.new("L", image.size)
         labels.putdata(class_ids)
         return labels
@@ -252,13 +269,14 @@ def _request_mask_labels(mask_image: str, config: WebConfig) -> Image.Image:
         image.close()
 
 
-def _decode_mask_data_uri(mask_image: str) -> Image.Image:
-    prefix = "data:image/png;base64,"
-    if not mask_image.startswith(prefix):
+def _decode_mask_data_uri(mask_image: str, config: WebConfig) -> Image.Image:
+    if not mask_image.startswith(MASK_DATA_URI_PREFIX):
         raise HTTPException(status_code=400, detail="maskImage must be a PNG data URI")
+    if len(mask_image) > _max_mask_image_uri_length(config):
+        raise HTTPException(status_code=400, detail="maskImage is too large")
 
     try:
-        body = base64.b64decode(mask_image[len(prefix) :], validate=True)
+        body = base64.b64decode(mask_image[len(MASK_DATA_URI_PREFIX) :], validate=True)
     except (ValueError, binascii.Error) as exc:
         raise HTTPException(status_code=400, detail="maskImage is not valid base64") from exc
 
@@ -269,25 +287,8 @@ def _decode_mask_data_uri(mask_image: str) -> Image.Image:
         raise HTTPException(status_code=400, detail="maskImage is not a valid PNG") from exc
 
 
-def _nearest_class_id(pixel: tuple[int, int, int]) -> int:
-    exact_match = MASK_COLOR_IDS.get(pixel)
-    if exact_match is not None:
-        return exact_match
-    return min(
-        range(len(MASK_COLORS)),
-        key=lambda index: _rgb_distance(pixel, MASK_COLORS[index]),
-    )
-
-
-def _rgb_distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> int:
-    return sum((left[index] - right[index]) ** 2 for index in range(3))
-
-
-def _image_data(image: Image.Image) -> Any:
-    get_flattened_data = getattr(image, "get_flattened_data", None)
-    if get_flattened_data is not None:
-        return get_flattened_data()
-    return image.getdata()
+def _max_mask_image_uri_length(config: WebConfig) -> int:
+    return len(MASK_DATA_URI_PREFIX) + max(4096, config.display_size * config.display_size * 6)
 
 
 def _image_tensor_png(image: Any, display_size: int) -> bytes:
