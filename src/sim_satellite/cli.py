@@ -1,5 +1,7 @@
 """Command-line interface for Sim Satellite."""
 
+from typing import Any
+
 import click
 
 from sim_satellite import __version__
@@ -11,28 +13,29 @@ def cli() -> None:
     """Explore conditional satellite-image diffusion workflows."""
 
 
-@cli.command()
+@cli.group()
 def data() -> None:
     """Prepare or inspect datasets."""
-    click.echo("Data workflow placeholder.")
 
 
-@cli.command()
-def train() -> None:
-    """Run model training."""
-    click.echo("Training workflow placeholder.")
-
-
-@cli.command()
-def infer() -> None:
-    """Run image generation or steering inference."""
-    click.echo("Inference workflow placeholder.")
+def _add_optional_command(command: Any) -> None:
+    if command is not None:
+        cli.add_command(command)
 
 
 @cli.command()
 def app() -> None:
     """Launch the drawing and generation app."""
     click.echo("Web app workflow placeholder.")
+
+
+from sim_satellite.data.openearthmap import cli as openearthmap_cli  # noqa: E402
+from sim_satellite.infer import cli as infer_cli  # noqa: E402
+from sim_satellite.train import cli as train_cli  # noqa: E402
+
+data.add_command(openearthmap_cli)
+_add_optional_command(train_cli)
+_add_optional_command(infer_cli)
 
 
 if __name__ == "__main__":

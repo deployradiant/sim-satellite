@@ -6,6 +6,13 @@ readme = "Readme.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
+    "modal>=1.0",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+local = [
+    "torch>=2.3",
 ]
 
 [project.scripts]
@@ -14,7 +21,28 @@ sim-satellite = "sim_satellite.cli:cli"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.9",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "artifacts",
+    "data",
+]
+
+[tool.ruff.lint]
+select = [
+    "B",
+    "E",
+    "F",
+    "I",
+    "UP",
+]
+
+[tool.ruff.format]
+line-ending = "auto"
 
 [build-system]
 requires = ["hatchling"]

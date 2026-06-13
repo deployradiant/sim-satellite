@@ -16,4 +16,7 @@ build/
 dist/
 *.egg-info/
 
+/artifacts/
+/data/
+
 .DS_Store
