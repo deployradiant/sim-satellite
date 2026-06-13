@@ -8,7 +8,7 @@ The user can interact with the model through a simple webapp. They can either ge
 
 ### Implementation
 
-The project is written in Python with uv. It uses Modal by default for training and inference. The canvas is a simple HTML webapp using canvas to render images and enable the drawing functions.
+The project is written in Python with uv. It uses Modal by default for training and inference. The web app is a static HTML page that talks to a minimal FastAPI server for masks and generation.
 
 ### Run the project
 
