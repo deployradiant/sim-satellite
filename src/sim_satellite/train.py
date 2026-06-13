@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,13 @@ class TrainingConfig:
     checkpoint_path: str = "artifacts/tiny-sim-satellite.pt"
     metrics_path: str = ""
     loss_plot_path: str = ""
+    resume_from: str = ""
+    save_every: int = 0
+    plot_every: int = 0
+    validation_split: str = ""
+    validation_holdout_patterns: str = ""
+    validation_every: int = 0
+    validation_batches: int = 8
     device: str = "cpu"
     image_size: int = 32
     image_channels: int = 3
@@ -49,6 +56,14 @@ class TrainingConfig:
             raise ValueError("batch_size must be positive")
         if self.log_every < 1:
             raise ValueError("log_every must be positive")
+        if self.save_every < 0:
+            raise ValueError("save_every must be non-negative")
+        if self.plot_every < 0:
+            raise ValueError("plot_every must be non-negative")
+        if self.validation_every < 0:
+            raise ValueError("validation_every must be non-negative")
+        if self.validation_batches < 1:
+            raise ValueError("validation_batches must be positive")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
@@ -105,6 +120,8 @@ def coerce_training_config(
 
 def run_training(
     config: TrainingConfig | Mapping[str, Any] | None = None,
+    *,
+    after_save: Callable[[], None] | None = None,
 ) -> TrainingResult:
     config = coerce_training_config(config)
     torch, _ = require_torch()
@@ -117,11 +134,31 @@ def run_training(
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     generator = torch.Generator(device="cpu").manual_seed(config.seed)
     batches = _load_manifest_batches(config)
+    validation_batches = _load_validation_batches(config)
 
     final_loss = 0.0
     losses: list[dict[str, float | int]] = []
+    validation_losses: list[dict[str, float | int]] = []
+    start_step = 0
+    if config.resume_from:
+        start_step, final_loss, losses, validation_losses = _load_training_state(
+            Path(config.resume_from),
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            torch=torch,
+            model_config=model_config,
+            device=device,
+        )
+
+    checkpoint_path = Path(config.checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path = _metrics_path(config, checkpoint_path)
+    loss_plot_path = _loss_plot_path(config, checkpoint_path)
+
     model.train()
-    for step in range(config.steps):
+    for step in range(start_step, config.steps):
+        step_number = step + 1
         clean, semantic_mask = _load_training_batch(
             batches[step % len(batches)],
             torch=torch,
@@ -147,8 +184,31 @@ def run_training(
         loss.backward()
         optimizer.step()
         final_loss = float(loss.detach().cpu().item())
-        step_number = step + 1
         losses.append({"step": step_number, "loss": final_loss})
+
+        if _should_run_validation(config, validation_batches, step_number):
+            validation_loss = _evaluate_validation_loss(
+                model,
+                validation_batches,
+                torch=torch,
+                model_config=model_config,
+                device=device,
+                config=config,
+            )
+            validation_losses.append({"step": step_number, "loss": validation_loss})
+            print(
+                json.dumps(
+                    {
+                        "event": "validation_progress",
+                        "step": step_number,
+                        "steps": config.steps,
+                        "loss": validation_loss,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+
         if step_number == 1 or step_number == config.steps or step_number % config.log_every == 0:
             print(
                 json.dumps(
@@ -163,30 +223,57 @@ def run_training(
                 flush=True,
             )
 
-    checkpoint_path = Path(config.checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path = _metrics_path(config, checkpoint_path)
-    loss_plot_path = _loss_plot_path(config, checkpoint_path)
+        if _should_write_progress_artifacts(config, step_number):
+            _write_training_state(
+                _snapshot_checkpoint_path(checkpoint_path, step_number),
+                metrics_path,
+                loss_plot_path,
+                model=model,
+                optimizer=optimizer,
+                generator=generator,
+                model_config=model_config,
+                config=config,
+                model_parameters=model_parameters,
+                losses=losses,
+                validation_losses=validation_losses,
+                final_loss=final_loss,
+                step=step_number,
+                torch=torch,
+            )
+            if after_save is not None:
+                after_save()
+
+    final_step = max(start_step, config.steps)
+    if not losses and config.resume_from:
+        losses.append({"step": final_step, "loss": final_loss})
     _write_training_metrics(
         metrics_path,
         model_config=model_config,
         config=config,
         model_parameters=model_parameters,
         losses=losses,
+        validation_losses=validation_losses,
         final_loss=final_loss,
+        step=final_step,
     )
-    _write_loss_plot(loss_plot_path, losses)
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "model_config": model_config.to_dict(),
-            "training_config": config.to_dict(),
-            "final_loss": final_loss,
-            "metrics_path": str(metrics_path),
-            "loss_plot_path": str(loss_plot_path),
-        },
+    _write_loss_plot(loss_plot_path, losses, validation_losses)
+    _write_training_checkpoint(
         checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
+        model_config=model_config,
+        config=config,
+        losses=losses,
+        validation_losses=validation_losses,
+        final_loss=final_loss,
+        step=final_step,
+        metrics_path=metrics_path,
+        loss_plot_path=loss_plot_path,
+        torch=torch,
     )
+    if after_save is not None:
+        after_save()
 
     return TrainingResult(
         checkpoint_path=str(checkpoint_path),
@@ -218,7 +305,9 @@ def _write_training_metrics(
     config: TrainingConfig,
     model_parameters: int,
     losses: list[dict[str, float | int]],
+    validation_losses: list[dict[str, float | int]],
     final_loss: float,
+    step: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -227,8 +316,10 @@ def _write_training_metrics(
                 "model_config": model_config.to_dict(),
                 "training_config": config.to_dict(),
                 "model_parameters": model_parameters,
+                "step": step,
                 "final_loss": final_loss,
                 "losses": losses,
+                "validation_losses": validation_losses,
             },
             indent=2,
         )
@@ -237,7 +328,11 @@ def _write_training_metrics(
     )
 
 
-def _write_loss_plot(path: Path, losses: list[dict[str, float | int]]) -> None:
+def _write_loss_plot(
+    path: Path,
+    losses: list[dict[str, float | int]],
+    validation_losses: list[dict[str, float | int]],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     import matplotlib
 
@@ -249,8 +344,21 @@ def _write_loss_plot(path: Path, losses: list[dict[str, float | int]]) -> None:
     smoothed = _exponential_moving_average(values, decay=0.95)
 
     figure, axis = pyplot.subplots(figsize=(8, 4.5), dpi=140)
-    axis.plot(steps, values, color="#94a3b8", linewidth=1.0, alpha=0.55, label="step loss")
-    axis.plot(steps, smoothed, color="#0f766e", linewidth=2.0, label="EMA 0.95")
+    if steps:
+        axis.plot(steps, values, color="#94a3b8", linewidth=1.0, alpha=0.55, label="train step")
+        axis.plot(steps, smoothed, color="#0f766e", linewidth=2.0, label="train EMA 0.95")
+    if validation_losses:
+        validation_steps = [int(item["step"]) for item in validation_losses]
+        validation_values = [float(item["loss"]) for item in validation_losses]
+        axis.plot(
+            validation_steps,
+            validation_values,
+            color="#dc2626",
+            marker="o",
+            markersize=3,
+            linewidth=1.5,
+            label="validation",
+        )
     axis.set_title("Training Loss")
     axis.set_xlabel("Step")
     axis.set_ylabel("MSE")
@@ -270,6 +378,151 @@ def _exponential_moving_average(values: list[float], *, decay: float) -> list[fl
         average = decay * average + (1.0 - decay) * value
         smoothed.append(average)
     return smoothed
+
+
+def _write_training_state(
+    checkpoint_path: Path,
+    metrics_path: Path,
+    loss_plot_path: Path,
+    *,
+    model: Any,
+    optimizer: Any,
+    generator: Any,
+    model_config: ModelConfig,
+    config: TrainingConfig,
+    model_parameters: int,
+    losses: list[dict[str, float | int]],
+    validation_losses: list[dict[str, float | int]],
+    final_loss: float,
+    step: int,
+    torch: Any,
+) -> None:
+    _write_training_metrics(
+        metrics_path,
+        model_config=model_config,
+        config=config,
+        model_parameters=model_parameters,
+        losses=losses,
+        validation_losses=validation_losses,
+        final_loss=final_loss,
+        step=step,
+    )
+    _write_loss_plot(loss_plot_path, losses, validation_losses)
+    _write_training_checkpoint(
+        checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
+        model_config=model_config,
+        config=config,
+        losses=losses,
+        validation_losses=validation_losses,
+        final_loss=final_loss,
+        step=step,
+        metrics_path=metrics_path,
+        loss_plot_path=loss_plot_path,
+        torch=torch,
+    )
+
+
+def _write_training_checkpoint(
+    path: Path,
+    *,
+    model: Any,
+    optimizer: Any,
+    generator: Any | None = None,
+    model_config: ModelConfig,
+    config: TrainingConfig,
+    losses: list[dict[str, float | int]],
+    validation_losses: list[dict[str, float | int]],
+    final_loss: float,
+    step: int,
+    metrics_path: Path,
+    loss_plot_path: Path,
+    torch: Any,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "generator_state": None if generator is None else generator.get_state(),
+            "model_config": model_config.to_dict(),
+            "training_config": config.to_dict(),
+            "step": step,
+            "losses": losses,
+            "validation_losses": validation_losses,
+            "final_loss": final_loss,
+            "metrics_path": str(metrics_path),
+            "loss_plot_path": str(loss_plot_path),
+        },
+        path,
+    )
+
+
+def _load_training_state(
+    path: Path,
+    *,
+    model: Any,
+    optimizer: Any,
+    generator: Any,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+) -> tuple[int, float, list[dict[str, float | int]], list[dict[str, float | int]]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {path}")
+    checkpoint = torch.load(path, map_location=device)
+    checkpoint_model_config = checkpoint.get("model_config")
+    if checkpoint_model_config != model_config.to_dict():
+        raise ValueError("Resume checkpoint model_config does not match the requested model")
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer_state = checkpoint.get("optimizer_state")
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+    generator_state = checkpoint.get("generator_state")
+    if generator_state is not None:
+        generator.set_state(generator_state)
+    step = _checkpoint_step(checkpoint)
+    final_loss = float(checkpoint.get("final_loss", 0.0))
+    losses = list(checkpoint.get("losses", []))
+    validation_losses = list(checkpoint.get("validation_losses", []))
+    return step, final_loss, losses, validation_losses
+
+
+def _checkpoint_step(checkpoint: Mapping[str, Any]) -> int:
+    if "step" in checkpoint:
+        return int(checkpoint["step"])
+    training_config = checkpoint.get("training_config")
+    if isinstance(training_config, Mapping) and "steps" in training_config:
+        return int(training_config["steps"])
+    losses = checkpoint.get("losses")
+    if losses:
+        return int(losses[-1]["step"])
+    return 0
+
+
+def _snapshot_checkpoint_path(checkpoint_path: Path, step: int) -> Path:
+    return checkpoint_path.with_name(f"{checkpoint_path.stem}-step-{step}{checkpoint_path.suffix}")
+
+
+def _should_write_progress_artifacts(config: TrainingConfig, step: int) -> bool:
+    return (
+        (config.save_every > 0 and step % config.save_every == 0)
+        or (config.plot_every > 0 and step % config.plot_every == 0)
+    )
+
+
+def _should_run_validation(
+    config: TrainingConfig,
+    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
+    step: int,
+) -> bool:
+    return (
+        bool(validation_batches)
+        and config.validation_every > 0
+        and step % config.validation_every == 0
+    )
 
 
 def _drop_conditioning_mask(
@@ -292,6 +545,11 @@ def _drop_conditioning_mask(
 
 
 def _load_manifest_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
+    samples = _load_training_samples(config)
+    return tuple(iter_batches(samples, config.batch_size))
+
+
+def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...]:
     manifest_path = Path(config.manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(
@@ -303,7 +561,107 @@ def _load_manifest_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSampl
     if len(dataset) == 0:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
 
-    return tuple(iter_batches(dataset.samples, config.batch_size))
+    patterns = _validation_holdout_patterns(config)
+    if not patterns:
+        return dataset.samples
+
+    samples = tuple(
+        sample for sample in dataset.samples if not _sample_matches_any(sample, patterns)
+    )
+    if not samples:
+        raise RuntimeError(
+            "No training samples remain after applying validation holdout patterns: "
+            f"{', '.join(patterns)}"
+        )
+    return samples
+
+
+def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
+    if config.validation_every <= 0:
+        return ()
+
+    manifest_path = Path(config.manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Training manifest not found: {manifest_path}. "
+            "Run `sim-satellite openearthmap` first."
+        )
+
+    if config.validation_split:
+        dataset = SatelliteDataset(
+            manifest_path,
+            split=config.validation_split,
+            shuffle_seed=config.seed + 1,
+        )
+        samples = dataset.samples
+    else:
+        patterns = _validation_holdout_patterns(config)
+        if not patterns:
+            raise ValueError(
+                "validation_every requires validation_split or validation_holdout_patterns"
+            )
+        dataset = SatelliteDataset(manifest_path, split=config.split, shuffle_seed=config.seed + 1)
+        samples = tuple(
+            sample for sample in dataset.samples if _sample_matches_any(sample, patterns)
+        )
+
+    if not samples:
+        raise RuntimeError(f"No validation samples found in {manifest_path}")
+    return tuple(iter_batches(samples, config.batch_size))
+
+
+def _evaluate_validation_loss(
+    model: Any,
+    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
+    *,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    config: TrainingConfig,
+) -> float:
+    was_training = model.training
+    model.eval()
+    generator = torch.Generator(device="cpu").manual_seed(config.seed + 10_000)
+    losses: list[float] = []
+    with torch.no_grad():
+        for samples in validation_batches[: config.validation_batches]:
+            clean, semantic_mask = _load_evaluation_batch(
+                samples,
+                torch=torch,
+                model_config=model_config,
+                device=device,
+            )
+            noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
+            timestep = torch.rand(clean.shape[0], generator=generator, device="cpu").to(device)
+            noisy = interpolate_flow_sample(clean, noise, timestep)
+            target = flow_velocity(clean, noise)
+            prediction = model(noisy, semantic_mask, timestep)
+            losses.append(float(torch.nn.functional.mse_loss(prediction, target).cpu().item()))
+
+    if was_training:
+        model.train()
+    return sum(losses) / len(losses)
+
+
+def _load_evaluation_batch(
+    samples: tuple[SatelliteSample, ...],
+    *,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+) -> tuple[Any, Any]:
+    crop_boxes = [
+        _center_square_crop_box(sample, crop_size=model_config.image_size) for sample in samples
+    ]
+    images = [
+        load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
+        for sample, crop_box in zip(samples, crop_boxes, strict=True)
+    ]
+    masks = [
+        load_mask_tensor(sample.mask_path, torch=torch, config=model_config, crop_box=crop_box)
+        for sample, crop_box in zip(samples, crop_boxes, strict=True)
+    ]
+    return torch.stack(images).to(device), torch.stack(masks).to(device)
 
 
 def _load_training_batch(
@@ -365,10 +723,53 @@ def _random_square_crop_box(
     return left, top, left + size, top + size
 
 
+def _center_square_crop_box(
+    sample: SatelliteSample,
+    *,
+    crop_size: int,
+) -> tuple[int, int, int, int]:
+    width, height = _aligned_image_size(sample)
+    size = min(width, height, crop_size)
+    if size < 1:
+        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
+    left = (width - size) // 2
+    top = (height - size) // 2
+    return left, top, left + size, top + size
+
+
+def _aligned_image_size(sample: SatelliteSample) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(sample.image_path) as image:
+        image_size = image.size
+    with Image.open(sample.mask_path) as mask:
+        mask_size = mask.size
+    if image_size != mask_size:
+        raise ValueError(
+            f"Image and mask sizes must match for aligned crops: "
+            f"{sample.image_path} is {image_size}, {sample.mask_path} is {mask_size}"
+        )
+    return image_size
+
+
 def _random_offset(max_offset: int, *, torch: Any, generator: Any) -> int:
     if max_offset <= 0:
         return 0
     return int(torch.randint(0, max_offset + 1, (1,), generator=generator, device="cpu").item())
+
+
+def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:
+    return tuple(
+        pattern.strip()
+        for pattern in config.validation_holdout_patterns.split(",")
+        if pattern.strip()
+    )
+
+
+def _sample_matches_any(sample: SatelliteSample, patterns: tuple[str, ...]) -> bool:
+    image_path = sample.image_path.as_posix()
+    mask_path = sample.mask_path.as_posix()
+    return any(pattern in image_path or pattern in mask_path for pattern in patterns)
 
 
 def _run_with_target(config: TrainingConfig, target: str) -> dict[str, Any]:
@@ -403,6 +804,21 @@ def _build_click_command() -> Any:
     @click.option("--checkpoint-path", default=TrainingConfig.checkpoint_path, show_default=True)
     @click.option("--metrics-path", default=TrainingConfig.metrics_path, show_default=True)
     @click.option("--loss-plot-path", default=TrainingConfig.loss_plot_path, show_default=True)
+    @click.option("--resume-from", default=TrainingConfig.resume_from, show_default=True)
+    @click.option("--save-every", default=TrainingConfig.save_every, show_default=True)
+    @click.option("--plot-every", default=TrainingConfig.plot_every, show_default=True)
+    @click.option("--validation-split", default=TrainingConfig.validation_split, show_default=True)
+    @click.option(
+        "--validation-holdout-patterns",
+        default=TrainingConfig.validation_holdout_patterns,
+        show_default=True,
+    )
+    @click.option("--validation-every", default=TrainingConfig.validation_every, show_default=True)
+    @click.option(
+        "--validation-batches",
+        default=TrainingConfig.validation_batches,
+        show_default=True,
+    )
     @click.option("--device", default=TrainingConfig.device, show_default=True)
     @click.option("--seed", default=TrainingConfig.seed, show_default=True)
     @click.option("--image-size", default=TrainingConfig.image_size, show_default=True)
@@ -423,6 +839,13 @@ def _build_click_command() -> Any:
         checkpoint_path: str,
         metrics_path: str,
         loss_plot_path: str,
+        resume_from: str,
+        save_every: int,
+        plot_every: int,
+        validation_split: str,
+        validation_holdout_patterns: str,
+        validation_every: int,
+        validation_batches: int,
         device: str,
         seed: int,
         image_size: int,
@@ -440,6 +863,13 @@ def _build_click_command() -> Any:
             checkpoint_path=checkpoint_path,
             metrics_path=metrics_path,
             loss_plot_path=loss_plot_path,
+            resume_from=resume_from,
+            save_every=save_every,
+            plot_every=plot_every,
+            validation_split=validation_split,
+            validation_holdout_patterns=validation_holdout_patterns,
+            validation_every=validation_every,
+            validation_batches=validation_batches,
             device=device,
             image_size=image_size,
             hidden_channels=hidden_channels,

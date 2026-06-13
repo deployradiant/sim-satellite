@@ -22,13 +22,17 @@ from sim_satellite.train import (
     coerce_training_config,
     run_training,
 )
+from sim_satellite.web import WebConfig, create_app
 
 APP_NAME = "sim-satellite"
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
 LOCAL_DATA_ROOT = Path("data")
+LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
+MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
 MODAL_GPU = "A10G"
+MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
 
 
@@ -39,8 +43,12 @@ def _ignore_modal_data_path(path: Path) -> bool:
 app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("click", "matplotlib", "pillow", "torch")
+    .pip_install("click", "fastapi", "matplotlib", "pillow", "torch")
     .add_local_python_source("sim_satellite")
+    .add_local_file(
+        LOCAL_WEB_STATIC_ROOT / "index.html",
+        str(MODAL_PACKAGE_ROOT / "web_static" / "index.html"),
+    )
 )
 if DATA_MOUNT_CONFIGURED:
     image = image.add_local_dir(
@@ -55,12 +63,15 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
 
 @app.function(
     image=image,
-    timeout=3600,
+    timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_GPU,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
-    result = run_training(TrainingConfig.from_dict(config)).to_dict()
+    result = run_training(
+        TrainingConfig.from_dict(config),
+        after_save=artifact_volume.commit,
+    ).to_dict()
     artifact_volume.commit()
     result["execution_target"] = "modal"
     return result
@@ -78,6 +89,18 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     artifact_volume.commit()
     result["execution_target"] = "modal"
     return result
+
+
+@app.function(
+    image=image,
+    timeout=900,
+    gpu=MODAL_GPU,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+@modal.asgi_app()
+def web_remote() -> Any:
+    artifact_volume.reload()
+    return create_app(_modal_web_config(WebConfig()))
 
 
 def run_training_target(
@@ -123,6 +146,8 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
         values["metrics_path"] = _modal_artifact_path(config.metrics_path)
     if config.loss_plot_path:
         values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
+    if config.resume_from:
+        values["resume_from"] = _modal_artifact_path(config.resume_from)
     return values
 
 
@@ -136,6 +161,22 @@ def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
         raise ValueError("Modal mask_path is required for inference")
     values["mask_path"] = _modal_data_path(config.mask_path, field_name="mask_path")
     return values
+
+
+def _modal_web_config(config: WebConfig) -> WebConfig:
+    return WebConfig(
+        checkpoint_path=_modal_artifact_path(config.checkpoint_path),
+        manifest_path=_modal_data_path(config.manifest_path, field_name="manifest_path"),
+        split=config.split,
+        device="cuda",
+        steps=config.steps,
+        guidance_scale=config.guidance_scale,
+        seed=config.seed,
+        host=config.host,
+        port=config.port,
+        max_samples=config.max_samples,
+        display_size=config.display_size,
+    )
 
 
 def _modal_artifact_path(value: str) -> str:

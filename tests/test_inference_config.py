@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -14,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from sim_satellite import infer  # noqa: E402
 from sim_satellite.infer import DEFAULT_TARGET, GenerationConfig, InferenceConfig  # noqa: E402
+from sim_satellite.model import ModelConfig  # noqa: E402
 
 
 def test_inference_config_defaults_are_deterministic() -> None:
@@ -152,6 +154,53 @@ def test_inference_requires_checkpoint_mapping(
         infer.run_inference(config)
 
 
+def test_load_generator_accepts_legacy_tiny_checkpoint(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint_path = _write_legacy_tiny_checkpoint(tmp_path, torch=torch)
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    assert loaded.architecture == "legacy tiny denoiser"
+    assert loaded.legacy_timesteps == 16
+    assert loaded.model_config == ModelConfig(
+        image_size=8,
+        image_channels=3,
+        mask_channels=2,
+        hidden_channels=4,
+        seed=99,
+    )
+
+
+def test_generate_image_supports_legacy_tiny_checkpoint(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint_path = _write_legacy_tiny_checkpoint(tmp_path, torch=torch)
+    mask_path = tmp_path / "mask.png"
+    Image.new("L", (8, 8), 0).save(mask_path)
+
+    result = infer.generate_image(
+        GenerationConfig(
+            checkpoint_path=str(checkpoint_path),
+            mask_path=str(mask_path),
+            steps=1,
+        )
+    )
+
+    assert result.image.shape == (1, 3, 8, 8)
+    assert result.model_config.mask_channels == 2
+
+
+def test_load_generator_rejects_incompatible_legacy_tiny_checkpoint(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint_path = _write_legacy_tiny_checkpoint(
+        tmp_path,
+        torch=torch,
+        first_input_channels=5,
+    )
+
+    with pytest.raises(RuntimeError, match="incompatible with legacy tiny denoiser"):
+        infer.load_generator(checkpoint_path, device="cpu")
+
+
 class _FakeTorch:
     def __init__(self, checkpoint: Any) -> None:
         self.checkpoint = checkpoint
@@ -166,3 +215,33 @@ class _FakeTorch:
         self.loaded_path = path
         self.map_location = map_location
         return self.checkpoint
+
+
+def _write_legacy_tiny_checkpoint(
+    tmp_path: Path,
+    *,
+    torch: Any,
+    first_input_channels: int = 6,
+) -> Path:
+    checkpoint_path = tmp_path / "legacy.pt"
+    hidden_channels = 4
+    checkpoint = {
+        "model_config": {
+            "image_size": 8,
+            "image_channels": 3,
+            "mask_channels": 2,
+            "hidden_channels": hidden_channels,
+            "timesteps": 16,
+            "seed": 99,
+        },
+        "model_state": {
+            "net.0.weight": torch.zeros(hidden_channels, first_input_channels, 3, 3),
+            "net.0.bias": torch.zeros(hidden_channels),
+            "net.2.weight": torch.zeros(hidden_channels, hidden_channels, 3, 3),
+            "net.2.bias": torch.zeros(hidden_channels),
+            "net.4.weight": torch.zeros(3, hidden_channels, 3, 3),
+            "net.4.bias": torch.zeros(3),
+        },
+    }
+    torch.save(checkpoint, checkpoint_path)
+    return checkpoint_path

@@ -67,6 +67,13 @@ def build_model(config: ModelConfig | None = None) -> Any:
     return ConditionalUNet(config)
 
 
+def build_legacy_tiny_denoiser(config: ModelConfig, *, timesteps: int) -> Any:
+    require_torch()
+    if timesteps < 1:
+        raise ValueError("timesteps must be positive")
+    return LegacyTinyDenoiser(config, timesteps=timesteps)
+
+
 def _validate_unet_config(config: ModelConfig) -> None:
     if config.image_size < 32:
         raise ValueError("unet architecture requires image_size of at least 32")
@@ -75,6 +82,38 @@ def _validate_unet_config(config: ModelConfig) -> None:
 
 
 if nn is not None:
+
+    class LegacyTinyDenoiser(nn.Module):
+        def __init__(self, model_config: ModelConfig, *, timesteps: int) -> None:
+            super().__init__()
+            self.config = model_config
+            self.timesteps = timesteps
+            input_channels = model_config.image_channels + model_config.mask_channels + 1
+            self.net = nn.Sequential(
+                nn.Conv2d(input_channels, model_config.hidden_channels, 3, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(
+                    model_config.hidden_channels,
+                    model_config.hidden_channels,
+                    3,
+                    padding=1,
+                ),
+                nn.SiLU(),
+                nn.Conv2d(
+                    model_config.hidden_channels,
+                    model_config.image_channels,
+                    3,
+                    padding=1,
+                ),
+            )
+
+        def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
+            batch_size, _, height, width = image.shape
+            scaled_timestep = timestep.float().view(batch_size, 1, 1, 1)
+            scaled_timestep = scaled_timestep / max(1, self.timesteps - 1)
+            timestep_plane = scaled_timestep.expand(batch_size, 1, height, width)
+            model_input = torch.cat([image, semantic_mask, timestep_plane], dim=1)
+            return self.net(model_input)
 
     class SinusoidalTimeEmbedding(nn.Module):
         def __init__(self, channels: int) -> None:

@@ -15,7 +15,10 @@ from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS  # noqa: E402
 from sim_satellite.train import (  # noqa: E402
     DEFAULT_TARGET,
     TrainingConfig,
+    _load_training_samples,
+    _load_validation_batches,
     _random_square_crop_box,
+    _snapshot_checkpoint_path,
 )
 
 
@@ -29,6 +32,13 @@ def test_training_config_defaults_are_deterministic() -> None:
     assert config.device == "cpu"
     assert config.manifest_path == "data/openearthmap/manifest.jsonl"
     assert config.checkpoint_path == "artifacts/tiny-sim-satellite.pt"
+    assert config.resume_from == ""
+    assert config.save_every == 0
+    assert config.plot_every == 0
+    assert config.validation_split == ""
+    assert config.validation_holdout_patterns == ""
+    assert config.validation_every == 0
+    assert config.validation_batches == 8
     assert config.mask_channels == len(OPENEARTHMAP_CLASS_IDS)
 
 
@@ -70,6 +80,93 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(batch_size=0)
     with pytest.raises(ValueError):
         TrainingConfig(learning_rate=0.0)
+    with pytest.raises(ValueError):
+        TrainingConfig(save_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(plot_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(validation_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(validation_batches=0)
+
+
+def test_snapshot_checkpoint_path_includes_step() -> None:
+    path = _snapshot_checkpoint_path(Path("artifacts/model.pt"), 50)
+
+    assert path == Path("artifacts/model-step-50.pt")
+
+
+def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
+                '"split": "train"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    samples = _load_training_samples(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            validation_holdout_patterns="abancay, maputo",
+        )
+    )
+
+    assert [sample.image_path.name for sample in samples] == ["b.tif"]
+
+
+def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"split": "train"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    batches = _load_validation_batches(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            validation_every=10,
+            validation_holdout_patterns="abancay",
+            batch_size=1,
+        )
+    )
+
+    assert len(batches) == 1
+    assert batches[0][0].image_path.name == "a.tif"
+
+
+def test_validation_requires_split_or_holdout_patterns(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        '{"image": "images/a.tif", "mask": "labels/a.tif", "split": "train"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="validation_split or validation_holdout_patterns"):
+        _load_validation_batches(
+            TrainingConfig(manifest_path=str(manifest_path), validation_every=1)
+        )
 
 
 def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> None:
