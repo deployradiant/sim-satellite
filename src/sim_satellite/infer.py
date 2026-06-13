@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from sim_satellite.data.loader import SatelliteDataset
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.model import ModelConfig, build_model, require_torch
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
@@ -27,11 +26,6 @@ class InferenceConfig:
     mask_path: str | None = None
     device: str = "cpu"
     steps: int = 8
-    image_size: int = 32
-    image_channels: int = 3
-    mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
-    hidden_channels: int = 32
-    timesteps: int = 16
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -47,17 +41,10 @@ class InferenceConfig:
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> InferenceConfig:
         names = {field.name for field in fields(cls)}
+        unknown = sorted(set(values) - names)
+        if unknown:
+            raise ValueError(f"Unknown inference config fields: {', '.join(unknown)}")
         return cls(**{name: values[name] for name in names if name in values})
-
-    def model_config(self) -> ModelConfig:
-        return ModelConfig(
-            image_size=self.image_size,
-            image_channels=self.image_channels,
-            mask_channels=self.mask_channels,
-            hidden_channels=self.hidden_channels,
-            timesteps=self.timesteps,
-            seed=self.seed,
-        )
 
 
 @dataclass(frozen=True)
@@ -93,9 +80,10 @@ def run_inference(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Inference checkpoint not found: {checkpoint_path}")
 
-    model_config = config.model_config()
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model_config = ModelConfig.from_dict(checkpoint.get("model_config", {}))
+    if "model_config" not in checkpoint:
+        raise RuntimeError(f"Inference checkpoint is missing model_config: {checkpoint_path}")
+    model_config = ModelConfig.from_dict(checkpoint["model_config"])
 
     model = build_model(model_config).to(device)
     model.load_state_dict(checkpoint["model_state"])

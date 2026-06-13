@@ -86,8 +86,9 @@ def run_training_target(
     if target != "modal":
         raise ValueError(f"Unsupported training target: {target}")
     require_modal()
+    modal_config = _modal_training_config(config)
     with app.run():
-        return train_remote.remote(_modal_training_config(config))
+        return train_remote.remote(modal_config)
 
 
 def run_inference_target(
@@ -102,14 +103,15 @@ def run_inference_target(
     if target != "modal":
         raise ValueError(f"Unsupported inference target: {target}")
     require_modal()
+    modal_config = _modal_inference_config(config)
     with app.run():
-        return infer_remote.remote(_modal_inference_config(config))
+        return infer_remote.remote(modal_config)
 
 
 def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
     values = config.to_dict()
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
-    values["manifest_path"] = _modal_data_path(config.manifest_path)
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     return values
 
 
@@ -117,9 +119,9 @@ def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
     values = config.to_dict()
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["output_path"] = _modal_artifact_path(config.output_path)
-    values["manifest_path"] = _modal_data_path(config.manifest_path)
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     if config.mask_path is not None:
-        values["mask_path"] = _modal_data_path(config.mask_path)
+        values["mask_path"] = _modal_data_path(config.mask_path, field_name="mask_path")
     return values
 
 
@@ -132,13 +134,32 @@ def _modal_artifact_path(value: str) -> str:
     return str(MODAL_ARTIFACT_ROOT / path)
 
 
-def _modal_data_path(value: str) -> str:
+def _modal_data_path(value: str, *, field_name: str) -> str:
+    relative_path = _local_data_relative_path(value, field_name=field_name)
+    return str(MODAL_DATA_ROOT / relative_path)
+
+
+def _local_data_relative_path(value: str, *, field_name: str) -> Path:
     path = Path(value)
-    if path.is_absolute():
-        return str(path)
-    if path.parts and path.parts[0] == "data":
-        return str(MODAL_DATA_ROOT / _without_first_part(path))
-    return str(path)
+    local_path = path if path.is_absolute() else Path.cwd() / path
+    data_root = LOCAL_DATA_ROOT.resolve()
+    resolved_path = local_path.resolve()
+
+    try:
+        relative_path = resolved_path.relative_to(data_root)
+    except ValueError:
+        raise ValueError(
+            f"Modal {field_name} must be under the local data/ cache: {value!r}. "
+            f"Modal only mounts {LOCAL_DATA_ROOT}/ at {MODAL_DATA_ROOT}."
+        ) from None
+
+    if not resolved_path.exists():
+        raise FileNotFoundError(
+            f"Modal {field_name} not found locally: {value!r}. "
+            f"Modal only mounts existing files from {LOCAL_DATA_ROOT}/ at {MODAL_DATA_ROOT}."
+        )
+
+    return relative_path
 
 
 def _without_first_part(path: Path) -> Path:

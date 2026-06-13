@@ -6,6 +6,7 @@ import json
 import shutil
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,28 +16,27 @@ OPENEARTHMAP_URL = "https://zenodo.org/records/7223446/files/OpenEarthMap.zip?do
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 MASK_SUFFIXES = {".png", ".tif", ".tiff"}
 OPENEARTHMAP_CLASSES = (
-    "unknown",
     "bareland",
-    "grass",
-    "pavement",
+    "rangeland",
+    "developed space",
     "road",
     "tree",
     "water",
-    "cropland",
+    "agriculture land",
     "building",
 )
 OPENEARTHMAP_CLASS_IDS = {name: index for index, name in enumerate(OPENEARTHMAP_CLASSES)}
 OPENEARTHMAP_RGB = {
-    "unknown": (0, 0, 0),
     "bareland": (128, 0, 0),
-    "grass": (0, 255, 36),
-    "pavement": (148, 148, 148),
+    "rangeland": (0, 255, 36),
+    "developed space": (148, 148, 148),
     "road": (255, 255, 255),
     "tree": (34, 97, 38),
     "water": (0, 69, 255),
-    "cropland": (75, 181, 73),
+    "agriculture land": (75, 181, 73),
     "building": (222, 31, 7),
 }
+ProgressReporter = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -67,35 +67,48 @@ def download_and_prepare_openearthmap(
     extract: bool = True,
     force_download: bool = False,
     force_extract: bool = False,
+    progress: ProgressReporter | None = None,
 ) -> OpenEarthMapResult:
     paths = _paths(data_dir)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
+    _report(progress, f"Preparing OpenEarthMap data in {paths.data_dir}")
 
     if download:
-        _download(paths.archive_path, force=force_download)
+        _download(paths.archive_path, force=force_download, progress=progress)
     elif not paths.archive_path.exists() and extract:
         raise FileNotFoundError(f"OpenEarthMap archive not found: {paths.archive_path}")
+    else:
+        _report(progress, "Skipping download")
 
     if extract:
-        _extract(paths.archive_path, paths.extracted_dir, force=force_extract)
+        _extract(paths.archive_path, paths.extracted_dir, force=force_extract, progress=progress)
     elif not paths.extracted_dir.exists():
         raise FileNotFoundError(
             f"OpenEarthMap extracted directory not found: {paths.extracted_dir}"
         )
+    else:
+        _report(progress, f"Skipping extraction; using {paths.extracted_dir}")
 
-    scan = scan_openearthmap(paths.extracted_dir)
+    scan = scan_openearthmap(paths.extracted_dir, progress=progress)
     if scan.image_dirs_without_labels:
         raise RuntimeError(
             "OpenEarthMap scan found image directories without matching labels: "
             f"{scan.image_dirs_without_labels}"
         )
-    if scan.missing_masks:
-        raise RuntimeError(f"OpenEarthMap scan found images without masks: {scan.missing_masks}")
     if not scan.samples:
         raise RuntimeError(f"No OpenEarthMap image/mask pairs found under {paths.extracted_dir}")
 
+    _report(progress, f"Writing manifest to {paths.manifest_path}")
     write_manifest(scan.samples, paths.manifest_path)
+    _report(progress, f"Writing class metadata to {paths.classes_path}")
     write_classes(paths.classes_path)
+    _report(
+        progress,
+        "Done: "
+        f"{len(scan.samples)} samples, "
+        f"{scan.scanned_images} images scanned, "
+        f"{scan.missing_masks} images skipped without masks",
+    )
 
     return OpenEarthMapResult(
         data_dir=paths.data_dir,
@@ -114,17 +127,33 @@ def find_openearthmap_samples(extracted_dir: str | Path) -> list[SatelliteSample
     return list(scan_openearthmap(extracted_dir).samples)
 
 
-def scan_openearthmap(extracted_dir: str | Path) -> OpenEarthMapScan:
+def scan_openearthmap(
+    extracted_dir: str | Path,
+    *,
+    progress: ProgressReporter | None = None,
+) -> OpenEarthMapScan:
     root = Path(extracted_dir)
     pairs: list[SatelliteSample] = []
     scanned_images = 0
     missing_masks = 0
     image_dirs_without_labels = 0
 
-    for image_dir in sorted(path for path in root.rglob("*") if _is_image_dir(path)):
+    _report(progress, f"Finding image directories under {root}")
+    image_dirs = sorted(path for path in root.rglob("*") if _is_image_dir(path))
+    _report(progress, f"Found {len(image_dirs)} image directories")
+
+    for index, image_dir in enumerate(image_dirs, start=1):
         label_dir = _matching_label_dir(image_dir)
         if label_dir is None:
             image_dirs_without_labels += 1
+            if _should_report(index, len(image_dirs)):
+                _report_scan_progress(
+                    progress,
+                    current=index,
+                    total=len(image_dirs),
+                    scanned_images=scanned_images,
+                    pairs=len(pairs),
+                )
             continue
 
         for image_path in sorted(_iter_files(image_dir, IMAGE_SUFFIXES)):
@@ -139,6 +168,14 @@ def scan_openearthmap(extracted_dir: str | Path) -> OpenEarthMapScan:
                     mask_path=mask_path,
                     split=_split_from_path(image_path),
                 )
+            )
+        if _should_report(index, len(image_dirs)):
+            _report_scan_progress(
+                progress,
+                current=index,
+                total=len(image_dirs),
+                scanned_images=scanned_images,
+                pairs=len(pairs),
             )
 
     return OpenEarthMapScan(
@@ -167,37 +204,90 @@ def write_classes(classes_path: str | Path) -> Path:
     return path
 
 
-def _download(archive_path: Path, *, force: bool) -> None:
+def _download(
+    archive_path: Path,
+    *,
+    force: bool,
+    progress: ProgressReporter | None,
+) -> None:
     if archive_path.exists() and not force:
+        _report(progress, f"Using cached archive {archive_path}")
         return
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = archive_path.with_suffix(f"{archive_path.suffix}.part")
+    _report(progress, f"Downloading OpenEarthMap archive to {archive_path}")
 
     with urllib.request.urlopen(OPENEARTHMAP_URL) as response:
+        total_bytes = _content_length(response)
+        downloaded_bytes = 0
+        last_percent = -5
+        last_reported_bytes = 0
         with partial_path.open("wb") as handle:
-            shutil.copyfileobj(response, handle, length=1024 * 1024)
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded_bytes += len(chunk)
+
+                if total_bytes is not None:
+                    percent = downloaded_bytes * 100 // total_bytes
+                    if percent >= last_percent + 5 or downloaded_bytes == total_bytes:
+                        _report(
+                            progress,
+                            "Downloaded "
+                            f"{_format_bytes(downloaded_bytes)} / {_format_bytes(total_bytes)} "
+                            f"({percent}%)",
+                        )
+                        last_percent = percent
+                elif downloaded_bytes - last_reported_bytes >= 256 * 1024 * 1024:
+                    _report(progress, f"Downloaded {_format_bytes(downloaded_bytes)}")
+                    last_reported_bytes = downloaded_bytes
     partial_path.replace(archive_path)
+    _report(progress, f"Download complete: {archive_path}")
 
 
-def _extract(archive_path: Path, extracted_dir: Path, *, force: bool) -> None:
+def _extract(
+    archive_path: Path,
+    extracted_dir: Path,
+    *,
+    force: bool,
+    progress: ProgressReporter | None,
+) -> None:
     if extracted_dir.exists() and any(extracted_dir.iterdir()) and not force:
+        _report(progress, f"Using cached extracted data {extracted_dir}")
         return
     if force and extracted_dir.exists():
+        _report(progress, f"Removing existing extracted data {extracted_dir}")
         shutil.rmtree(extracted_dir)
 
     extracted_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
-        _safe_extract(archive, extracted_dir)
+        _safe_extract(archive, extracted_dir, progress=progress)
 
 
-def _safe_extract(archive: zipfile.ZipFile, extracted_dir: Path) -> None:
+def _safe_extract(
+    archive: zipfile.ZipFile,
+    extracted_dir: Path,
+    *,
+    progress: ProgressReporter | None,
+) -> None:
     destination = extracted_dir.resolve()
-    for member in archive.infolist():
+    members = archive.infolist()
+    _report(progress, f"Extracting {len(members)} archive members to {destination}")
+    for member in members:
         target = (destination / member.filename).resolve()
         if not target.is_relative_to(destination):
             raise RuntimeError(f"Refusing to extract unsafe zip member: {member.filename}")
-    archive.extractall(destination)
+
+    for index, member in enumerate(members, start=1):
+        archive.extract(member, destination)
+        if _should_report(index, len(members)):
+            _report(
+                progress,
+                f"Extracted {index}/{len(members)} members ({_percent(index, len(members))}%)",
+            )
 
 
 def _is_image_dir(path: Path) -> bool:
@@ -223,6 +313,62 @@ def _matching_mask(image_path: Path, image_dir: Path, label_dir: Path) -> Path |
         if candidate.exists():
             return candidate
     return None
+
+
+def _report(progress: ProgressReporter | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def _report_scan_progress(
+    progress: ProgressReporter | None,
+    *,
+    current: int,
+    total: int,
+    scanned_images: int,
+    pairs: int,
+) -> None:
+    _report(
+        progress,
+        "Scanned "
+        f"{current}/{total} image directories "
+        f"({_percent(current, total)}%): "
+        f"{scanned_images} images, {pairs} pairs",
+    )
+
+
+def _content_length(response) -> int | None:
+    value = response.headers.get("Content-Length")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _should_report(current: int, total: int) -> bool:
+    if total <= 0:
+        return False
+    if current == total or total <= 10:
+        return True
+    step = max(1, total // 10)
+    return current % step == 0
+
+
+def _percent(current: int, total: int) -> int:
+    if total <= 0:
+        return 100
+    return current * 100 // total
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{value} B"
+        size /= 1024
+    return f"{value} B"
 
 
 def _split_from_path(path: Path) -> str:
@@ -276,6 +422,7 @@ def _build_click_command():
             extract=not skip_extract,
             force_download=force_download,
             force_extract=force_extract,
+            progress=click.echo,
         )
         click.echo(f"manifest={result.manifest_path}")
         click.echo(f"classes={result.classes_path}")

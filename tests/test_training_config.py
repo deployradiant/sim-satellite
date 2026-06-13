@@ -10,6 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS  # noqa: E402
 from sim_satellite.train import DEFAULT_TARGET, TrainingConfig  # noqa: E402
 
 
@@ -23,22 +24,20 @@ def test_training_config_defaults_are_deterministic() -> None:
     assert config.device == "cpu"
     assert config.manifest_path == "data/openearthmap/manifest.jsonl"
     assert config.checkpoint_path == "artifacts/tiny-sim-satellite.pt"
-    assert config.mask_channels == 9
+    assert config.mask_channels == len(OPENEARTHMAP_CLASS_IDS)
 
 
 def test_training_config_round_trips_known_fields() -> None:
     config = TrainingConfig(steps=3, batch_size=2)
 
     assert TrainingConfig.from_dict(config.to_dict()) == config
-    assert (
-        TrainingConfig.from_dict(
-            {
-                **config.to_dict(),
-                "future_field_from_modal": "ignored",
-            }
-        )
-        == config
-    )
+
+
+def test_training_config_rejects_unknown_fields() -> None:
+    config = TrainingConfig(steps=3, batch_size=2)
+
+    with pytest.raises(ValueError, match="Unknown training config fields: future_field"):
+        TrainingConfig.from_dict({**config.to_dict(), "future_field": "rejected"})
 
 
 def test_training_config_builds_matching_model_config() -> None:

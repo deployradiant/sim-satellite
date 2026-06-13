@@ -56,6 +56,9 @@ class TrainingConfig:
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> TrainingConfig:
         names = {field.name for field in fields(cls)}
+        unknown = sorted(set(values) - names)
+        if unknown:
+            raise ValueError(f"Unknown training config fields: {', '.join(unknown)}")
         return cls(**{name: values[name] for name in names if name in values})
 
     def model_config(self) -> ModelConfig:
