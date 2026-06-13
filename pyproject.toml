@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
     "fastapi>=0.115",
+    "matplotlib>=3.9",
     "modal>=1.0",
     "pillow>=10.0",
     "uvicorn>=0.30",

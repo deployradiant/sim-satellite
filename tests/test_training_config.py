@@ -10,8 +10,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from sim_satellite.data.loader import SatelliteSample  # noqa: E402
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS  # noqa: E402
-from sim_satellite.train import DEFAULT_TARGET, TrainingConfig  # noqa: E402
+from sim_satellite.train import (  # noqa: E402
+    DEFAULT_TARGET,
+    TrainingConfig,
+    _random_square_crop_box,
+)
 
 
 def test_training_config_defaults_are_deterministic() -> None:
@@ -47,7 +52,6 @@ def test_training_config_builds_matching_model_config() -> None:
         image_channels=4,
         mask_channels=3,
         hidden_channels=8,
-        timesteps=5,
     )
 
     model_config = config.model_config()
@@ -57,7 +61,6 @@ def test_training_config_builds_matching_model_config() -> None:
     assert model_config.image_channels == config.image_channels
     assert model_config.mask_channels == config.mask_channels
     assert model_config.hidden_channels == config.hidden_channels
-    assert model_config.timesteps == config.timesteps
 
 
 def test_training_config_rejects_invalid_values() -> None:
@@ -67,3 +70,51 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(batch_size=0)
     with pytest.raises(ValueError):
         TrainingConfig(learning_rate=0.0)
+
+
+def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> None:
+    from PIL import Image
+
+    image_path = tmp_path / "image.png"
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (10, 8)).save(image_path)
+    Image.new("L", (10, 8)).save(mask_path)
+    sample = SatelliteSample(image_path=image_path, mask_path=mask_path, split="train")
+
+    crop_box = _random_square_crop_box(
+        sample,
+        crop_size=4,
+        torch=_FakeTorch([3, 2]),
+        generator=object(),
+    )
+
+    assert crop_box == (3, 2, 7, 6)
+
+
+class _FakeTorch:
+    def __init__(self, values: list[int]) -> None:
+        self.values = values
+
+    def randint(
+        self,
+        low: int,
+        high: int,
+        shape: tuple[int],
+        *,
+        generator: object,
+        device: str,
+    ) -> _FakeTensor:
+        assert low == 0
+        assert shape == (1,)
+        assert device == "cpu"
+        value = self.values.pop(0)
+        assert value < high
+        return _FakeTensor(value)
+
+
+class _FakeTensor:
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+    def item(self) -> int:
+        return self.value

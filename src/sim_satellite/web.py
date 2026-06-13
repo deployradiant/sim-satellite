@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
-from PIL import Image
-from pydantic import BaseModel
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.tensors import mask_to_class_ids
-from sim_satellite.infer import InferenceConfig, generate_image
+from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator
 from sim_satellite.model import ModelConfig
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
@@ -28,6 +30,8 @@ DEFAULT_MAX_SAMPLES = 32
 DEFAULT_WEB_CHECKPOINT_PATH = "artifacts/tiny-sim-satellite-modal.pt"
 STATIC_DIR = Path(__file__).with_name("web_static")
 INDEX_PATH = STATIC_DIR / "index.html"
+MASK_COLORS = tuple(OPENEARTHMAP_RGB[name] for name in OPENEARTHMAP_CLASSES)
+MASK_COLOR_IDS = {color: index for index, color in enumerate(MASK_COLORS)}
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class WebConfig:
     split: str = "train"
     device: str = "cpu"
     steps: int = 8
+    guidance_scale: float = 1.0
     seed: int = 1337
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
@@ -46,6 +51,8 @@ class WebConfig:
     def __post_init__(self) -> None:
         if self.steps < 1:
             raise ValueError("steps must be positive")
+        if self.guidance_scale < 0.0:
+            raise ValueError("guidance_scale must be non-negative")
         if self.port < 1:
             raise ValueError("port must be positive")
         if self.max_samples < 1:
@@ -58,11 +65,14 @@ class GenerateRequest(BaseModel):
     index: int = 0
     seed: int | None = None
     steps: int | None = None
+    mask_image: str | None = Field(default=None, alias="maskImage")
 
 
 def create_app(config: WebConfig | None = None) -> FastAPI:
     config = config or WebConfig()
+    _validate_checkpoint_path(config)
     samples = _load_samples(config)
+    loaded_generator = load_generator(config.checkpoint_path, device=config.device)
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
 
     @app.get("/", include_in_schema=False)
@@ -89,21 +99,27 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         if steps < 1:
             raise HTTPException(status_code=400, detail="steps must be positive")
 
+        mask_path = sample.mask_path
+        temporary_mask_path: Path | None = None
+        if payload.mask_image is not None:
+            temporary_mask_path = _write_request_mask(payload.mask_image, config)
+            mask_path = temporary_mask_path
+
         try:
-            generated = generate_image(
-                InferenceConfig(
+            generated = generate_image_with_model(
+                loaded_generator,
+                GenerationConfig(
                     seed=seed,
                     checkpoint_path=config.checkpoint_path,
-                    output_path="artifacts/web-sample.pt",
-                    manifest_path=config.manifest_path,
-                    split=config.split,
-                    mask_path=str(sample.mask_path),
+                    mask_path=str(mask_path),
                     device=config.device,
                     steps=steps,
+                    guidance_scale=config.guidance_scale,
                 )
             )
-        except (FileNotFoundError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            if temporary_mask_path is not None:
+                temporary_mask_path.unlink(missing_ok=True)
 
         png = _image_tensor_png(generated.image, config.display_size)
         return {
@@ -111,6 +127,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
             "sample": _sample_payload(payload.index, sample),
             "seed": seed,
             "steps": steps,
+            "maskEdited": payload.mask_image is not None,
         }
 
     return app
@@ -121,6 +138,15 @@ def serve(config: WebConfig | None = None) -> None:
     import uvicorn
 
     uvicorn.run(create_app(config), host=config.host, port=config.port)
+
+
+def _validate_checkpoint_path(config: WebConfig) -> None:
+    checkpoint_path = Path(config.checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Web app checkpoint not found: {checkpoint_path}. "
+            "Train a model or pass --checkpoint-path."
+        )
 
 
 def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
@@ -136,7 +162,11 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
     samples = tuple(SatelliteDataset(manifest_path, split=config.split))
     if not samples:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
-    return samples[: config.max_samples]
+    samples = samples[: config.max_samples]
+    missing_masks = [sample.mask_path for sample in samples if not sample.mask_path.exists()]
+    if missing_masks:
+        raise FileNotFoundError(f"Web app mask not found: {missing_masks[0]}")
+    return samples
 
 
 def _state_payload(config: WebConfig, samples: Sequence[SatelliteSample]) -> dict[str, Any]:
@@ -146,6 +176,7 @@ def _state_payload(config: WebConfig, samples: Sequence[SatelliteSample]) -> dic
         "split": config.split,
         "device": config.device,
         "steps": config.steps,
+        "guidanceScale": config.guidance_scale,
         "seed": config.seed,
         "samples": [_sample_payload(index, sample) for index, sample in enumerate(samples)],
         "classes": [
@@ -186,9 +217,77 @@ def _mask_preview_png(mask_path: Path, config: WebConfig) -> bytes:
         labels = mask_to_class_ids(resized, model_config)
 
     image = Image.new("RGB", (config.display_size, config.display_size))
-    colors = [OPENEARTHMAP_RGB[name] for name in OPENEARTHMAP_CLASSES]
-    image.putdata([colors[label] for label in labels])
+    image.putdata([MASK_COLORS[label] for label in labels])
     return _pil_png(image)
+
+
+def _write_request_mask(mask_image: str, config: WebConfig) -> Path:
+    labels = _request_mask_labels(mask_image, config)
+    with NamedTemporaryFile(
+        prefix="sim-satellite-mask-",
+        suffix=".png",
+        delete=False,
+    ) as handle:
+        path = Path(handle.name)
+    try:
+        labels.save(path)
+    finally:
+        labels.close()
+    return path
+
+
+def _request_mask_labels(mask_image: str, config: WebConfig) -> Image.Image:
+    image = _decode_mask_data_uri(mask_image)
+    try:
+        if image.width < 1 or image.height < 1:
+            raise HTTPException(status_code=400, detail="mask image must not be empty")
+        if image.width > config.display_size * 4 or image.height > config.display_size * 4:
+            raise HTTPException(status_code=400, detail="mask image is too large")
+
+        class_ids = [_nearest_class_id(pixel) for pixel in _image_data(image)]
+        labels = Image.new("L", image.size)
+        labels.putdata(class_ids)
+        return labels
+    finally:
+        image.close()
+
+
+def _decode_mask_data_uri(mask_image: str) -> Image.Image:
+    prefix = "data:image/png;base64,"
+    if not mask_image.startswith(prefix):
+        raise HTTPException(status_code=400, detail="maskImage must be a PNG data URI")
+
+    try:
+        body = base64.b64decode(mask_image[len(prefix) :], validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=400, detail="maskImage is not valid base64") from exc
+
+    try:
+        with Image.open(BytesIO(body)) as image:
+            return image.convert("RGB")
+    except (OSError, UnidentifiedImageError) as exc:
+        raise HTTPException(status_code=400, detail="maskImage is not a valid PNG") from exc
+
+
+def _nearest_class_id(pixel: tuple[int, int, int]) -> int:
+    exact_match = MASK_COLOR_IDS.get(pixel)
+    if exact_match is not None:
+        return exact_match
+    return min(
+        range(len(MASK_COLORS)),
+        key=lambda index: _rgb_distance(pixel, MASK_COLORS[index]),
+    )
+
+
+def _rgb_distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> int:
+    return sum((left[index] - right[index]) ** 2 for index in range(3))
+
+
+def _image_data(image: Image.Image) -> Any:
+    get_flattened_data = getattr(image, "get_flattened_data", None)
+    if get_flattened_data is not None:
+        return get_flattened_data()
+    return image.getdata()
 
 
 def _image_tensor_png(image: Any, display_size: int) -> bytes:
@@ -226,6 +325,7 @@ def _build_click_command() -> Any:
     @click.option("--split", default=WebConfig.split, show_default=True)
     @click.option("--device", default=WebConfig.device, show_default=True)
     @click.option("--steps", default=WebConfig.steps, show_default=True)
+    @click.option("--guidance-scale", default=WebConfig.guidance_scale, show_default=True)
     @click.option("--seed", default=WebConfig.seed, show_default=True)
     @click.option("--host", default=WebConfig.host, show_default=True)
     @click.option("--port", default=WebConfig.port, show_default=True, type=int)
@@ -236,6 +336,7 @@ def _build_click_command() -> Any:
         split: str,
         device: str,
         steps: int,
+        guidance_scale: float,
         seed: int,
         host: str,
         port: int,
@@ -248,6 +349,7 @@ def _build_click_command() -> Any:
                 split=split,
                 device=device,
                 steps=steps,
+                guidance_scale=guidance_scale,
                 seed=seed,
                 host=host,
                 port=port,

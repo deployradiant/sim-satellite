@@ -28,7 +28,8 @@ ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
 LOCAL_DATA_ROOT = Path("data")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
-MODAL_GPU = "T4"
+MODAL_GPU = "A10G"
+DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
 
 
 def _ignore_modal_data_path(path: Path) -> bool:
@@ -38,10 +39,10 @@ def _ignore_modal_data_path(path: Path) -> bool:
 app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("click", "pillow", "torch")
+    .pip_install("click", "matplotlib", "pillow", "torch")
     .add_local_python_source("sim_satellite")
 )
-if LOCAL_DATA_ROOT.exists():
+if DATA_MOUNT_CONFIGURED:
     image = image.add_local_dir(
         LOCAL_DATA_ROOT,
         str(MODAL_DATA_ROOT),
@@ -54,7 +55,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
 
 @app.function(
     image=image,
-    timeout=900,
+    timeout=3600,
     gpu=MODAL_GPU,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
@@ -67,7 +68,7 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
-    timeout=300,
+    timeout=900,
     gpu=MODAL_GPU,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
@@ -91,8 +92,9 @@ def run_training_target(
     if target != "modal":
         raise ValueError(f"Unsupported training target: {target}")
     modal_config = _modal_training_config(config)
-    with app.run():
-        return train_remote.remote(modal_config)
+    with modal.enable_output():
+        with app.run():
+            return train_remote.remote(modal_config)
 
 
 def run_inference_target(
@@ -107,47 +109,65 @@ def run_inference_target(
     if target != "modal":
         raise ValueError(f"Unsupported inference target: {target}")
     modal_config = _modal_inference_config(config)
-    with app.run():
-        return infer_remote.remote(modal_config)
+    with modal.enable_output():
+        with app.run():
+            return infer_remote.remote(modal_config)
 
 
 def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
     values = config.to_dict()
-    values["device"] = _modal_device(config.device)
+    values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    if config.metrics_path:
+        values["metrics_path"] = _modal_artifact_path(config.metrics_path)
+    if config.loss_plot_path:
+        values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
     return values
 
 
 def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
     values = config.to_dict()
-    values["device"] = _modal_device(config.device)
+    values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["output_path"] = _modal_artifact_path(config.output_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
-    if config.mask_path is not None:
-        values["mask_path"] = _modal_data_path(config.mask_path, field_name="mask_path")
+    if config.mask_path is None:
+        raise ValueError("Modal mask_path is required for inference")
+    values["mask_path"] = _modal_data_path(config.mask_path, field_name="mask_path")
     return values
 
 
 def _modal_artifact_path(value: str) -> str:
     path = Path(value)
     if path.is_absolute():
+        try:
+            relative_path = path.relative_to(MODAL_ARTIFACT_ROOT)
+        except ValueError:
+            raise ValueError(
+                f"Modal artifact paths must be relative or under {MODAL_ARTIFACT_ROOT}: {value!r}"
+            ) from None
+        if ".." in relative_path.parts:
+            raise ValueError(
+                f"Modal artifact paths must stay under {MODAL_ARTIFACT_ROOT}: {value!r}"
+            )
         return str(path)
     if path.parts and path.parts[0] == "artifacts":
-        path = _without_first_part(path)
+        path = path.relative_to("artifacts")
+    if ".." in path.parts:
+        raise ValueError(f"Modal artifact paths must stay under {MODAL_ARTIFACT_ROOT}: {value!r}")
     return str(MODAL_ARTIFACT_ROOT / path)
 
 
 def _modal_data_path(value: str, *, field_name: str) -> str:
+    if not DATA_MOUNT_CONFIGURED:
+        raise RuntimeError(
+            f"Modal {field_name} cannot be used because {LOCAL_DATA_ROOT}/ did not exist when "
+            "sim_satellite.modal_app was imported, so it was not mounted into the Modal image. "
+            "Run `sim-satellite openearthmap` before starting Modal training or inference."
+        )
     relative_path = _local_data_relative_path(value, field_name=field_name)
     return str(MODAL_DATA_ROOT / relative_path)
-
-
-def _modal_device(device: str) -> str:
-    if device == "cpu":
-        return "cuda"
-    return device
 
 
 def _local_data_relative_path(value: str, *, field_name: str) -> Path:
@@ -171,9 +191,3 @@ def _local_data_relative_path(value: str, *, field_name: str) -> Path:
         )
 
     return relative_path
-
-
-def _without_first_part(path: Path) -> Path:
-    if len(path.parts) == 1:
-        return Path()
-    return Path(*path.parts[1:])

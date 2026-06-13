@@ -26,10 +26,13 @@ class InferenceConfig:
     mask_path: str | None = None
     device: str = "cpu"
     steps: int = 8
+    guidance_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
             raise ValueError("steps must be positive")
+        if self.guidance_scale < 0.0:
+            raise ValueError("guidance_scale must be non-negative")
         if not self.checkpoint_path:
             raise ValueError("checkpoint_path is required")
         if not self.output_path:
@@ -44,6 +47,37 @@ class InferenceConfig:
         unknown = sorted(set(values) - names)
         if unknown:
             raise ValueError(f"Unknown inference config fields: {', '.join(unknown)}")
+        return cls(**{name: values[name] for name in names if name in values})
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    seed: int = 1337
+    checkpoint_path: str = "artifacts/tiny-sim-satellite.pt"
+    mask_path: str = ""
+    device: str = "cpu"
+    steps: int = 8
+    guidance_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError("steps must be positive")
+        if self.guidance_scale < 0.0:
+            raise ValueError("guidance_scale must be non-negative")
+        if not self.checkpoint_path:
+            raise ValueError("checkpoint_path is required")
+        if not self.mask_path:
+            raise ValueError("mask_path is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> GenerationConfig:
+        names = {field.name for field in fields(cls)}
+        unknown = sorted(set(values) - names)
+        if unknown:
+            raise ValueError(f"Unknown generation config fields: {', '.join(unknown)}")
         return cls(**{name: values[name] for name in names if name in values})
 
 
@@ -65,7 +99,16 @@ class GenerationResult:
     model_config: ModelConfig
     checkpoint_path: Path
     mask_path: Path
-    config: InferenceConfig
+    config: GenerationConfig
+
+
+@dataclass(frozen=True)
+class LoadedGenerator:
+    torch: Any
+    model: Any
+    model_config: ModelConfig
+    checkpoint_path: Path
+    device: Any
 
 
 def coerce_inference_config(
@@ -78,20 +121,41 @@ def coerce_inference_config(
     return InferenceConfig.from_dict(config)
 
 
+def coerce_generation_config(
+    config: GenerationConfig | Mapping[str, Any],
+) -> GenerationConfig:
+    if isinstance(config, GenerationConfig):
+        return config
+    return GenerationConfig.from_dict(config)
+
+
 def run_inference(
     config: InferenceConfig | Mapping[str, Any] | None = None,
 ) -> InferenceResult:
-    generation = generate_image(config)
+    config = coerce_inference_config(config)
+    mask_path = _required_mask_path(config.mask_path)
+    loaded_generator = load_generator(config.checkpoint_path, device=config.device)
+    generation = generate_image_with_model(
+        loaded_generator,
+        GenerationConfig(
+            seed=config.seed,
+            checkpoint_path=config.checkpoint_path,
+            mask_path=mask_path,
+            device=config.device,
+            steps=config.steps,
+            guidance_scale=config.guidance_scale,
+        )
+    )
     torch, _ = require_torch()
 
-    output_path = Path(generation.config.output_path)
+    output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "image": generation.image.detach().cpu(),
             "semantic_mask": generation.semantic_mask.detach().cpu(),
             "model_config": generation.model_config.to_dict(),
-            "inference_config": generation.config.to_dict(),
+            "inference_config": config.to_dict(),
         },
         output_path,
     )
@@ -104,69 +168,139 @@ def run_inference(
     )
 
 
-def generate_image(config: InferenceConfig | Mapping[str, Any] | None = None) -> GenerationResult:
-    config = coerce_inference_config(config)
+def generate_image(config: GenerationConfig | Mapping[str, Any]) -> GenerationResult:
+    config = coerce_generation_config(config)
+    loaded_generator = load_generator(config.checkpoint_path, device=config.device)
+    return generate_image_with_model(loaded_generator, config)
+
+
+def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerator:
     torch, _ = require_torch()
 
-    torch.manual_seed(config.seed)
-    device = torch.device(config.device)
-    checkpoint_path = Path(config.checkpoint_path)
+    torch_device = torch.device(device)
+    checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Inference checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    if "model_config" not in checkpoint:
-        raise RuntimeError(f"Inference checkpoint is missing model_config: {checkpoint_path}")
+    checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
 
-    model = build_model(model_config).to(device)
+    model = build_model(model_config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
+    return LoadedGenerator(
+        torch=torch,
+        model=model,
+        model_config=model_config,
+        checkpoint_path=checkpoint_path,
+        device=torch_device,
+    )
 
+
+def generate_image_with_model(
+    loaded_generator: LoadedGenerator,
+    config: GenerationConfig | Mapping[str, Any],
+) -> GenerationResult:
+    config = coerce_generation_config(config)
+    torch = loaded_generator.torch
+    model = loaded_generator.model
+    model_config = loaded_generator.model_config
+    device = loaded_generator.device
+
+    torch.manual_seed(config.seed)
     generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    image = torch.rand(
-        (
-            1,
-            model_config.image_channels,
-            model_config.image_size,
-            model_config.image_size,
-        ),
-        generator=generator,
-        device="cpu",
-    ).to(device)
-    mask_path = _resolve_mask_path(config)
+    image_shape = (
+        1,
+        model_config.image_channels,
+        model_config.image_size,
+        model_config.image_size,
+    )
+    image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
+    mask_path = _resolve_mask_path(config.mask_path)
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
 
     with torch.no_grad():
-        for step in reversed(range(config.steps)):
+        for step in reversed(range(1, config.steps + 1)):
             timestep = torch.full(
                 (1,),
-                step % model_config.timesteps,
-                dtype=torch.long,
+                step / float(config.steps),
+                dtype=torch.float32,
                 device=device,
             )
-            predicted_noise = model(image, semantic_mask, timestep)
-            image = (image - predicted_noise / float(config.steps)).clamp(0.0, 1.0)
+            velocity = _guided_prediction(
+                model,
+                image,
+                semantic_mask,
+                timestep,
+                guidance_scale=config.guidance_scale,
+                torch=torch,
+            )
+            image = image - velocity / float(config.steps)
+        image = image.clamp(0.0, 1.0)
 
     return GenerationResult(
         image=image,
         semantic_mask=semantic_mask,
         model_config=model_config,
-        checkpoint_path=checkpoint_path,
+        checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
         config=config,
     )
 
 
-def _resolve_mask_path(config: InferenceConfig) -> Path:
-    if config.mask_path is not None:
-        path = Path(config.mask_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Inference mask not found: {path}")
-        return path
+def _guided_prediction(
+    model: Any,
+    image: Any,
+    semantic_mask: Any,
+    timestep: Any,
+    *,
+    guidance_scale: float,
+    torch: Any,
+) -> Any:
+    conditional = model(image, semantic_mask, timestep)
+    if guidance_scale == 1.0:
+        return conditional
 
+    empty_mask = torch.zeros_like(semantic_mask)
+    unconditional = model(image, empty_mask, timestep)
+    return unconditional + guidance_scale * (conditional - unconditional)
+
+
+def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(checkpoint, Mapping):
+        raise RuntimeError(f"Inference checkpoint must be a mapping: {checkpoint_path}")
+
+    missing = [key for key in ("model_config", "model_state") if key not in checkpoint]
+    if missing:
+        raise RuntimeError(
+            f"Inference checkpoint is missing {', '.join(missing)}: {checkpoint_path}"
+        )
+    if not isinstance(checkpoint["model_config"], Mapping):
+        raise RuntimeError(
+            f"Inference checkpoint model_config must be a mapping: {checkpoint_path}"
+        )
+    if not isinstance(checkpoint["model_state"], Mapping):
+        raise RuntimeError(f"Inference checkpoint model_state must be a mapping: {checkpoint_path}")
+    return checkpoint
+
+
+def _required_mask_path(mask_path: str | None) -> str:
+    if not mask_path:
+        raise ValueError("mask_path is required for inference")
+    return mask_path
+
+
+def _resolve_mask_path(value: str) -> Path:
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(f"Inference mask not found: {path}")
+    return path
+
+
+def _default_mask_path(config: InferenceConfig) -> Path:
     manifest_path = Path(config.manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(
@@ -179,7 +313,19 @@ def _resolve_mask_path(config: InferenceConfig) -> Path:
     return dataset[0].mask_path
 
 
+def _with_cli_mask_path(config: InferenceConfig) -> InferenceConfig:
+    if config.mask_path is not None:
+        return config
+    return InferenceConfig(
+        **{
+            **config.to_dict(),
+            "mask_path": str(_default_mask_path(config)),
+        }
+    )
+
+
 def _run_with_target(config: InferenceConfig, target: str) -> dict[str, Any]:
+    config = _with_cli_mask_path(config)
     if target == "local":
         result = run_inference(config).to_dict()
         result["execution_target"] = "local"
@@ -215,6 +361,7 @@ def _build_click_command() -> Any:
     @click.option("--device", default=InferenceConfig.device, show_default=True)
     @click.option("--steps", default=InferenceConfig.steps, show_default=True)
     @click.option("--seed", default=InferenceConfig.seed, show_default=True)
+    @click.option("--guidance-scale", default=InferenceConfig.guidance_scale, show_default=True)
     def command(
         target: str,
         checkpoint_path: str,
@@ -225,6 +372,7 @@ def _build_click_command() -> Any:
         device: str,
         steps: int,
         seed: int,
+        guidance_scale: float,
     ) -> None:
         config = InferenceConfig(
             seed=seed,
@@ -235,6 +383,7 @@ def _build_click_command() -> Any:
             mask_path=mask_path,
             device=device,
             steps=steps,
+            guidance_scale=guidance_scale,
         )
         click.echo(json.dumps(_run_with_target(config, target), indent=2))
 

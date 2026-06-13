@@ -15,15 +15,31 @@ _RGB_MASK_MODES = {"RGB", "RGBA", "P"}
 _GRAYSCALE_CLASS_ID_MODES = {"1", "L", "I", "I;16", "I;16B", "I;16L"}
 
 
-def load_image_tensor(path: Path, *, torch: Any, config: ModelConfig) -> Any:
+def load_image_tensor(
+    path: Path,
+    *,
+    torch: Any,
+    config: ModelConfig,
+    crop_box: tuple[int, int, int, int] | None = None,
+) -> Any:
     image = Image.open(path).convert("RGB")
+    if crop_box is not None:
+        image = image.crop(crop_box)
     image = image.resize((config.image_size, config.image_size), Image.Resampling.BILINEAR)
     values = torch.tensor(list(_image_data(image)), dtype=torch.float32)
     return values.view(config.image_size, config.image_size, 3).permute(2, 0, 1) / 255.0
 
 
-def load_mask_tensor(path: Path, *, torch: Any, config: ModelConfig) -> Any:
+def load_mask_tensor(
+    path: Path,
+    *,
+    torch: Any,
+    config: ModelConfig,
+    crop_box: tuple[int, int, int, int] | None = None,
+) -> Any:
     mask = Image.open(path)
+    if crop_box is not None:
+        mask = mask.crop(crop_box)
     mask = mask.resize((config.image_size, config.image_size), Image.Resampling.NEAREST)
     labels = torch.tensor(mask_to_class_ids(mask, config), dtype=torch.long)
     labels = labels.view(config.image_size, config.image_size)
