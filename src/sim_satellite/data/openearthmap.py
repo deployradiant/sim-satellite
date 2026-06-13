@@ -95,6 +95,8 @@ def download_and_prepare_openearthmap(
             "OpenEarthMap scan found image directories without matching labels: "
             f"{scan.image_dirs_without_labels}"
         )
+    if scan.missing_masks:
+        raise RuntimeError(f"OpenEarthMap scan found images without masks: {scan.missing_masks}")
     if not scan.samples:
         raise RuntimeError(f"No OpenEarthMap image/mask pairs found under {paths.extracted_dir}")
 
@@ -107,7 +109,7 @@ def download_and_prepare_openearthmap(
         "Done: "
         f"{len(scan.samples)} samples, "
         f"{scan.scanned_images} images scanned, "
-        f"{scan.missing_masks} images skipped without masks",
+        f"{scan.missing_masks} missing masks",
     )
 
     return OpenEarthMapResult(

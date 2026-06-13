@@ -112,7 +112,7 @@ def test_scan_openearthmap_reports_missing_masks(tmp_path: Path) -> None:
     assert scan.samples == ()
 
 
-def test_prepare_openearthmap_skips_missing_masks(tmp_path: Path) -> None:
+def test_prepare_openearthmap_rejects_missing_masks(tmp_path: Path) -> None:
     data_dir = tmp_path / "openearthmap"
     image_dir = data_dir / "extracted" / "train" / "images"
     label_dir = data_dir / "extracted" / "train" / "labels"
@@ -120,18 +120,13 @@ def test_prepare_openearthmap_skips_missing_masks(tmp_path: Path) -> None:
     _touch(label_dir / "paired.png")
     _touch(image_dir / "unlabeled.png")
 
-    result = download_and_prepare_openearthmap(data_dir, download=False, extract=False)
-    samples = read_manifest(result.manifest_path)
-
-    assert result.scanned_images == 2
-    assert result.missing_masks == 1
-    assert result.samples == 1
-    assert [sample.image_path.name for sample in samples] == ["paired.png"]
+    with pytest.raises(RuntimeError, match="images without masks: 1"):
+        download_and_prepare_openearthmap(data_dir, download=False, extract=False)
 
 
 def test_prepare_openearthmap_rejects_when_no_pairs_are_found(tmp_path: Path) -> None:
     data_dir = tmp_path / "openearthmap"
-    _touch(data_dir / "extracted" / "train" / "images" / "tile.png")
+    (data_dir / "extracted" / "train" / "images").mkdir(parents=True)
     (data_dir / "extracted" / "train" / "labels").mkdir(parents=True)
 
     with pytest.raises(RuntimeError, match="No OpenEarthMap image/mask pairs"):
