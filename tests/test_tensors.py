@@ -15,6 +15,7 @@ from sim_satellite.data.tensors import _mask_to_class_ids  # noqa: E402
 from sim_satellite.model import ModelConfig  # noqa: E402
 
 OPENEARTHMAP_CLASSES = (
+    "unlabeled",
     "bareland",
     "rangeland",
     "developed space",
@@ -25,6 +26,7 @@ OPENEARTHMAP_CLASSES = (
     "building",
 )
 OPENEARTHMAP_RGB = {
+    "unlabeled": (0, 0, 0),
     "bareland": (128, 0, 0),
     "rangeland": (0, 255, 36),
     "developed space": (148, 148, 148),
@@ -69,21 +71,21 @@ def test_rgb_mask_rejects_unmapped_color() -> None:
 def test_rgb_mask_rejects_class_outside_mask_channels() -> None:
     mask = Image.new("RGB", (1, 1), OPENEARTHMAP_RGB["building"])
 
-    with pytest.raises(ValueError, match="maps to class 7"):
-        _mask_to_class_ids(mask, ModelConfig(mask_channels=7))
+    with pytest.raises(ValueError, match="maps to class 8"):
+        _mask_to_class_ids(mask, ModelConfig(mask_channels=8))
 
 
 def test_grayscale_mask_decodes_class_ids_without_clamping() -> None:
     mask = Image.new("L", (2, 1))
-    mask.putdata([0, 7])
+    mask.putdata([0, 8])
 
-    class_ids = _mask_to_class_ids(mask, ModelConfig(mask_channels=8))
+    class_ids = _mask_to_class_ids(mask, ModelConfig(mask_channels=9))
 
-    assert class_ids == [0, 7]
+    assert class_ids == [0, 8]
 
 
 def test_grayscale_mask_rejects_class_id_outside_mask_channels() -> None:
-    mask = Image.new("L", (1, 1), 8)
+    mask = Image.new("L", (1, 1), 9)
 
-    with pytest.raises(ValueError, match="class id 8"):
-        _mask_to_class_ids(mask, ModelConfig(mask_channels=8))
+    with pytest.raises(ValueError, match="class id 9"):
+        _mask_to_class_ids(mask, ModelConfig(mask_channels=9))

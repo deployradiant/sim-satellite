@@ -21,6 +21,7 @@ from sim_satellite.data.openearthmap import (  # noqa: E402
 )
 
 EXPECTED_OPENEARTHMAP_CLASSES = (
+    "unlabeled",
     "bareland",
     "rangeland",
     "developed space",
@@ -31,6 +32,7 @@ EXPECTED_OPENEARTHMAP_CLASSES = (
     "building",
 )
 EXPECTED_OPENEARTHMAP_RGB = {
+    "unlabeled": (0, 0, 0),
     "bareland": (128, 0, 0),
     "rangeland": (0, 255, 36),
     "developed space": (148, 148, 148),
@@ -112,7 +114,7 @@ def test_scan_openearthmap_reports_missing_masks(tmp_path: Path) -> None:
     assert scan.samples == ()
 
 
-def test_prepare_openearthmap_rejects_missing_masks(tmp_path: Path) -> None:
+def test_prepare_openearthmap_reports_and_skips_missing_masks(tmp_path: Path) -> None:
     data_dir = tmp_path / "openearthmap"
     image_dir = data_dir / "extracted" / "train" / "images"
     label_dir = data_dir / "extracted" / "train" / "labels"
@@ -120,8 +122,13 @@ def test_prepare_openearthmap_rejects_missing_masks(tmp_path: Path) -> None:
     _touch(label_dir / "paired.png")
     _touch(image_dir / "unlabeled.png")
 
-    with pytest.raises(RuntimeError, match="images without masks: 1"):
-        download_and_prepare_openearthmap(data_dir, download=False, extract=False)
+    result = download_and_prepare_openearthmap(data_dir, download=False, extract=False)
+    samples = read_manifest(result.manifest_path)
+
+    assert result.scanned_images == 2
+    assert result.missing_masks == 1
+    assert result.samples == 1
+    assert [sample.image_path.name for sample in samples] == ["paired.png"]
 
 
 def test_prepare_openearthmap_rejects_when_no_pairs_are_found(tmp_path: Path) -> None:

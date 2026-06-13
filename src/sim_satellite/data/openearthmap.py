@@ -16,6 +16,7 @@ OPENEARTHMAP_URL = "https://zenodo.org/records/7223446/files/OpenEarthMap.zip?do
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 MASK_SUFFIXES = {".png", ".tif", ".tiff"}
 OPENEARTHMAP_CLASSES = (
+    "unlabeled",
     "bareland",
     "rangeland",
     "developed space",
@@ -27,6 +28,7 @@ OPENEARTHMAP_CLASSES = (
 )
 OPENEARTHMAP_CLASS_IDS = {name: index for index, name in enumerate(OPENEARTHMAP_CLASSES)}
 OPENEARTHMAP_RGB = {
+    "unlabeled": (0, 0, 0),
     "bareland": (128, 0, 0),
     "rangeland": (0, 255, 36),
     "developed space": (148, 148, 148),
@@ -95,8 +97,6 @@ def download_and_prepare_openearthmap(
             "OpenEarthMap scan found image directories without matching labels: "
             f"{scan.image_dirs_without_labels}"
         )
-    if scan.missing_masks:
-        raise RuntimeError(f"OpenEarthMap scan found images without masks: {scan.missing_masks}")
     if not scan.samples:
         raise RuntimeError(f"No OpenEarthMap image/mask pairs found under {paths.extracted_dir}")
 
@@ -109,7 +109,7 @@ def download_and_prepare_openearthmap(
         "Done: "
         f"{len(scan.samples)} samples, "
         f"{scan.scanned_images} images scanned, "
-        f"{scan.missing_masks} missing masks",
+        f"{scan.missing_masks} images skipped without masks",
     )
 
     return OpenEarthMapResult(
