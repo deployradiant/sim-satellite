@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 local = [
+    "numpy>=2.0",
     "torch>=2.3",
 ]
 

@@ -23,19 +23,15 @@ def _add_optional_command(command: Any) -> None:
         cli.add_command(command)
 
 
-@cli.command()
-def app() -> None:
-    """Launch the drawing and generation app."""
-    click.echo("Web app workflow placeholder.")
-
-
 from sim_satellite.data.openearthmap import cli as openearthmap_cli  # noqa: E402
 from sim_satellite.infer import cli as infer_cli  # noqa: E402
 from sim_satellite.train import cli as train_cli  # noqa: E402
+from sim_satellite.web import cli as web_cli  # noqa: E402
 
 data.add_command(openearthmap_cli)
 _add_optional_command(train_cli)
 _add_optional_command(infer_cli)
+_add_optional_command(web_cli)
 
 
 if __name__ == "__main__":

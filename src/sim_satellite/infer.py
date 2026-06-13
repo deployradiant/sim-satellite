@@ -58,6 +58,16 @@ class InferenceResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class GenerationResult:
+    image: Any
+    semantic_mask: Any
+    model_config: ModelConfig
+    checkpoint_path: Path
+    mask_path: Path
+    config: InferenceConfig
+
+
 def coerce_inference_config(
     config: InferenceConfig | Mapping[str, Any] | None,
 ) -> InferenceConfig:
@@ -71,6 +81,30 @@ def coerce_inference_config(
 def run_inference(
     config: InferenceConfig | Mapping[str, Any] | None = None,
 ) -> InferenceResult:
+    generation = generate_image(config)
+    torch, _ = require_torch()
+
+    output_path = Path(generation.config.output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "image": generation.image.detach().cpu(),
+            "semantic_mask": generation.semantic_mask.detach().cpu(),
+            "model_config": generation.model_config.to_dict(),
+            "inference_config": generation.config.to_dict(),
+        },
+        output_path,
+    )
+
+    return InferenceResult(
+        output_path=str(output_path),
+        checkpoint_path=str(generation.checkpoint_path),
+        mask_path=str(generation.mask_path),
+        device=str(generation.image.device),
+    )
+
+
+def generate_image(config: InferenceConfig | Mapping[str, Any] | None = None) -> GenerationResult:
     config = coerce_inference_config(config)
     torch, _ = require_torch()
 
@@ -116,23 +150,13 @@ def run_inference(
             predicted_noise = model(image, semantic_mask, timestep)
             image = (image - predicted_noise / float(config.steps)).clamp(0.0, 1.0)
 
-    output_path = Path(config.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "image": image.detach().cpu(),
-            "semantic_mask": semantic_mask.detach().cpu(),
-            "model_config": model_config.to_dict(),
-            "inference_config": config.to_dict(),
-        },
-        output_path,
-    )
-
-    return InferenceResult(
-        output_path=str(output_path),
-        checkpoint_path=str(checkpoint_path),
-        mask_path=str(mask_path),
-        device=str(device),
+    return GenerationResult(
+        image=image,
+        semantic_mask=semantic_mask,
+        model_config=model_config,
+        checkpoint_path=checkpoint_path,
+        mask_path=mask_path,
+        config=config,
     )
 
 

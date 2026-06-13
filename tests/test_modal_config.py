@@ -110,6 +110,7 @@ def test_modal_training_enters_app_run_with_valid_data(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="artifacts/checkpoints/model.pt",
         ).to_dict(),
+        "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
     }
@@ -147,11 +148,19 @@ def test_modal_inference_enters_app_run_with_valid_data(
             manifest_path=str(manifest_path),
             mask_path="data/openearthmap/extracted/train/labels/tile.png",
         ).to_dict(),
+        "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "output_path": "/artifacts/generated/sample.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "mask_path": "/data/openearthmap/extracted/train/labels/tile.png",
     }
+
+
+def test_modal_data_mount_ignores_raw_archives() -> None:
+    assert modal_app._ignore_modal_data_path(Path("data/openearthmap/raw/OpenEarthMap.zip"))
+    assert not modal_app._ignore_modal_data_path(
+        Path("data/openearthmap/extracted/train/images/tile.tif")
+    )
 
 
 def _install_modal_fakes(

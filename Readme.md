@@ -68,4 +68,16 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
 
 ### Training log
 
-[ please update here any entries about the model training ]
+- 2026-06-13 03:23 PDT: OpenEarthMap cache has 767 paired image/mask samples,
+  329 images skipped because the downloaded archive has no matching mask, and 9 mask
+  channels including `unlabeled`.
+- 2026-06-13 03:23 PDT: Modal GPU run completed with
+  `uv run sim-satellite train --target modal --steps 8 --batch-size 4 --checkpoint-path artifacts/tiny-sim-satellite.pt`.
+  Result: `device=cuda`, `final_loss=0.9386278390884399`, checkpoint written to
+  Modal volume path `/artifacts/tiny-sim-satellite.pt`.
+- 2026-06-13 03:23 PDT: Pulled the Modal checkpoint locally with
+  `uv run modal volume get --force sim-satellite-artifacts tiny-sim-satellite.pt artifacts/tiny-sim-satellite-modal.pt`.
+  Verified metadata: `training_device=cuda`, `mask_channels=9`.
+- 2026-06-13 03:23 PDT: Verified the web app at `http://127.0.0.1:8765`
+  against `artifacts/tiny-sim-satellite-modal.pt`; browser generation produced a
+  256px PNG from an OpenEarthMap mask.

@@ -25,7 +25,7 @@ def load_image_tensor(path: Path, *, torch: Any, config: ModelConfig) -> Any:
 def load_mask_tensor(path: Path, *, torch: Any, config: ModelConfig) -> Any:
     mask = Image.open(path)
     mask = mask.resize((config.image_size, config.image_size), Image.Resampling.NEAREST)
-    labels = torch.tensor(_mask_to_class_ids(mask, config), dtype=torch.long)
+    labels = torch.tensor(mask_to_class_ids(mask, config), dtype=torch.long)
     labels = labels.view(config.image_size, config.image_size)
     return (
         torch.nn.functional.one_hot(labels, num_classes=config.mask_channels)
@@ -34,7 +34,7 @@ def load_mask_tensor(path: Path, *, torch: Any, config: ModelConfig) -> Any:
     )
 
 
-def _mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
+def mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
     if mask.mode in _RGB_MASK_MODES:
         rgb_mask = mask.convert("RGB")
         return [_class_id_from_rgb(pixel, config) for pixel in _image_data(rgb_mask)]
@@ -45,6 +45,10 @@ def _mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
     raise ValueError(
         f"Unsupported mask mode {mask.mode!r}; expected RGB/RGBA colors or grayscale class ids"
     )
+
+
+def _mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
+    return mask_to_class_ids(mask, config)
 
 
 def _class_id_from_rgb(pixel: tuple[int, int, int], config: ModelConfig) -> int:

@@ -26,12 +26,17 @@ ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
 LOCAL_DATA_ROOT = Path("data")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
+MODAL_GPU = "T4"
 
 
 try:
     import modal
 except ModuleNotFoundError:
     modal = None
+
+
+def _ignore_modal_data_path(path: Path) -> bool:
+    return "raw" in path.parts or path.suffix == ".zip"
 
 
 if modal is not None:
@@ -42,18 +47,33 @@ if modal is not None:
         .add_local_python_source("sim_satellite")
     )
     if LOCAL_DATA_ROOT.exists():
-        image = image.add_local_dir(LOCAL_DATA_ROOT, str(MODAL_DATA_ROOT), copy=False)
+        image = image.add_local_dir(
+            LOCAL_DATA_ROOT,
+            str(MODAL_DATA_ROOT),
+            copy=False,
+            ignore=_ignore_modal_data_path,
+        )
 
     artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 
-    @app.function(image=image, timeout=900, volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume})
+    @app.function(
+        image=image,
+        timeout=900,
+        gpu=MODAL_GPU,
+        volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    )
     def train_remote(config: dict[str, Any]) -> dict[str, Any]:
         result = run_training(TrainingConfig.from_dict(config)).to_dict()
         artifact_volume.commit()
         result["execution_target"] = "modal"
         return result
 
-    @app.function(image=image, timeout=300, volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume})
+    @app.function(
+        image=image,
+        timeout=300,
+        gpu=MODAL_GPU,
+        volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    )
     def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
         artifact_volume.reload()
         result = run_inference(InferenceConfig.from_dict(config)).to_dict()
@@ -110,6 +130,7 @@ def run_inference_target(
 
 def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
     values = config.to_dict()
+    values["device"] = _modal_device(config.device)
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     return values
@@ -117,6 +138,7 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
 
 def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
     values = config.to_dict()
+    values["device"] = _modal_device(config.device)
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["output_path"] = _modal_artifact_path(config.output_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
@@ -137,6 +159,12 @@ def _modal_artifact_path(value: str) -> str:
 def _modal_data_path(value: str, *, field_name: str) -> str:
     relative_path = _local_data_relative_path(value, field_name=field_name)
     return str(MODAL_DATA_ROOT / relative_path)
+
+
+def _modal_device(device: str) -> str:
+    if device == "cpu":
+        return "cuda"
+    return device
 
 
 def _local_data_relative_path(value: str, *, field_name: str) -> Path:
