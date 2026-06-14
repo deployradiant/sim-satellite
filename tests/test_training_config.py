@@ -66,15 +66,6 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
-def test_training_config_passes_model_architecture_flags() -> None:
-    config = TrainingConfig(time_embedding_mlp=False, deep_down_attention=True)
-
-    model_config = config.model_config()
-
-    assert model_config.time_embedding_mlp is False
-    assert model_config.deep_down_attention is True
-
-
 def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(steps=0)

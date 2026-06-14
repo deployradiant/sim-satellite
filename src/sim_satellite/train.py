@@ -52,8 +52,6 @@ class TrainingConfig:
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
-    time_embedding_mlp: bool = True
-    deep_down_attention: bool = False
     mask_drop_probability: float = 0.0
     log_every: int = 10
 
@@ -95,8 +93,6 @@ class TrainingConfig:
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
             hidden_channels=self.hidden_channels,
-            time_embedding_mlp=self.time_embedding_mlp,
-            deep_down_attention=self.deep_down_attention,
             seed=self.seed,
         )
 
@@ -176,8 +172,6 @@ def run_training(
                 "timestep_logit_normal_std": TIMESTEP_LOGIT_NORMAL_STD,
                 "model_parameters": model_parameters,
                 "image_size": config.image_size,
-                "time_embedding_mlp": config.time_embedding_mlp,
-                "deep_down_attention": config.deep_down_attention,
                 "device": str(device),
                 **_torch_device_payload(torch, device),
             },

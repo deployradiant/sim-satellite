@@ -102,24 +102,6 @@ def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
     )
 
 
-def test_load_generator_accepts_checkpoint_before_architecture_flags(tmp_path: Path) -> None:
-    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    del checkpoint["model_config"]["time_embedding_mlp"]
-    del checkpoint["model_config"]["deep_down_attention"]
-    torch.save(checkpoint, checkpoint_path)
-
-    loaded = infer.load_generator(checkpoint_path, device="cpu")
-
-    assert loaded.model_config == ModelConfig(
-        image_size=32,
-        image_channels=3,
-        mask_channels=2,
-        hidden_channels=4,
-        seed=99,
-    )
-
-
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
     checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
