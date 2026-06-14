@@ -31,6 +31,10 @@ MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
 MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
 MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
+MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
+    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
+    "artifacts/openearthmap-flow-unet-94m-256-dualattn-h100-b10-20k-save1k-step-*.pt",
+)
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
 
@@ -100,7 +104,10 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
 @modal.asgi_app()
 def web_remote() -> Any:
     artifact_volume.reload()
-    return create_app(_modal_web_config(WebConfig()))
+    return create_app(
+        _modal_web_config(WebConfig(checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB)),
+        before_checkpoint_resolve=artifact_volume.reload,
+    )
 
 
 def run_training_target(
@@ -150,6 +157,9 @@ def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
 def _modal_web_config(config: WebConfig) -> WebConfig:
     return WebConfig(
         checkpoint_path=_modal_artifact_path(config.checkpoint_path),
+        checkpoint_glob=(
+            _modal_artifact_path(config.checkpoint_glob) if config.checkpoint_glob else ""
+        ),
         manifest_path=_modal_data_path(config.manifest_path, field_name="manifest_path"),
         split=config.split,
         device="cuda",

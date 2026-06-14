@@ -297,6 +297,7 @@ def test_modal_web_config_uses_artifact_checkpoint_and_mounted_manifest(
     config = modal_app._modal_web_config(
         WebConfig(
             checkpoint_path="artifacts/checkpoints/web.pt",
+            checkpoint_glob="artifacts/checkpoints/web-step-*.pt",
             manifest_path=str(manifest_path),
             device="cpu",
             steps=3,
@@ -305,6 +306,7 @@ def test_modal_web_config_uses_artifact_checkpoint_and_mounted_manifest(
     )
 
     assert config.checkpoint_path == "/artifacts/checkpoints/web.pt"
+    assert config.checkpoint_glob == "/artifacts/checkpoints/web-step-*.pt"
     assert config.manifest_path == "/data/openearthmap/manifest.jsonl"
     assert config.device == "cuda"
     assert config.steps == 3

@@ -93,7 +93,92 @@ def test_web_generate_uses_generation_only_config(
     assert generation_config.seed == 42
     assert generation_config.steps == 2
     assert generation_config.mask_path == str(mask_path)
-    assert load_calls == [(config.checkpoint_path, config.device)]
+    assert load_calls == [(Path(config.checkpoint_path), config.device)]
+
+
+def test_web_state_uses_latest_checkpoint_glob(tmp_path: Path) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    Path(config.checkpoint_path).unlink()
+    first_checkpoint = tmp_path / "model-step-1.pt"
+    latest_checkpoint = tmp_path / "model-step-10.pt"
+    first_checkpoint.write_bytes(b"first")
+    latest_checkpoint.write_bytes(b"latest")
+    app = web.create_app(
+        web.WebConfig(
+            checkpoint_path=str(tmp_path / "missing.pt"),
+            checkpoint_glob=str(tmp_path / "model-step-*.pt"),
+            manifest_path=config.manifest_path,
+            display_size=4,
+        )
+    )
+
+    state = _request(app, "GET", "/api/state")
+
+    assert state.status_code == 200
+    assert state.json()["checkpointPath"] == str(latest_checkpoint)
+    assert state.json()["checkpointAvailable"] is True
+
+
+def test_web_checkpoint_glob_waits_for_first_checkpoint(tmp_path: Path) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    Path(config.checkpoint_path).unlink()
+    app = web.create_app(
+        web.WebConfig(
+            checkpoint_path=str(tmp_path / "missing.pt"),
+            checkpoint_glob=str(tmp_path / "model-step-*.pt"),
+            manifest_path=config.manifest_path,
+            display_size=4,
+        )
+    )
+
+    state = _request(app, "GET", "/api/state")
+    response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+
+    assert state.status_code == 200
+    assert state.json()["checkpointPath"] == ""
+    assert state.json()["checkpointAvailable"] is False
+    assert response.status_code == 503
+    assert "No web app checkpoints match" in response.json()["detail"]
+
+
+def test_web_generation_reloads_when_latest_checkpoint_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    first_checkpoint = tmp_path / "model-step-1.pt"
+    next_checkpoint = tmp_path / "model-step-2.pt"
+    first_checkpoint.write_bytes(b"first")
+    load_calls: list[Path] = []
+
+    def fake_load_generator(checkpoint_path: Path, *, device: str) -> SimpleNamespace:
+        load_calls.append(checkpoint_path)
+        return SimpleNamespace(checkpoint_path=checkpoint_path)
+
+    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+        return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
+
+    monkeypatch.setattr(web, "load_generator", fake_load_generator)
+    monkeypatch.setattr(web, "generate_image_with_model", fake_generate)
+    monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
+    app = web.create_app(
+        web.WebConfig(
+            checkpoint_path=config.checkpoint_path,
+            checkpoint_glob=str(tmp_path / "model-step-*.pt"),
+            manifest_path=config.manifest_path,
+            display_size=4,
+        )
+    )
+
+    first_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    next_checkpoint.write_bytes(b"next")
+    second_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+
+    assert first_response.status_code == 200
+    assert first_response.json()["checkpointPath"] == str(first_checkpoint)
+    assert second_response.status_code == 200
+    assert second_response.json()["checkpointPath"] == str(next_checkpoint)
+    assert load_calls == [first_checkpoint, next_checkpoint]
 
 
 def test_web_generate_stream_reports_progress(

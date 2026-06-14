@@ -413,6 +413,7 @@
     let maskDirty = false;
     let isDrawing = false;
     let lastPoint = null;
+    let latestState = null;
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
@@ -443,6 +444,14 @@
       }
     }
 
+    function renderMeta(state) {
+      metaEl.textContent = [
+        state.checkpointPath || "Waiting for checkpoint",
+        state.device,
+        `${state.samples.length} masks`
+      ].join(" | ");
+    }
+
     function renderMask(index) {
       const image = new Image();
       image.onload = () => {
@@ -463,14 +472,11 @@
       const response = await fetch("/api/state");
       const state = await response.json();
       if (!response.ok) throw new Error(state.detail || state.error || "Could not load state");
+      latestState = state;
 
       seedInput.value = state.seed;
       stepsInput.value = state.steps;
-      metaEl.textContent = [
-        state.checkpointPath,
-        state.device,
-        `${state.samples.length} masks`
-      ].join(" | ");
+      renderMeta(state);
 
       sampleSelect.innerHTML = "";
       state.samples.forEach((sample) => {
@@ -516,12 +522,22 @@
       renderMask(sampleSelect.value || 0);
     }
 
+    async function refreshStateMetadata() {
+      const response = await fetch("/api/state");
+      const state = await response.json();
+      if (!response.ok) throw new Error(state.detail || state.error || "Could not load state");
+      latestState = state;
+      renderMeta(state);
+      return state;
+    }
+
     async function generate() {
       generateButton.disabled = true;
       generateButton.textContent = "Generating";
       showProgress(stepsInput.value);
       setStatus("Starting generation...");
       try {
+        await refreshStateMetadata();
         const body = {
           index: Number(sampleSelect.value),
           seed: Number(seedInput.value),
@@ -722,6 +738,9 @@
     sampleSelect.addEventListener("change", () => renderMask(sampleSelect.value));
     generateButton.addEventListener("click", generate);
     loadState().catch((error) => setStatus(error.message, true));
+    setInterval(() => {
+      refreshStateMetadata().catch(() => {});
+    }, 30000);
   </script>
 </body>
 </html>
