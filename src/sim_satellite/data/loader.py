@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,10 +57,6 @@ class SatelliteDataset(Sequence[SatelliteSample]):
 
     def __getitem__(self, index: int | slice) -> SatelliteSample | tuple[SatelliteSample, ...]:
         return self.samples[index]
-
-    def __iter__(self) -> Iterator[SatelliteSample]:
-        return iter(self.samples)
-
 
 def read_manifest(manifest_path: str | Path) -> list[SatelliteSample]:
     path = Path(manifest_path)

@@ -1,26 +1,14 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from dataclasses import asdict
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from sim_satellite.model import ModelConfig, build_model  # noqa: E402
-
-
-def test_model_config_round_trips_known_fields() -> None:
-    config = ModelConfig(image_size=64, mask_channels=4, hidden_channels=16, seed=7)
-
-    assert ModelConfig.from_dict(config.to_dict()) == config
+from sim_satellite.model import ModelConfig, build_model
 
 
 def test_model_config_rejects_unknown_checkpoint_fields() -> None:
-    config = ModelConfig(image_size=64).to_dict()
+    config = asdict(ModelConfig(image_size=64))
 
     with pytest.raises(ValueError, match="Unknown model config fields: timesteps"):
         ModelConfig.from_dict({**config, "timesteps": 1000})

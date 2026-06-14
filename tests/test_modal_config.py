@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from sim_satellite import modal_app  # noqa: E402
-from sim_satellite.infer import InferenceConfig  # noqa: E402
-from sim_satellite.train import TrainingConfig  # noqa: E402
-from sim_satellite.web import WebConfig  # noqa: E402
+from sim_satellite import modal_app
+from sim_satellite.infer import InferenceConfig
+from sim_satellite.train import TrainingConfig
+from sim_satellite.web import WebConfig
 
 
 def test_modal_training_rejects_relative_manifest_outside_data_before_app_run(
@@ -29,7 +24,6 @@ def test_modal_training_rejects_relative_manifest_outside_data_before_app_run(
     with pytest.raises(ValueError, match="manifest_path.*local data/ cache"):
         modal_app.run_training_target(
             TrainingConfig(manifest_path="manifest.jsonl"),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -50,7 +44,6 @@ def test_modal_training_rejects_missing_manifest_before_app_run(
     with pytest.raises(FileNotFoundError, match="manifest_path not found locally"):
         modal_app.run_training_target(
             TrainingConfig(manifest_path="data/openearthmap/missing.jsonl"),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -74,7 +67,6 @@ def test_modal_training_rejects_absolute_checkpoint_outside_artifacts_before_app
                 manifest_path="data/openearthmap/manifest.jsonl",
                 checkpoint_path=str(tmp_path / "model.pt"),
             ),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -98,7 +90,6 @@ def test_modal_training_rejects_artifact_path_escape_before_app_run(
                 manifest_path="data/openearthmap/manifest.jsonl",
                 checkpoint_path="artifacts/../model.pt",
             ),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -123,7 +114,6 @@ def test_modal_training_rejects_valid_data_without_configured_data_mount(
     ):
         modal_app.run_training_target(
             TrainingConfig(manifest_path="data/openearthmap/manifest.jsonl"),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -148,8 +138,7 @@ def test_modal_inference_rejects_absolute_mask_outside_data_before_app_run(
             InferenceConfig(
                 manifest_path=str(manifest_path),
                 mask_path=str(outside_mask_path),
-            ),
-            target="modal",
+            )
         )
 
     assert fake_app.run_calls == 0
@@ -170,7 +159,6 @@ def test_modal_inference_requires_mask_path_before_app_run(
     with pytest.raises(ValueError, match="mask_path is required"):
         modal_app.run_inference_target(
             InferenceConfig(manifest_path=str(manifest_path), mask_path=None),
-            target="modal",
         )
 
     assert fake_app.run_calls == 0
@@ -193,8 +181,7 @@ def test_modal_training_uses_cuda_for_any_configured_device(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="/artifacts/checkpoints/model.pt",
             device="mps",
-        ),
-        target="modal",
+        )
     )
 
     assert fake_train_remote.received is not None
@@ -217,8 +204,7 @@ def test_modal_training_maps_resume_checkpoint_to_artifact_volume(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="artifacts/checkpoints/model.pt",
             resume_from="artifacts/checkpoints/model-step-50000.pt",
-        ),
-        target="modal",
+        )
     )
 
     assert fake_train_remote.received is not None
@@ -239,8 +225,7 @@ def test_modal_training_enters_app_run_with_valid_data(
         TrainingConfig(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="artifacts/checkpoints/model.pt",
-        ),
-        target="modal",
+        )
     )
 
     assert result == {"execution_target": "modal"}
@@ -248,10 +233,12 @@ def test_modal_training_enters_app_run_with_valid_data(
     assert fake_app.enter_calls == 1
     assert fake_app.exit_calls == 1
     assert fake_train_remote.received == {
-        **TrainingConfig(
-            manifest_path="data/openearthmap/manifest.jsonl",
-            checkpoint_path="artifacts/checkpoints/model.pt",
-        ).to_dict(),
+        **asdict(
+            TrainingConfig(
+                manifest_path="data/openearthmap/manifest.jsonl",
+                checkpoint_path="artifacts/checkpoints/model.pt",
+            )
+        ),
         "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
@@ -275,8 +262,7 @@ def test_modal_inference_enters_app_run_with_valid_data(
             output_path="artifacts/generated/sample.pt",
             manifest_path=str(manifest_path),
             mask_path="data/openearthmap/extracted/train/labels/tile.png",
-        ),
-        target="modal",
+        )
     )
 
     assert result == {"execution_target": "modal"}
@@ -284,12 +270,14 @@ def test_modal_inference_enters_app_run_with_valid_data(
     assert fake_app.enter_calls == 1
     assert fake_app.exit_calls == 1
     assert fake_infer_remote.received == {
-        **InferenceConfig(
-            checkpoint_path="artifacts/checkpoints/model.pt",
-            output_path="artifacts/generated/sample.pt",
-            manifest_path=str(manifest_path),
-            mask_path="data/openearthmap/extracted/train/labels/tile.png",
-        ).to_dict(),
+        **asdict(
+            InferenceConfig(
+                checkpoint_path="artifacts/checkpoints/model.pt",
+                output_path="artifacts/generated/sample.pt",
+                manifest_path=str(manifest_path),
+                mask_path="data/openearthmap/extracted/train/labels/tile.png",
+            )
+        ),
         "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "output_path": "/artifacts/generated/sample.pt",
@@ -366,7 +354,7 @@ class _FakeApp:
         self.enter_calls += 1
         return self
 
-    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
         self.exit_calls += 1
 
 

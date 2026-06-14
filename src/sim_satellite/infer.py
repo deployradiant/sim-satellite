@@ -8,22 +8,14 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
+import click
+
 from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
-from sim_satellite.model import ModelConfig, build_legacy_tiny_denoiser, build_model, require_torch
+from sim_satellite.model import ModelConfig, build_model, require_torch
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
-LEGACY_TINY_STATE_KEYS = frozenset(
-    {
-        "net.0.weight",
-        "net.0.bias",
-        "net.2.weight",
-        "net.2.bias",
-        "net.4.weight",
-        "net.4.bias",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -48,9 +40,6 @@ class InferenceConfig:
         if not self.output_path:
             raise ValueError("output_path is required")
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> InferenceConfig:
         names = {field.name for field in fields(cls)}
@@ -63,9 +52,7 @@ class InferenceConfig:
 @dataclass(frozen=True)
 class GenerationConfig:
     seed: int = 1337
-    checkpoint_path: str = "artifacts/tiny-sim-satellite.pt"
     mask_path: str = ""
-    device: str = "cpu"
     steps: int = 8
     guidance_scale: float = 1.0
 
@@ -74,21 +61,8 @@ class GenerationConfig:
             raise ValueError("steps must be positive")
         if self.guidance_scale < 0.0:
             raise ValueError("guidance_scale must be non-negative")
-        if not self.checkpoint_path:
-            raise ValueError("checkpoint_path is required")
         if not self.mask_path:
             raise ValueError("mask_path is required")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> GenerationConfig:
-        names = {field.name for field in fields(cls)}
-        unknown = sorted(set(values) - names)
-        if unknown:
-            raise ValueError(f"Unknown generation config fields: {', '.join(unknown)}")
-        return cls(**{name: values[name] for name in names if name in values})
 
 
 @dataclass(frozen=True)
@@ -98,9 +72,6 @@ class InferenceResult:
     mask_path: str
     device: str
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
 
 @dataclass(frozen=True)
 class GenerationResult:
@@ -109,7 +80,6 @@ class GenerationResult:
     model_config: ModelConfig
     checkpoint_path: Path
     mask_path: Path
-    config: GenerationConfig
 
 
 @dataclass(frozen=True)
@@ -119,44 +89,22 @@ class LoadedGenerator:
     model_config: ModelConfig
     checkpoint_path: Path
     device: Any
-    architecture: str
-    legacy_timesteps: int | None = None
-
-
-def coerce_inference_config(
-    config: InferenceConfig | Mapping[str, Any] | None,
-) -> InferenceConfig:
-    if config is None:
-        return InferenceConfig()
-    if isinstance(config, InferenceConfig):
-        return config
-    return InferenceConfig.from_dict(config)
-
-
-def coerce_generation_config(
-    config: GenerationConfig | Mapping[str, Any],
-) -> GenerationConfig:
-    if isinstance(config, GenerationConfig):
-        return config
-    return GenerationConfig.from_dict(config)
 
 
 def run_inference(
-    config: InferenceConfig | Mapping[str, Any] | None = None,
+    config: InferenceConfig | None = None,
 ) -> InferenceResult:
-    config = coerce_inference_config(config)
+    config = config or InferenceConfig()
     mask_path = _required_mask_path(config.mask_path)
     loaded_generator = load_generator(config.checkpoint_path, device=config.device)
     generation = generate_image_with_model(
         loaded_generator,
         GenerationConfig(
             seed=config.seed,
-            checkpoint_path=config.checkpoint_path,
             mask_path=mask_path,
-            device=config.device,
             steps=config.steps,
             guidance_scale=config.guidance_scale,
-        )
+        ),
     )
     torch, _ = require_torch()
 
@@ -166,8 +114,8 @@ def run_inference(
         {
             "image": generation.image.detach().cpu(),
             "semantic_mask": generation.semantic_mask.detach().cpu(),
-            "model_config": generation.model_config.to_dict(),
-            "inference_config": config.to_dict(),
+            "model_config": asdict(generation.model_config),
+            "inference_config": asdict(config),
         },
         output_path,
     )
@@ -180,12 +128,6 @@ def run_inference(
     )
 
 
-def generate_image(config: GenerationConfig | Mapping[str, Any]) -> GenerationResult:
-    config = coerce_generation_config(config)
-    loaded_generator = load_generator(config.checkpoint_path, device=config.device)
-    return generate_image_with_model(loaded_generator, config)
-
-
 def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerator:
     torch, _ = require_torch()
 
@@ -196,23 +138,9 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
 
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
-    if _is_legacy_tiny_state(model_state):
-        model_config, timesteps = _legacy_tiny_checkpoint_config(checkpoint, checkpoint_path)
-        model = build_legacy_tiny_denoiser(model_config, timesteps=timesteps).to(torch_device)
-        architecture = "legacy tiny denoiser"
-        legacy_timesteps = timesteps
-    else:
-        model_config = ModelConfig.from_dict(checkpoint["model_config"])
-        model = build_model(model_config).to(torch_device)
-        architecture = "flow U-Net"
-        legacy_timesteps = None
-
-    _load_model_state(
-        model,
-        model_state,
-        checkpoint_path=checkpoint_path,
-        architecture=architecture,
-    )
+    model_config = ModelConfig.from_dict(checkpoint["model_config"])
+    model = build_model(model_config).to(torch_device)
+    _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
     model.eval()
     return LoadedGenerator(
         torch=torch,
@@ -220,16 +148,13 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
         model_config=model_config,
         checkpoint_path=checkpoint_path,
         device=torch_device,
-        architecture=architecture,
-        legacy_timesteps=legacy_timesteps,
     )
 
 
 def generate_image_with_model(
     loaded_generator: LoadedGenerator,
-    config: GenerationConfig | Mapping[str, Any],
+    config: GenerationConfig,
 ) -> GenerationResult:
-    config = coerce_generation_config(config)
     torch = loaded_generator.torch
     model = loaded_generator.model
     model_config = loaded_generator.model_config
@@ -243,51 +168,30 @@ def generate_image_with_model(
         model_config.image_size,
         model_config.image_size,
     )
-    if loaded_generator.legacy_timesteps is None:
-        image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
-    else:
-        image = torch.rand(image_shape, generator=generator, device="cpu").to(device)
+    image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
     mask_path = _resolve_mask_path(config.mask_path)
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
 
     with torch.no_grad():
-        if loaded_generator.legacy_timesteps is None:
-            for step in reversed(range(1, config.steps + 1)):
-                timestep = torch.full(
-                    (1,),
-                    step / float(config.steps),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                velocity = _guided_prediction(
-                    model,
-                    image,
-                    semantic_mask,
-                    timestep,
-                    guidance_scale=config.guidance_scale,
-                    torch=torch,
-                )
-                image = image - velocity / float(config.steps)
-            image = image.clamp(0.0, 1.0)
-        else:
-            for step in reversed(range(config.steps)):
-                timestep = torch.full(
-                    (1,),
-                    step % loaded_generator.legacy_timesteps,
-                    dtype=torch.long,
-                    device=device,
-                )
-                predicted_noise = _guided_prediction(
-                    model,
-                    image,
-                    semantic_mask,
-                    timestep,
-                    guidance_scale=config.guidance_scale,
-                    torch=torch,
-                )
-                image = (image - predicted_noise / float(config.steps)).clamp(0.0, 1.0)
+        for step in reversed(range(1, config.steps + 1)):
+            timestep = torch.full(
+                (1,),
+                step / float(config.steps),
+                dtype=torch.float32,
+                device=device,
+            )
+            velocity = _guided_prediction(
+                model,
+                image,
+                semantic_mask,
+                timestep,
+                guidance_scale=config.guidance_scale,
+                torch=torch,
+            )
+            image = image - velocity / float(config.steps)
+        image = image.clamp(0.0, 1.0)
 
     return GenerationResult(
         image=image,
@@ -295,7 +199,6 @@ def generate_image_with_model(
         model_config=model_config,
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
-        config=config,
     )
 
 
@@ -336,48 +239,17 @@ def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     return checkpoint
 
 
-def _is_legacy_tiny_state(model_state: Mapping[str, Any]) -> bool:
-    return set(model_state) == LEGACY_TINY_STATE_KEYS
-
-
-def _legacy_tiny_checkpoint_config(
-    checkpoint: Mapping[str, Any],
-    checkpoint_path: Path,
-) -> tuple[ModelConfig, int]:
-    raw_config = checkpoint["model_config"]
-    if not isinstance(raw_config, Mapping):
-        raise RuntimeError(
-            f"Inference checkpoint model_config must be a mapping: {checkpoint_path}"
-        )
-    if "timesteps" not in raw_config:
-        raise RuntimeError(
-            f"Legacy tiny checkpoint is missing timesteps: {checkpoint_path}"
-        )
-
-    timesteps = int(raw_config["timesteps"])
-    if timesteps < 1:
-        raise RuntimeError(
-            f"Legacy tiny checkpoint timesteps must be positive: {checkpoint_path}"
-        )
-
-    values = dict(raw_config)
-    values.pop("timesteps")
-    return ModelConfig.from_dict(values), timesteps
-
-
 def _load_model_state(
     model: Any,
     model_state: Mapping[str, Any],
     *,
     checkpoint_path: Path,
-    architecture: str,
 ) -> None:
     try:
         model.load_state_dict(model_state)
     except RuntimeError as exc:
         raise RuntimeError(
-            f"Inference checkpoint is incompatible with {architecture}: {checkpoint_path}. "
-            f"{exc}"
+            f"Inference checkpoint is incompatible with flow U-Net: {checkpoint_path}. {exc}"
         ) from exc
 
 
@@ -412,7 +284,7 @@ def _with_cli_mask_path(config: InferenceConfig) -> InferenceConfig:
         return config
     return InferenceConfig(
         **{
-            **config.to_dict(),
+            **asdict(config),
             "mask_path": str(_default_mask_path(config)),
         }
     )
@@ -421,21 +293,18 @@ def _with_cli_mask_path(config: InferenceConfig) -> InferenceConfig:
 def _run_with_target(config: InferenceConfig, target: str) -> dict[str, Any]:
     config = _with_cli_mask_path(config)
     if target == "local":
-        result = run_inference(config).to_dict()
+        result = asdict(run_inference(config))
         result["execution_target"] = "local"
         return result
 
     from sim_satellite.modal_app import run_inference_target
 
-    return run_inference_target(config, target=target)
+    if target != "modal":
+        raise ValueError(f"Unsupported inference target: {target}")
+    return run_inference_target(config)
 
 
-def _build_click_command() -> Any:
-    try:
-        import click
-    except ModuleNotFoundError:
-        return None
-
+def _build_click_command() -> click.Command:
     @click.command("infer", help="Run image generation or steering inference.")
     @click.option(
         "--target",
@@ -488,6 +357,4 @@ cli = _build_click_command()
 
 
 if __name__ == "__main__":
-    if cli is None:
-        raise SystemExit("Click is required for the inference CLI.")
     cli()

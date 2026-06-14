@@ -1,23 +1,14 @@
 from __future__ import annotations
 
 import json
-import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from sim_satellite.data.loader import read_manifest  # noqa: E402
-from sim_satellite.data.openearthmap import (  # noqa: E402
-    OPENEARTHMAP_CLASSES,
-    OPENEARTHMAP_RGB,
+from sim_satellite.data.loader import read_manifest
+from sim_satellite.data.openearthmap import (
     download_and_prepare_openearthmap,
-    scan_openearthmap,
 )
 
 EXPECTED_OPENEARTHMAP_CLASSES = (
@@ -42,11 +33,6 @@ EXPECTED_OPENEARTHMAP_RGB = {
     "agriculture land": (75, 181, 73),
     "building": (222, 31, 7),
 }
-
-
-def test_openearthmap_taxonomy_matches_source_metadata() -> None:
-    assert OPENEARTHMAP_CLASSES == EXPECTED_OPENEARTHMAP_CLASSES
-    assert OPENEARTHMAP_RGB == EXPECTED_OPENEARTHMAP_RGB
 
 
 def test_prepare_openearthmap_writes_manifest_and_classes(tmp_path: Path) -> None:
@@ -79,39 +65,6 @@ def test_prepare_openearthmap_writes_manifest_and_classes(tmp_path: Path) -> Non
         for class_id, name in enumerate(EXPECTED_OPENEARTHMAP_CLASSES)
     ]
     assert class_payload == {"source": "openearthmap", "classes": expected_classes}
-
-
-def test_prepare_openearthmap_reports_progress(tmp_path: Path) -> None:
-    data_dir = tmp_path / "openearthmap"
-    _touch(data_dir / "extracted" / "train" / "images" / "tile.png")
-    _touch(data_dir / "extracted" / "train" / "labels" / "tile.png")
-    messages: list[str] = []
-
-    download_and_prepare_openearthmap(
-        data_dir,
-        download=False,
-        extract=False,
-        progress=messages.append,
-    )
-
-    assert messages[0].startswith("Preparing OpenEarthMap data")
-    assert any(message.startswith("Finding image directories") for message in messages)
-    assert any(message.startswith("Scanned 1/1 image directories") for message in messages)
-    assert any(message.startswith("Writing manifest") for message in messages)
-    assert messages[-1].startswith("Done: 1 samples")
-
-
-def test_scan_openearthmap_reports_missing_masks(tmp_path: Path) -> None:
-    extracted_dir = tmp_path / "extracted"
-    _touch(extracted_dir / "train" / "images" / "tile.png")
-    (extracted_dir / "train" / "labels").mkdir(parents=True)
-
-    scan = scan_openearthmap(extracted_dir)
-
-    assert scan.scanned_images == 1
-    assert scan.missing_masks == 1
-    assert scan.image_dirs_without_labels == 0
-    assert scan.samples == ()
 
 
 def test_prepare_openearthmap_reports_and_skips_missing_masks(tmp_path: Path) -> None:

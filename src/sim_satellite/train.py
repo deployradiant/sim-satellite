@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
+import click
+
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.tensors import load_image_tensor, load_mask_tensor
@@ -73,9 +75,6 @@ class TrainingConfig:
         if not self.split:
             raise ValueError("split is required")
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> TrainingConfig:
         names = {field.name for field in fields(cls)}
@@ -104,26 +103,13 @@ class TrainingResult:
     metrics_path: str
     loss_plot_path: str
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-def coerce_training_config(
-    config: TrainingConfig | Mapping[str, Any] | None,
-) -> TrainingConfig:
-    if config is None:
-        return TrainingConfig()
-    if isinstance(config, TrainingConfig):
-        return config
-    return TrainingConfig.from_dict(config)
-
 
 def run_training(
-    config: TrainingConfig | Mapping[str, Any] | None = None,
+    config: TrainingConfig | None = None,
     *,
     after_save: Callable[[], None] | None = None,
 ) -> TrainingResult:
-    config = coerce_training_config(config)
+    config = config or TrainingConfig()
     torch, _ = require_torch()
 
     torch.manual_seed(config.seed)
@@ -313,8 +299,8 @@ def _write_training_metrics(
     path.write_text(
         json.dumps(
             {
-                "model_config": model_config.to_dict(),
-                "training_config": config.to_dict(),
+                "model_config": asdict(model_config),
+                "training_config": asdict(config),
                 "model_parameters": model_parameters,
                 "step": step,
                 "final_loss": final_loss,
@@ -430,7 +416,7 @@ def _write_training_checkpoint(
     *,
     model: Any,
     optimizer: Any,
-    generator: Any | None = None,
+    generator: Any,
     model_config: ModelConfig,
     config: TrainingConfig,
     losses: list[dict[str, float | int]],
@@ -446,9 +432,9 @@ def _write_training_checkpoint(
         {
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "generator_state": None if generator is None else generator.get_state(),
-            "model_config": model_config.to_dict(),
-            "training_config": config.to_dict(),
+            "generator_state": generator.get_state(),
+            "model_config": asdict(model_config),
+            "training_config": asdict(config),
             "step": step,
             "losses": losses,
             "validation_losses": validation_losses,
@@ -474,7 +460,7 @@ def _load_training_state(
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location=device)
     checkpoint_model_config = checkpoint.get("model_config")
-    if checkpoint_model_config != model_config.to_dict():
+    if checkpoint_model_config != asdict(model_config):
         raise ValueError("Resume checkpoint model_config does not match the requested model")
     model.load_state_dict(checkpoint["model_state"])
     optimizer_state = checkpoint.get("optimizer_state")
@@ -483,23 +469,11 @@ def _load_training_state(
     generator_state = checkpoint.get("generator_state")
     if generator_state is not None:
         generator.set_state(generator_state)
-    step = _checkpoint_step(checkpoint)
+    step = int(checkpoint["step"])
     final_loss = float(checkpoint.get("final_loss", 0.0))
     losses = list(checkpoint.get("losses", []))
     validation_losses = list(checkpoint.get("validation_losses", []))
     return step, final_loss, losses, validation_losses
-
-
-def _checkpoint_step(checkpoint: Mapping[str, Any]) -> int:
-    if "step" in checkpoint:
-        return int(checkpoint["step"])
-    training_config = checkpoint.get("training_config")
-    if isinstance(training_config, Mapping) and "steps" in training_config:
-        return int(training_config["steps"])
-    losses = checkpoint.get("losses")
-    if losses:
-        return int(losses[-1]["step"])
-    return 0
 
 
 def _snapshot_checkpoint_path(checkpoint_path: Path, step: int) -> Path:
@@ -507,9 +481,8 @@ def _snapshot_checkpoint_path(checkpoint_path: Path, step: int) -> Path:
 
 
 def _should_write_progress_artifacts(config: TrainingConfig, step: int) -> bool:
-    return (
-        (config.save_every > 0 and step % config.save_every == 0)
-        or (config.plot_every > 0 and step % config.plot_every == 0)
+    return (config.save_every > 0 and step % config.save_every == 0) or (
+        config.plot_every > 0 and step % config.plot_every == 0
     )
 
 
@@ -553,8 +526,7 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
     manifest_path = Path(config.manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"Training manifest not found: {manifest_path}. "
-            "Run `sim-satellite openearthmap` first."
+            f"Training manifest not found: {manifest_path}. Run `sim-satellite openearthmap` first."
         )
 
     dataset = SatelliteDataset(manifest_path, split=config.split, shuffle_seed=config.seed)
@@ -583,8 +555,7 @@ def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSam
     manifest_path = Path(config.manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"Training manifest not found: {manifest_path}. "
-            "Run `sim-satellite openearthmap` first."
+            f"Training manifest not found: {manifest_path}. Run `sim-satellite openearthmap` first."
         )
 
     if config.validation_split:
@@ -653,15 +624,7 @@ def _load_evaluation_batch(
     crop_boxes = [
         _center_square_crop_box(sample, crop_size=model_config.image_size) for sample in samples
     ]
-    images = [
-        load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
-    masks = [
-        load_mask_tensor(sample.mask_path, torch=torch, config=model_config, crop_box=crop_box)
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
-    return torch.stack(images).to(device), torch.stack(masks).to(device)
+    return _load_batch(samples, crop_boxes, torch=torch, model_config=model_config, device=device)
 
 
 def _load_training_batch(
@@ -681,6 +644,17 @@ def _load_training_batch(
         )
         for sample in samples
     ]
+    return _load_batch(samples, crop_boxes, torch=torch, model_config=model_config, device=device)
+
+
+def _load_batch(
+    samples: tuple[SatelliteSample, ...],
+    crop_boxes: list[tuple[int, int, int, int]],
+    *,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+) -> tuple[Any, Any]:
     images = [
         load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
         for sample, crop_box in zip(samples, crop_boxes, strict=True)
@@ -699,22 +673,10 @@ def _random_square_crop_box(
     torch: Any,
     generator: Any,
 ) -> tuple[int, int, int, int]:
-    from PIL import Image
-
-    with Image.open(sample.image_path) as image:
-        image_size = image.size
-    with Image.open(sample.mask_path) as mask:
-        mask_size = mask.size
-    if image_size != mask_size:
-        raise ValueError(
-            f"Image and mask sizes must match for aligned crops: "
-            f"{sample.image_path} is {image_size}, {sample.mask_path} is {mask_size}"
-        )
-
-    width, height = image_size
+    width, height = _aligned_image_size(sample)
     size = min(width, height, crop_size)
     if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {image_size}")
+        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
 
     max_left = width - size
     max_top = height - size
@@ -774,21 +736,18 @@ def _sample_matches_any(sample: SatelliteSample, patterns: tuple[str, ...]) -> b
 
 def _run_with_target(config: TrainingConfig, target: str) -> dict[str, Any]:
     if target == "local":
-        result = run_training(config).to_dict()
+        result = asdict(run_training(config))
         result["execution_target"] = "local"
         return result
 
     from sim_satellite.modal_app import run_training_target
 
-    return run_training_target(config, target=target)
+    if target != "modal":
+        raise ValueError(f"Unsupported training target: {target}")
+    return run_training_target(config)
 
 
-def _build_click_command() -> Any:
-    try:
-        import click
-    except ModuleNotFoundError:
-        return None
-
+def _build_click_command() -> click.Command:
     @click.command("train", help="Run model training.")
     @click.option(
         "--target",
@@ -885,6 +844,4 @@ cli = _build_click_command()
 
 
 if __name__ == "__main__":
-    if cli is None:
-        raise SystemExit("Click is required for the training CLI.")
     cli()

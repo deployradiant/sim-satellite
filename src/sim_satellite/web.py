@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+import click
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from PIL import Image, UnidentifiedImageError
@@ -116,12 +117,10 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
                 generator(),
                 GenerationConfig(
                     seed=seed,
-                    checkpoint_path=config.checkpoint_path,
                     mask_path=str(mask_path),
-                    device=config.device,
                     steps=steps,
                     guidance_scale=config.guidance_scale,
-                )
+                ),
             )
         finally:
             if temporary_mask_path is not None:
@@ -159,8 +158,7 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
     manifest_path = Path(config.manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"Web app manifest not found: {manifest_path}. "
-            "Run `sim-satellite openearthmap` first."
+            f"Web app manifest not found: {manifest_path}. Run `sim-satellite openearthmap` first."
         )
     if not INDEX_PATH.exists():
         raise FileNotFoundError(f"Web app HTML not found: {INDEX_PATH}")
@@ -249,10 +247,7 @@ def _request_mask_labels(mask_image: str, config: WebConfig) -> Image.Image:
         if image.size != expected_size:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "mask image must be "
-                    f"{config.display_size}x{config.display_size} pixels"
-                ),
+                detail=(f"mask image must be {config.display_size}x{config.display_size} pixels"),
             )
 
         try:
@@ -314,12 +309,7 @@ def _data_uri(body: bytes, content_type: str) -> str:
     return f"data:{content_type};base64,{encoded}"
 
 
-def _build_click_command() -> Any:
-    try:
-        import click
-    except ModuleNotFoundError:
-        return None
-
+def _build_click_command() -> click.Command:
     @click.command("app", help="Launch the local mask-conditioned generation app.")
     @click.option("--checkpoint-path", default=WebConfig.checkpoint_path, show_default=True)
     @click.option("--manifest-path", default=WebConfig.manifest_path, show_default=True)
@@ -365,6 +355,4 @@ cli = _build_click_command()
 
 
 if __name__ == "__main__":
-    if cli is None:
-        raise SystemExit("Click is required for the web app CLI.")
     cli()

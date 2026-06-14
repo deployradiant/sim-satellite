@@ -6,7 +6,7 @@ for small PyTorch debugging runs.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +14,10 @@ import modal
 
 from sim_satellite.infer import (
     InferenceConfig,
-    coerce_inference_config,
     run_inference,
 )
 from sim_satellite.train import (
     TrainingConfig,
-    coerce_training_config,
     run_training,
 )
 from sim_satellite.web import WebConfig, create_app
@@ -71,8 +69,9 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     result = run_training(
         TrainingConfig.from_dict(config),
         after_save=artifact_volume.commit,
-    ).to_dict()
+    )
     artifact_volume.commit()
+    result = asdict(result)
     result["execution_target"] = "modal"
     return result
 
@@ -85,7 +84,7 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     artifact_volume.reload()
-    result = run_inference(InferenceConfig.from_dict(config)).to_dict()
+    result = asdict(run_inference(InferenceConfig.from_dict(config)))
     artifact_volume.commit()
     result["execution_target"] = "modal"
     return result
@@ -104,16 +103,8 @@ def web_remote() -> Any:
 
 
 def run_training_target(
-    config: TrainingConfig | Mapping[str, Any] | None = None,
-    target: str = "modal",
+    config: TrainingConfig,
 ) -> dict[str, Any]:
-    config = coerce_training_config(config)
-    if target == "local":
-        result = run_training(config).to_dict()
-        result["execution_target"] = "local"
-        return result
-    if target != "modal":
-        raise ValueError(f"Unsupported training target: {target}")
     modal_config = _modal_training_config(config)
     with modal.enable_output():
         with app.run():
@@ -121,16 +112,8 @@ def run_training_target(
 
 
 def run_inference_target(
-    config: InferenceConfig | Mapping[str, Any] | None = None,
-    target: str = "modal",
+    config: InferenceConfig,
 ) -> dict[str, Any]:
-    config = coerce_inference_config(config)
-    if target == "local":
-        result = run_inference(config).to_dict()
-        result["execution_target"] = "local"
-        return result
-    if target != "modal":
-        raise ValueError(f"Unsupported inference target: {target}")
     modal_config = _modal_inference_config(config)
     with modal.enable_output():
         with app.run():
@@ -138,7 +121,7 @@ def run_inference_target(
 
 
 def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
-    values = config.to_dict()
+    values = asdict(config)
     values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
@@ -152,7 +135,7 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
 
 
 def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
-    values = config.to_dict()
+    values = asdict(config)
     values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["output_path"] = _modal_artifact_path(config.output_path)

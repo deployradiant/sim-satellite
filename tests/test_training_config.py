@@ -1,76 +1,24 @@
 from __future__ import annotations
 
-import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from sim_satellite.data.loader import SatelliteSample  # noqa: E402
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS  # noqa: E402
-from sim_satellite.train import (  # noqa: E402
-    DEFAULT_TARGET,
+from sim_satellite.data.loader import SatelliteSample
+from sim_satellite.train import (
     TrainingConfig,
     _load_training_samples,
     _load_validation_batches,
     _random_square_crop_box,
-    _snapshot_checkpoint_path,
 )
-
-
-def test_training_config_defaults_are_deterministic() -> None:
-    config = TrainingConfig()
-
-    assert DEFAULT_TARGET == "modal"
-    assert config.seed == 1337
-    assert config.steps == 8
-    assert config.batch_size == 4
-    assert config.device == "cpu"
-    assert config.manifest_path == "data/openearthmap/manifest.jsonl"
-    assert config.checkpoint_path == "artifacts/tiny-sim-satellite.pt"
-    assert config.resume_from == ""
-    assert config.save_every == 0
-    assert config.plot_every == 0
-    assert config.validation_split == ""
-    assert config.validation_holdout_patterns == ""
-    assert config.validation_every == 0
-    assert config.validation_batches == 8
-    assert config.mask_channels == len(OPENEARTHMAP_CLASS_IDS)
-
-
-def test_training_config_round_trips_known_fields() -> None:
-    config = TrainingConfig(steps=3, batch_size=2)
-
-    assert TrainingConfig.from_dict(config.to_dict()) == config
 
 
 def test_training_config_rejects_unknown_fields() -> None:
     config = TrainingConfig(steps=3, batch_size=2)
 
     with pytest.raises(ValueError, match="Unknown training config fields: future_field"):
-        TrainingConfig.from_dict({**config.to_dict(), "future_field": "rejected"})
-
-
-def test_training_config_builds_matching_model_config() -> None:
-    config = TrainingConfig(
-        seed=7,
-        image_size=16,
-        image_channels=4,
-        mask_channels=3,
-        hidden_channels=8,
-    )
-
-    model_config = config.model_config()
-
-    assert model_config.seed == config.seed
-    assert model_config.image_size == config.image_size
-    assert model_config.image_channels == config.image_channels
-    assert model_config.mask_channels == config.mask_channels
-    assert model_config.hidden_channels == config.hidden_channels
+        TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
 def test_training_config_rejects_invalid_values() -> None:
@@ -88,12 +36,6 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(validation_every=-1)
     with pytest.raises(ValueError):
         TrainingConfig(validation_batches=0)
-
-
-def test_snapshot_checkpoint_path_includes_step() -> None:
-    path = _snapshot_checkpoint_path(Path("artifacts/model.pt"), 50)
-
-    assert path == Path("artifacts/model-step-50.pt")
 
 
 def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,14 +10,9 @@ from typing import Any
 import pytest
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from sim_satellite import web  # noqa: E402
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB  # noqa: E402
-from sim_satellite.infer import GenerationConfig  # noqa: E402
+from sim_satellite import web
+from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
+from sim_satellite.infer import GenerationConfig
 
 
 def test_web_state_and_mask_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +49,7 @@ def test_web_create_app_does_not_load_generator(
     assert state.status_code == 200
 
 
-def test_web_generate_uses_generation_config_without_output_path(
+def test_web_generate_uses_generation_only_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -90,9 +84,12 @@ def test_web_generate_uses_generation_config_without_output_path(
     assert response.json()["image"] == "data:image/png;base64,cG5n"
     generation_config = received["config"]
     assert isinstance(generation_config, GenerationConfig)
-    assert not hasattr(generation_config, "output_path")
-    assert not hasattr(generation_config, "manifest_path")
-    assert not hasattr(generation_config, "split")
+    assert set(generation_config.__dataclass_fields__) == {
+        "seed",
+        "mask_path",
+        "steps",
+        "guidance_scale",
+    }
     assert generation_config.seed == 42
     assert generation_config.steps == 2
     assert generation_config.mask_path == str(mask_path)
@@ -212,6 +209,7 @@ def test_web_generate_rejects_oversized_mask_payload_before_decode(
     config, _ = _write_web_fixture(tmp_path)
 
     def broken_decode(encoded: str, validate: bool) -> bytes:
+        assert validate is True
         raise AssertionError("oversized payload should not be decoded")
 
     monkeypatch.setattr(web.base64, "b64decode", broken_decode)

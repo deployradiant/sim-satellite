@@ -125,10 +125,6 @@ def download_and_prepare_openearthmap(
     )
 
 
-def find_openearthmap_samples(extracted_dir: str | Path) -> list[SatelliteSample]:
-    return list(scan_openearthmap(extracted_dir).samples)
-
-
 def scan_openearthmap(
     extracted_dir: str | Path,
     *,

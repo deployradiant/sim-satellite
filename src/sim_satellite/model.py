@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from typing import Any
 
 try:
@@ -38,9 +38,6 @@ class ModelConfig:
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> ModelConfig:
         names = {field.name for field in fields(cls)}
@@ -67,13 +64,6 @@ def build_model(config: ModelConfig | None = None) -> Any:
     return ConditionalUNet(config)
 
 
-def build_legacy_tiny_denoiser(config: ModelConfig, *, timesteps: int) -> Any:
-    require_torch()
-    if timesteps < 1:
-        raise ValueError("timesteps must be positive")
-    return LegacyTinyDenoiser(config, timesteps=timesteps)
-
-
 def _validate_unet_config(config: ModelConfig) -> None:
     if config.image_size < 32:
         raise ValueError("unet architecture requires image_size of at least 32")
@@ -82,38 +72,6 @@ def _validate_unet_config(config: ModelConfig) -> None:
 
 
 if nn is not None:
-
-    class LegacyTinyDenoiser(nn.Module):
-        def __init__(self, model_config: ModelConfig, *, timesteps: int) -> None:
-            super().__init__()
-            self.config = model_config
-            self.timesteps = timesteps
-            input_channels = model_config.image_channels + model_config.mask_channels + 1
-            self.net = nn.Sequential(
-                nn.Conv2d(input_channels, model_config.hidden_channels, 3, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(
-                    model_config.hidden_channels,
-                    model_config.hidden_channels,
-                    3,
-                    padding=1,
-                ),
-                nn.SiLU(),
-                nn.Conv2d(
-                    model_config.hidden_channels,
-                    model_config.image_channels,
-                    3,
-                    padding=1,
-                ),
-            )
-
-        def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
-            batch_size, _, height, width = image.shape
-            scaled_timestep = timestep.float().view(batch_size, 1, 1, 1)
-            scaled_timestep = scaled_timestep / max(1, self.timesteps - 1)
-            timestep_plane = scaled_timestep.expand(batch_size, 1, height, width)
-            model_input = torch.cat([image, semantic_mask, timestep_plane], dim=1)
-            return self.net(model_input)
 
     class SinusoidalTimeEmbedding(nn.Module):
         def __init__(self, channels: int) -> None:
@@ -133,7 +91,6 @@ if nn is not None:
             if self.channels % 2:
                 embedding = torch.nn.functional.pad(embedding, (0, 1))
             return embedding
-
 
     class ConditionedResBlock(nn.Module):
         def __init__(
@@ -170,7 +127,6 @@ if nn is not None:
             h = self.conv2(self.activation(self.norm2(h)))
             return h + self.skip(x)
 
-
     class SelfAttention2d(nn.Module):
         def __init__(self, channels: int) -> None:
             super().__init__()
@@ -198,11 +154,9 @@ if nn is not None:
             attended = attended.reshape(batch_size, channels, height, width)
             return x + self.projection(attended)
 
-
     class ConditionalUNet(nn.Module):
         def __init__(self, model_config: ModelConfig) -> None:
             super().__init__()
-            self.config = model_config
             base_channels = model_config.hidden_channels
             time_channels = base_channels * 4
             levels = [base_channels * multiplier for multiplier in CHANNEL_MULTIPLIERS]

@@ -63,10 +63,6 @@ def mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
     )
 
 
-def _mask_to_class_ids(mask: Image.Image, config: ModelConfig) -> list[int]:
-    return mask_to_class_ids(mask, config)
-
-
 def _class_id_from_rgb(pixel: tuple[int, int, int], config: ModelConfig) -> int:
     class_id = _RGB_CLASS_IDS.get(pixel)
     if class_id is None:
