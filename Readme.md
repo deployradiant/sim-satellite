@@ -16,20 +16,19 @@ The project is written in Python with uv. It uses Modal by default for training 
 uv sync
 uv run sim-satellite --help
 uv run sim-satellite openearthmap
-uv run sim-satellite train train.json --target modal
-uv run sim-satellite infer --target modal
-```
-
-Training reads run settings from a JSON file. Omitted fields use
-`TrainingConfig` defaults.
-
-```json
+cat > train.json <<'JSON'
 {
   "steps": 8,
   "batch_size": 4,
   "checkpoint_path": "artifacts/tiny-sim-satellite.pt"
 }
+JSON
+uv run sim-satellite train --target modal train.json
+uv run sim-satellite infer --target modal
 ```
+
+Training reads run settings from a JSON file. Omitted fields use
+`TrainingConfig` defaults.
 
 The OpenEarthMap data command writes a local `manifest.jsonl` plus `classes.json` under
 `data/openearthmap/`. The command can also be called directly as a package script:
@@ -38,11 +37,16 @@ The OpenEarthMap data command writes a local `manifest.jsonl` plus `classes.json
 uv run python -m sim_satellite.data.openearthmap
 ```
 
-For local PyTorch debugging runs:
+For local PyTorch debugging runs, put `"steps": 1` in the training JSON:
 
 ```bash
 uv sync
-uv run sim-satellite train train.local.json --target local
+cat > train.local.json <<'JSON'
+{
+  "steps": 1
+}
+JSON
+uv run sim-satellite train --target local train.local.json
 uv run sim-satellite infer --target local --steps 1
 ```
 
@@ -101,7 +105,7 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   329 images skipped because the downloaded archive has no matching mask, and 9 mask
   channels including `unlabeled`.
 - 2026-06-13 03:23 PDT: Modal GPU run completed with
-  `uv run sim-satellite train train.json --target modal`, where `train.json`
+  `uv run sim-satellite train --target modal train.json`, where `train.json`
   set `steps=8`, `batch_size=4`, and
   `checkpoint_path=artifacts/tiny-sim-satellite.pt`.
   Result: `device=cuda`, `final_loss=0.9386278390884399`, checkpoint written to

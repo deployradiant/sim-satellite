@@ -52,6 +52,8 @@ class TrainingConfig:
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
+    time_embedding_mlp: bool = True
+    deep_down_attention: bool = False
     mask_drop_probability: float = 0.0
     log_every: int = 10
 
@@ -93,6 +95,8 @@ class TrainingConfig:
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
             hidden_channels=self.hidden_channels,
+            time_embedding_mlp=self.time_embedding_mlp,
+            deep_down_attention=self.deep_down_attention,
             seed=self.seed,
         )
 
@@ -172,6 +176,8 @@ def run_training(
                 "timestep_logit_normal_std": TIMESTEP_LOGIT_NORMAL_STD,
                 "model_parameters": model_parameters,
                 "image_size": config.image_size,
+                "time_embedding_mlp": config.time_embedding_mlp,
+                "deep_down_attention": config.deep_down_attention,
                 "device": str(device),
                 **_torch_device_payload(torch, device),
             },
@@ -255,16 +261,15 @@ def run_training(
         if (config.save_every > 0 and step_number % config.save_every == 0) or (
             config.plot_every > 0 and step_number % config.plot_every == 0
         ):
-            progress_timing = _run_timing_payload(
-                started_at_epoch_utc=started_at_epoch_utc,
-                started_at_monotonic=started_at_monotonic,
-                start_step=start_step,
-                step=step_number,
-                steps=config.steps,
-                batch_size=config.batch_size,
-            )
-            _write_training_metrics(
+            _write_training_artifacts(
+                checkpoint_path.with_name(
+                    f"{checkpoint_path.stem}-step-{step_number}{checkpoint_path.suffix}"
+                ),
                 metrics_path,
+                loss_plot_path,
+                model=model,
+                optimizer=optimizer,
+                generator=generator,
                 model_config=model_config,
                 config=config,
                 model_parameters=model_parameters,
@@ -272,24 +277,14 @@ def run_training(
                 validation_losses=validation_losses,
                 final_loss=final_loss,
                 step=step_number,
-                run_timing=progress_timing,
-            )
-            _write_loss_plot(loss_plot_path, losses, validation_losses)
-            _write_training_checkpoint(
-                checkpoint_path.with_name(
-                    f"{checkpoint_path.stem}-step-{step_number}{checkpoint_path.suffix}"
+                run_timing=_run_timing_payload(
+                    started_at_epoch_utc=started_at_epoch_utc,
+                    started_at_monotonic=started_at_monotonic,
+                    start_step=start_step,
+                    step=step_number,
+                    steps=config.steps,
+                    batch_size=config.batch_size,
                 ),
-                model=model,
-                optimizer=optimizer,
-                generator=generator,
-                model_config=model_config,
-                config=config,
-                losses=losses,
-                validation_losses=validation_losses,
-                final_loss=final_loss,
-                step=step_number,
-                metrics_path=metrics_path,
-                loss_plot_path=loss_plot_path,
                 torch=torch,
             )
             if after_save is not None:
@@ -298,8 +293,13 @@ def run_training(
     final_step = max(start_step, config.steps)
     if not losses and config.resume_from:
         losses.append({"step": final_step, "loss": final_loss})
-    _write_training_metrics(
+    _write_training_artifacts(
+        checkpoint_path,
         metrics_path,
+        loss_plot_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
         model_config=model_config,
         config=config,
         model_parameters=model_parameters,
@@ -315,21 +315,6 @@ def run_training(
             steps=config.steps,
             batch_size=config.batch_size,
         ),
-    )
-    _write_loss_plot(loss_plot_path, losses, validation_losses)
-    _write_training_checkpoint(
-        checkpoint_path,
-        model=model,
-        optimizer=optimizer,
-        generator=generator,
-        model_config=model_config,
-        config=config,
-        losses=losses,
-        validation_losses=validation_losses,
-        final_loss=final_loss,
-        step=final_step,
-        metrics_path=metrics_path,
-        loss_plot_path=loss_plot_path,
         torch=torch,
     )
     if after_save is not None:
@@ -438,13 +423,21 @@ def _train_step(
     generator: Any,
     mask_drop_probability: float,
 ) -> float:
+    crop_boxes = [
+        _random_square_crop_box(
+            sample,
+            crop_size=model_config.image_size,
+            torch=torch,
+            generator=generator,
+        )
+        for sample in samples
+    ]
     clean, semantic_mask = _load_batch(
         samples,
+        crop_boxes,
         torch=torch,
         model_config=model_config,
         device=device,
-        random_crop=True,
-        generator=generator,
     )
     noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
     timestep = _sample_flow_timesteps(
@@ -557,6 +550,53 @@ def _exponential_moving_average(values: list[float], *, decay: float) -> list[fl
     return smoothed
 
 
+def _write_training_artifacts(
+    checkpoint_path: Path,
+    metrics_path: Path,
+    loss_plot_path: Path,
+    *,
+    model: Any,
+    optimizer: Any,
+    generator: Any,
+    model_config: ModelConfig,
+    config: TrainingConfig,
+    model_parameters: int,
+    losses: list[dict[str, float | int]],
+    validation_losses: list[dict[str, float | int]],
+    final_loss: float,
+    step: int,
+    run_timing: Mapping[str, float | int | None],
+    torch: Any,
+) -> None:
+    _write_training_metrics(
+        metrics_path,
+        model_config=model_config,
+        config=config,
+        model_parameters=model_parameters,
+        losses=losses,
+        validation_losses=validation_losses,
+        final_loss=final_loss,
+        step=step,
+        run_timing=run_timing,
+    )
+    _write_loss_plot(loss_plot_path, losses, validation_losses)
+    _write_training_checkpoint(
+        checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
+        model_config=model_config,
+        config=config,
+        losses=losses,
+        validation_losses=validation_losses,
+        final_loss=final_loss,
+        step=step,
+        metrics_path=metrics_path,
+        loss_plot_path=loss_plot_path,
+        torch=torch,
+    )
+
+
 def _write_training_checkpoint(
     path: Path,
     *,
@@ -606,7 +646,10 @@ def _load_training_state(
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location=device)
     checkpoint_model_config = checkpoint.get("model_config")
-    if checkpoint_model_config != asdict(model_config):
+    if (
+        not isinstance(checkpoint_model_config, Mapping)
+        or ModelConfig.from_dict(checkpoint_model_config) != model_config
+    ):
         raise ValueError("Resume checkpoint model_config does not match the requested model")
     model.load_state_dict(checkpoint["model_state"])
     optimizer_state = checkpoint.get("optimizer_state")
@@ -696,12 +739,16 @@ def _evaluate_validation_loss(
     losses: list[float] = []
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
+            crop_boxes = [
+                _center_square_crop_box(sample, crop_size=model_config.image_size)
+                for sample in samples
+            ]
             clean, semantic_mask = _load_batch(
                 samples,
+                crop_boxes,
                 torch=torch,
                 model_config=model_config,
                 device=device,
-                random_crop=False,
             )
             noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
             timestep = _sample_flow_timesteps(
@@ -722,29 +769,12 @@ def _evaluate_validation_loss(
 
 def _load_batch(
     samples: tuple[SatelliteSample, ...],
+    crop_boxes: list[tuple[int, int, int, int]],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-    random_crop: bool,
-    generator: Any | None = None,
 ) -> tuple[Any, Any]:
-    crop_boxes: list[tuple[int, int, int, int]] = []
-    for sample in samples:
-        if random_crop:
-            if generator is None:
-                raise ValueError("generator is required for random crop loading")
-            crop_boxes.append(
-                _random_square_crop_box(
-                    sample,
-                    crop_size=model_config.image_size,
-                    torch=torch,
-                    generator=generator,
-                )
-            )
-        else:
-            crop_boxes.append(_center_square_crop_box(sample, crop_size=model_config.image_size))
-
     images = [
         load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
         for sample, crop_box in zip(samples, crop_boxes, strict=True)

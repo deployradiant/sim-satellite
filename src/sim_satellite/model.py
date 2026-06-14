@@ -19,6 +19,8 @@ class ModelConfig:
     image_channels: int = 3
     mask_channels: int = 9
     hidden_channels: int = 32
+    time_embedding_mlp: bool = True
+    deep_down_attention: bool = False
     seed: int = 1337
 
     def __post_init__(self) -> None:
@@ -137,15 +139,19 @@ class ConditionalUNet(nn.Module):
     def __init__(self, model_config: ModelConfig) -> None:
         super().__init__()
         base_channels = model_config.hidden_channels
-        time_channels = base_channels * 4
+        time_channels = base_channels * 4 if model_config.time_embedding_mlp else base_channels
         levels = [base_channels * multiplier for multiplier in CHANNEL_MULTIPLIERS]
 
-        self.time_mlp = nn.Sequential(
-            SinusoidalTimeEmbedding(base_channels),
-            nn.Linear(base_channels, time_channels),
-            nn.SiLU(),
-            nn.Linear(time_channels, time_channels),
-        )
+        self.time_embedding_mlp = model_config.time_embedding_mlp
+        if self.time_embedding_mlp:
+            self.time_mlp = nn.Sequential(
+                SinusoidalTimeEmbedding(base_channels),
+                nn.Linear(base_channels, time_channels),
+                nn.SiLU(),
+                nn.Linear(time_channels, time_channels),
+            )
+        else:
+            self.time_embedding = SinusoidalTimeEmbedding(time_channels)
         self.input_conv = nn.Conv2d(
             model_config.image_channels + model_config.mask_channels,
             base_channels,
@@ -157,6 +163,10 @@ class ConditionalUNet(nn.Module):
         skip_channels: list[int] = [current_channels]
         self.down_blocks = nn.ModuleList()
         self.downsamples = nn.ModuleList()
+        self.deep_attention_level_index = len(levels) - 2
+        self.use_deep_down_attention = model_config.deep_down_attention
+        if self.use_deep_down_attention:
+            self.deep_down_attention = SelfAttention2d(levels[self.deep_attention_level_index])
         for level_index, level_channels in enumerate(levels):
             level_blocks = nn.ModuleList()
             for _ in range(BLOCKS_PER_LEVEL):
@@ -219,7 +229,10 @@ class ConditionalUNet(nn.Module):
         )
 
     def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
-        time_embedding = self.time_mlp(timestep)
+        if self.time_embedding_mlp:
+            time_embedding = self.time_mlp(timestep)
+        else:
+            time_embedding = self.time_embedding(timestep)
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
         skips: list[Any] = [h]
 
@@ -227,6 +240,9 @@ class ConditionalUNet(nn.Module):
             for block in level_blocks:
                 h = block(h, time_embedding, semantic_mask)
                 skips.append(h)
+            if self.use_deep_down_attention and level_index == self.deep_attention_level_index:
+                h = self.deep_down_attention(h)
+                skips[-1] = h
             if level_index < len(self.downsamples):
                 h = self.downsamples[level_index](h)
                 skips.append(h)

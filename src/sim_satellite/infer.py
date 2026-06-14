@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -152,6 +152,8 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
 def generate_image_with_model(
     loaded_generator: LoadedGenerator,
     config: GenerationConfig,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> GenerationResult:
     torch = loaded_generator.torch
     model = loaded_generator.model
@@ -173,7 +175,7 @@ def generate_image_with_model(
     )
 
     with torch.no_grad():
-        for step in reversed(range(1, config.steps + 1)):
+        for completed_steps, step in enumerate(reversed(range(1, config.steps + 1)), start=1):
             timestep = torch.full(
                 (1,),
                 step / float(config.steps),
@@ -189,6 +191,8 @@ def generate_image_with_model(
                 torch=torch,
             )
             image = image - velocity / float(config.steps)
+            if progress is not None:
+                progress(completed_steps, config.steps)
         image = image.clamp(0.0, 1.0)
 
     return GenerationResult(

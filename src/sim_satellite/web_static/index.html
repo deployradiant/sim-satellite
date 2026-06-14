@@ -151,6 +151,46 @@
       color: var(--muted);
       font-size: 13px;
     }
+    .progress {
+      display: grid;
+      gap: 6px;
+      min-height: 34px;
+    }
+    .progress[hidden] {
+      display: none;
+    }
+    .progress-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .progress-count {
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    progress {
+      width: 100%;
+      height: 8px;
+      border: 0;
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--panel-strong);
+      accent-color: var(--accent);
+    }
+    progress::-webkit-progress-bar {
+      background: var(--panel-strong);
+    }
+    progress::-webkit-progress-value {
+      background: var(--accent);
+    }
+    progress::-moz-progress-bar {
+      background: var(--accent);
+    }
     .classes {
       display: grid;
       gap: 10px;
@@ -314,6 +354,13 @@
       </section>
       <section class="viewer">
         <h2>Generated image</h2>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-line">
+            <span id="progress-label">Starting</span>
+            <span class="progress-count" id="progress-count">0 / 0</span>
+          </div>
+          <progress id="progress-bar" max="1" value="0"></progress>
+        </div>
         <div class="frame" id="output-frame"><div class="empty">No image yet</div></div>
       </section>
       <aside class="classes">
@@ -356,6 +403,10 @@
     const statusEl = document.getElementById("status");
     const classesEl = document.getElementById("classes");
     const metaEl = document.getElementById("meta");
+    const progressEl = document.getElementById("progress");
+    const progressLabel = document.getElementById("progress-label");
+    const progressCount = document.getElementById("progress-count");
+    const progressBar = document.getElementById("progress-bar");
 
     let classes = [];
     let activeClassId = 0;
@@ -366,6 +417,30 @@
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
       statusEl.classList.toggle("error", isError);
+    }
+
+    function showProgress(steps) {
+      const total = Math.max(Number(steps) || 1, 1);
+      progressEl.hidden = false;
+      progressBar.max = total;
+      progressBar.value = 0;
+      progressLabel.textContent = "Starting";
+      progressCount.textContent = `0 / ${total}`;
+    }
+
+    function updateProgress(step, steps) {
+      const total = Math.max(Number(steps) || 1, 1);
+      const current = Math.min(Math.max(Number(step) || 0, 0), total);
+      progressBar.max = total;
+      progressBar.value = current;
+      progressLabel.textContent = current >= total ? "Complete" : "Generating";
+      progressCount.textContent = `${current} / ${total}`;
+    }
+
+    function failProgress() {
+      if (!progressEl.hidden) {
+        progressLabel.textContent = "Failed";
+      }
     }
 
     function renderMask(index) {
@@ -443,7 +518,9 @@
 
     async function generate() {
       generateButton.disabled = true;
-      setStatus("Generating...");
+      generateButton.textContent = "Generating";
+      showProgress(stepsInput.value);
+      setStatus("Starting generation...");
       try {
         const body = {
           index: Number(sampleSelect.value),
@@ -454,32 +531,92 @@
           body.maskImage = maskCanvas.toDataURL("image/png");
         }
 
-        const response = await fetch("/api/generate", {
+        const response = await fetch("/api/generate/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body)
         });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || payload.error || "Generation failed");
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.detail || payload.error || "Generation failed");
+        }
+        if (!response.body) throw new Error("Generation progress stream is unavailable");
 
-        const image = document.createElement("img");
-        image.id = "generated";
-        image.alt = "Generated satellite image";
-        image.src = payload.image;
-        outputFrame.replaceChildren(image);
-
-        const message = [
-          `Generated ${payload.sample.name}`,
-          payload.maskEdited ? "edited mask" : "sample mask",
-          `seed ${payload.seed}`,
-          `${payload.steps} steps`
-        ].join(" | ");
-        setStatus(message);
+        const payload = await readGenerationStream(response.body);
+        if (!payload) throw new Error("Generation ended before the image was ready");
+        renderGeneratedImage(payload);
       } catch (error) {
+        failProgress();
         setStatus(error.message, true);
       } finally {
         generateButton.disabled = false;
+        generateButton.textContent = "Generate";
       }
+    }
+
+    async function readGenerationStream(stream) {
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completedPayload = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const payload = handleGenerationEvent(JSON.parse(line));
+          if (payload) completedPayload = payload;
+        }
+
+        if (done) break;
+      }
+
+      if (buffer.trim()) {
+        const payload = handleGenerationEvent(JSON.parse(buffer));
+        if (payload) completedPayload = payload;
+      }
+
+      return completedPayload;
+    }
+
+    function handleGenerationEvent(payload) {
+      if (payload.event === "start") {
+        updateProgress(0, payload.steps);
+        setStatus("Loading model...");
+        return null;
+      }
+      if (payload.event === "step") {
+        updateProgress(payload.step, payload.steps);
+        setStatus(`Generating step ${payload.step} of ${payload.steps}`);
+        return null;
+      }
+      if (payload.event === "complete") {
+        updateProgress(payload.steps, payload.steps);
+        return payload;
+      }
+      if (payload.event === "error") {
+        throw new Error(payload.detail || "Generation failed");
+      }
+      return null;
+    }
+
+    function renderGeneratedImage(payload) {
+      const image = document.createElement("img");
+      image.id = "generated";
+      image.alt = "Generated satellite image";
+      image.src = payload.image;
+      outputFrame.replaceChildren(image);
+
+      const message = [
+        `Generated ${payload.sample.name}`,
+        payload.maskEdited ? "edited mask" : "sample mask",
+        `seed ${payload.seed}`,
+        `${payload.steps} steps`
+      ].join(" | ");
+      setStatus(message);
     }
 
     function renderPaintClassOptions() {

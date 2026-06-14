@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from queue import Queue
 from tempfile import NamedTemporaryFile
+from threading import Thread
 from typing import Any
 
 import click
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
@@ -33,6 +36,9 @@ STATIC_DIR = Path(__file__).with_name("web_static")
 INDEX_PATH = STATIC_DIR / "index.html"
 MASK_DATA_URI_PREFIX = "data:image/png;base64,"
 MASK_COLORS = tuple(OPENEARTHMAP_RGB[name] for name in OPENEARTHMAP_CLASSES)
+STREAM_MEDIA_TYPE = "application/x-ndjson"
+_STREAM_DONE = object()
+ProgressCallback = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,17 @@ class GenerateRequest(BaseModel):
     mask_image: str | None = Field(default=None, alias="maskImage")
 
 
+@dataclass(frozen=True)
+class PreparedGeneration:
+    index: int
+    sample: SatelliteSample
+    seed: int
+    steps: int
+    mask_path: Path
+    temporary_mask_path: Path | None
+    mask_edited: bool
+
+
 def create_app(config: WebConfig | None = None) -> FastAPI:
     config = config or WebConfig()
     _validate_checkpoint_path(config)
@@ -100,40 +117,16 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
 
     @app.post("/api/generate")
     def generate(payload: GenerateRequest) -> dict[str, Any]:
-        sample = _sample_at(samples, payload.index)
-        seed = config.seed if payload.seed is None else payload.seed
-        steps = config.steps if payload.steps is None else payload.steps
-        if steps < 1:
-            raise HTTPException(status_code=400, detail="steps must be positive")
+        prepared = _prepare_generation(payload, samples, config)
+        return _run_generation(prepared, config, generator())
 
-        mask_path = sample.mask_path
-        temporary_mask_path: Path | None = None
-        if payload.mask_image is not None:
-            temporary_mask_path = _write_request_mask(payload.mask_image, config)
-            mask_path = temporary_mask_path
-
-        try:
-            generated = generate_image_with_model(
-                generator(),
-                GenerationConfig(
-                    seed=seed,
-                    mask_path=str(mask_path),
-                    steps=steps,
-                    guidance_scale=config.guidance_scale,
-                ),
-            )
-        finally:
-            if temporary_mask_path is not None:
-                temporary_mask_path.unlink(missing_ok=True)
-
-        png = _image_tensor_png(generated.image, config.display_size)
-        return {
-            "image": _data_uri(png, "image/png"),
-            "sample": _sample_payload(payload.index, sample),
-            "seed": seed,
-            "steps": steps,
-            "maskEdited": payload.mask_image is not None,
-        }
+    @app.post("/api/generate/stream")
+    def generate_stream(payload: GenerateRequest) -> StreamingResponse:
+        prepared = _prepare_generation(payload, samples, config)
+        return StreamingResponse(
+            _generate_stream(prepared, config, generator),
+            media_type=STREAM_MEDIA_TYPE,
+        )
 
     return app
 
@@ -209,6 +202,116 @@ def _sample_at(samples: Sequence[SatelliteSample], index: int) -> SatelliteSampl
     if index < 0 or index >= len(samples):
         raise HTTPException(status_code=400, detail=f"Sample index out of range: {index}")
     return samples[index]
+
+
+def _prepare_generation(
+    payload: GenerateRequest,
+    samples: Sequence[SatelliteSample],
+    config: WebConfig,
+) -> PreparedGeneration:
+    sample = _sample_at(samples, payload.index)
+    seed = config.seed if payload.seed is None else payload.seed
+    steps = config.steps if payload.steps is None else payload.steps
+    if steps < 1:
+        raise HTTPException(status_code=400, detail="steps must be positive")
+
+    mask_path = sample.mask_path
+    temporary_mask_path: Path | None = None
+    if payload.mask_image is not None:
+        temporary_mask_path = _write_request_mask(payload.mask_image, config)
+        mask_path = temporary_mask_path
+
+    return PreparedGeneration(
+        index=payload.index,
+        sample=sample,
+        seed=seed,
+        steps=steps,
+        mask_path=mask_path,
+        temporary_mask_path=temporary_mask_path,
+        mask_edited=payload.mask_image is not None,
+    )
+
+
+def _run_generation(
+    prepared: PreparedGeneration,
+    config: WebConfig,
+    loaded_generator: Any,
+    *,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    try:
+        generation_config = GenerationConfig(
+            seed=prepared.seed,
+            mask_path=str(prepared.mask_path),
+            steps=prepared.steps,
+            guidance_scale=config.guidance_scale,
+        )
+        if progress is None:
+            generated = generate_image_with_model(loaded_generator, generation_config)
+        else:
+            generated = generate_image_with_model(
+                loaded_generator,
+                generation_config,
+                progress=progress,
+            )
+    finally:
+        if prepared.temporary_mask_path is not None:
+            prepared.temporary_mask_path.unlink(missing_ok=True)
+
+    png = _image_tensor_png(generated.image, config.display_size)
+    return {
+        "image": _data_uri(png, "image/png"),
+        "sample": _sample_payload(prepared.index, prepared.sample),
+        "seed": prepared.seed,
+        "steps": prepared.steps,
+        "maskEdited": prepared.mask_edited,
+    }
+
+
+def _generate_stream(
+    prepared: PreparedGeneration,
+    config: WebConfig,
+    generator: Callable[[], Any],
+) -> Iterator[str]:
+    events: Queue[dict[str, Any] | Exception | object] = Queue()
+
+    def report_progress(step: int, steps: int) -> None:
+        events.put({"event": "step", "step": step, "steps": steps})
+
+    def run() -> None:
+        try:
+            result = _run_generation(
+                prepared,
+                config,
+                generator(),
+                progress=report_progress,
+            )
+            events.put({"event": "complete", **result})
+        except Exception as exc:
+            events.put(exc)
+        finally:
+            events.put(_STREAM_DONE)
+
+    yield _json_event({"event": "start", "step": 0, "steps": prepared.steps})
+    Thread(target=run, daemon=True).start()
+
+    while True:
+        event = events.get()
+        if event is _STREAM_DONE:
+            break
+        if isinstance(event, Exception):
+            yield _json_event(_stream_error_payload(event))
+        else:
+            yield _json_event(event)
+
+
+def _stream_error_payload(error: Exception) -> dict[str, Any]:
+    detail = error.detail if isinstance(error, HTTPException) else str(error)
+    return {"event": "error", "detail": detail}
+
+
+def _json_event(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, separators=(",", ":")) + "\n"
 
 
 def _mask_preview_png(mask_path: Path, config: WebConfig) -> bytes:

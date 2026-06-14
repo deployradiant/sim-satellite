@@ -96,6 +96,51 @@ def test_web_generate_uses_generation_only_config(
     assert load_calls == [(config.checkpoint_path, config.device)]
 
 
+def test_web_generate_stream_reports_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+
+    def fake_generate(
+        generator: object,
+        generation_config: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
+        assert generation_config.steps == 3
+        for step in range(1, generation_config.steps + 1):
+            progress(step, generation_config.steps)
+        return SimpleNamespace(image=object())
+
+    monkeypatch.setattr(web, "load_generator", _fake_load_generator)
+    monkeypatch.setattr(web, "generate_image_with_model", fake_generate)
+    monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
+    app = web.create_app(config)
+    assert any(getattr(route, "path", "") == "/api/generate/stream" for route in app.routes)
+    prepared = web._prepare_generation(
+        web.GenerateRequest(index=0, steps=3),
+        web._load_samples(config),
+        config,
+    )
+
+    events = [json.loads(line) for line in web._generate_stream(prepared, config, lambda: object())]
+    assert [event["event"] for event in events] == [
+        "start",
+        "step",
+        "step",
+        "step",
+        "complete",
+    ]
+    assert [(event["step"], event["steps"]) for event in events[1:4]] == [
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert events[-1]["image"] == "data:image/png;base64,cG5n"
+    assert events[-1]["sample"]["name"] == "tile"
+
+
 def test_web_generate_rejects_bad_request_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
