@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -12,22 +13,22 @@ from typing import Any
 import click
 import torch
 
+from sim_satellite import training_data
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
-from sim_satellite.data.tensors import load_image_tensor, load_mask_tensor
 from sim_satellite.model import (
     ModelConfig,
     build_model,
     flow_velocity,
     interpolate_flow_sample,
 )
+from sim_satellite.training_data import PreloadedSample
 
 DEFAULT_TARGET = "modal"
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
 TIMESTEP_SAMPLING = "logit_normal"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
-
 
 @dataclass(frozen=True)
 class TrainingConfig:
@@ -53,6 +54,10 @@ class TrainingConfig:
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
     mask_drop_probability: float = 0.0
+    precision: str = "float32"
+    device_random: bool = False
+    preload_samples: bool = False
+    timing_sample_every: int = 0
     log_every: int = 10
 
     def __post_init__(self) -> None:
@@ -74,6 +79,13 @@ class TrainingConfig:
             raise ValueError("learning_rate must be positive")
         if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
             raise ValueError("mask_drop_probability must be between 0 and 1")
+        if self.precision not in {"float32", "bf16"}:
+            raise ValueError("precision must be 'float32' or 'bf16'")
+        for field_name in ("device_random", "preload_samples"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be a boolean")
+        if self.timing_sample_every < 0:
+            raise ValueError("timing_sample_every must be non-negative")
         if not self.manifest_path:
             raise ValueError("manifest_path is required")
         if not self.split:
@@ -124,8 +136,16 @@ def run_training(
     model_parameters = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    batches = tuple(iter_batches(_load_training_samples(config), config.batch_size))
+    device_generator = _make_device_random_generator(config, torch=torch, device=device)
+    training_samples = _load_training_samples(config)
+    batches = tuple(iter_batches(training_samples, config.batch_size))
     validation_batches = _load_validation_batches(config)
+    preload_started_at = time.monotonic()
+    preloaded_samples = {}
+    if config.preload_samples:
+        samples_to_preload = training_data.unique_samples(training_samples, validation_batches)
+        preloaded_samples = training_data.preload_samples(samples_to_preload)
+    preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
     final_loss = 0.0
     losses: list[dict[str, float | int]] = []
@@ -137,6 +157,7 @@ def run_training(
             model=model,
             optimizer=optimizer,
             generator=generator,
+            device_generator=device_generator,
             torch=torch,
             model_config=model_config,
             device=device,
@@ -170,6 +191,12 @@ def run_training(
                 "timestep_sampling": TIMESTEP_SAMPLING,
                 "timestep_logit_normal_mean": TIMESTEP_LOGIT_NORMAL_MEAN,
                 "timestep_logit_normal_std": TIMESTEP_LOGIT_NORMAL_STD,
+                "precision": config.precision,
+                "device_random": config.device_random,
+                "preload_samples": config.preload_samples,
+                "preload_sample_count": len(preloaded_samples),
+                "preload_seconds": preload_seconds,
+                "timing_sample_every": config.timing_sample_every,
                 "model_parameters": model_parameters,
                 "image_size": config.image_size,
                 "device": str(device),
@@ -183,7 +210,8 @@ def run_training(
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
-        final_loss = _train_step(
+        step_started_at = time.monotonic()
+        final_loss, step_timing = _train_step(
             batches[step % len(batches)],
             model=model,
             optimizer=optimizer,
@@ -191,9 +219,23 @@ def run_training(
             model_config=model_config,
             device=device,
             generator=generator,
+            device_generator=device_generator,
+            preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            precision=config.precision,
+            profile_timing=_should_sample_step_timing(config, step_number),
         )
-        losses.append({"step": step_number, "loss": final_loss})
+        step_seconds = max(0.0, time.monotonic() - step_started_at)
+        loss_record = {
+            "step": step_number,
+            "loss": final_loss,
+            "step_seconds": step_seconds,
+            "step_images_per_second": (
+                config.batch_size / step_seconds if step_seconds > 0.0 else 0.0
+            ),
+        }
+        loss_record.update(step_timing)
+        losses.append(loss_record)
 
         if (
             validation_batches
@@ -207,6 +249,7 @@ def run_training(
                 model_config=model_config,
                 device=device,
                 config=config,
+                preloaded_samples=preloaded_samples,
             )
             validation_losses.append({"step": step_number, "loss": validation_loss})
             print(
@@ -238,6 +281,9 @@ def run_training(
                         "step": step_number,
                         "steps": config.steps,
                         "loss": final_loss,
+                        "step_seconds": loss_record["step_seconds"],
+                        "step_images_per_second": loss_record["step_images_per_second"],
+                        **step_timing,
                         **_run_timing_payload(
                             started_at_epoch_utc=started_at_epoch_utc,
                             started_at_monotonic=started_at_monotonic,
@@ -264,6 +310,7 @@ def run_training(
                 model=model,
                 optimizer=optimizer,
                 generator=generator,
+                device_generator=device_generator,
                 model_config=model_config,
                 config=config,
                 model_parameters=model_parameters,
@@ -294,6 +341,7 @@ def run_training(
         model=model,
         optimizer=optimizer,
         generator=generator,
+        device_generator=device_generator,
         model_config=model_config,
         config=config,
         model_parameters=model_parameters,
@@ -394,14 +442,56 @@ def _torch_device_payload(torch: Any, device: Any) -> dict[str, int | str | None
     }
 
 
+def _make_device_random_generator(
+    config: TrainingConfig,
+    *,
+    torch: Any,
+    device: Any,
+) -> Any | None:
+    if not config.device_random:
+        return None
+    device_type = getattr(device, "type", str(device))
+    if device_type == "cpu":
+        return None
+    if device_type != "cuda":
+        raise ValueError("device_random supports cpu and cuda devices")
+    return torch.Generator(device=device).manual_seed(config.seed)
+
+
+def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool:
+    return config.timing_sample_every > 0 and (
+        step_number == 1
+        or step_number == config.steps
+        or step_number % config.timing_sample_every == 0
+    )
+
+
+def _autocast_context(torch: Any, device: Any, precision: str) -> Any:
+    if precision == "float32":
+        return nullcontext()
+    device_type = getattr(device, "type", str(device))
+    if device_type not in {"cuda", "cpu"}:
+        raise ValueError("bf16 precision supports cpu and cuda devices")
+    return torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+
+
+def _synchronize_device(torch: Any, device: Any, enabled: bool) -> None:
+    if not enabled or getattr(device, "type", str(device)) != "cuda":
+        return
+    cuda = getattr(torch, "cuda", None)
+    if cuda is not None and cuda.is_available():
+        cuda.synchronize(device)
+
+
 def _sample_flow_timesteps(
     batch_size: int,
     *,
     torch: Any,
     generator: Any,
     device: Any,
+    random_device: Any = "cpu",
 ) -> Any:
-    logits = torch.randn(batch_size, generator=generator, device="cpu")
+    logits = torch.randn(batch_size, generator=generator, device=random_device)
     logits = logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
     return torch.sigmoid(logits).to(device)
 
@@ -415,49 +505,82 @@ def _train_step(
     model_config: ModelConfig,
     device: Any,
     generator: Any,
+    device_generator: Any | None,
+    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
     mask_drop_probability: float,
-) -> float:
+    precision: str,
+    profile_timing: bool,
+) -> tuple[float, dict[str, float | int]]:
+    timing: dict[str, float | int] = {}
+
+    _synchronize_device(torch, device, profile_timing)
+    crop_started_at = time.monotonic()
     crop_boxes = [
-        _random_square_crop_box(
+        training_data.random_square_crop_box(
             sample,
             crop_size=model_config.image_size,
             torch=torch,
             generator=generator,
+            preloaded_samples=preloaded_samples,
         )
         for sample in samples
     ]
-    clean, semantic_mask = _load_batch(
+    _synchronize_device(torch, device, profile_timing)
+    if profile_timing:
+        timing["crop_seconds"] = max(0.0, time.monotonic() - crop_started_at)
+
+    load_started_at = time.monotonic()
+    clean, semantic_mask = training_data.load_batch(
         samples,
         crop_boxes,
         torch=torch,
         model_config=model_config,
         device=device,
+        preloaded_samples=preloaded_samples,
     )
-    noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
+    _synchronize_device(torch, device, profile_timing)
+    if profile_timing:
+        timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
+
+    random_generator = device_generator if device_generator is not None else generator
+    random_device = device if device_generator is not None else "cpu"
+
+    random_started_at = time.monotonic()
+    noise = torch.randn(clean.shape, generator=random_generator, device=random_device).to(device)
     timestep = _sample_flow_timesteps(
         clean.shape[0],
         torch=torch,
-        generator=generator,
+        generator=random_generator,
         device=device,
+        random_device=random_device,
     )
     noisy = interpolate_flow_sample(clean, noise, timestep)
     target = flow_velocity(clean, noise)
 
     if mask_drop_probability > 0.0:
         keep_mask = torch.rand(
-            semantic_mask.shape[0],
-            generator=generator,
-            device="cpu",
-        ).to(semantic_mask.device)
+            (semantic_mask.shape[0],),
+            generator=random_generator,
+            device=random_device,
+        ).to(device)
         keep_mask = (keep_mask >= mask_drop_probability).float().view(-1, 1, 1, 1)
         semantic_mask = semantic_mask * keep_mask
+    _synchronize_device(torch, device, profile_timing)
+    if profile_timing:
+        timing["random_seconds"] = max(0.0, time.monotonic() - random_started_at)
 
+    compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
-    prediction = model(noisy, semantic_mask, timestep)
-    loss = torch.nn.functional.mse_loss(prediction, target)
+    with _autocast_context(torch, device, precision):
+        prediction = model(noisy, semantic_mask, timestep)
+    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
     loss.backward()
     optimizer.step()
-    return float(loss.detach().cpu().item())
+    _synchronize_device(torch, device, profile_timing)
+    if profile_timing:
+        timing["train_compute_seconds"] = max(0.0, time.monotonic() - compute_started_at)
+        timing["timing_sampled"] = 1
+    return float(loss.detach().cpu().item()), timing
 
 
 def _write_training_metrics(
@@ -552,6 +675,7 @@ def _write_training_artifacts(
     model: Any,
     optimizer: Any,
     generator: Any,
+    device_generator: Any | None,
     model_config: ModelConfig,
     config: TrainingConfig,
     model_parameters: int,
@@ -579,6 +703,7 @@ def _write_training_artifacts(
         model=model,
         optimizer=optimizer,
         generator=generator,
+        device_generator=device_generator,
         model_config=model_config,
         config=config,
         losses=losses,
@@ -597,6 +722,7 @@ def _write_training_checkpoint(
     model: Any,
     optimizer: Any,
     generator: Any,
+    device_generator: Any | None,
     model_config: ModelConfig,
     config: TrainingConfig,
     losses: list[dict[str, float | int]],
@@ -613,6 +739,9 @@ def _write_training_checkpoint(
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "generator_state": generator.get_state(),
+            "device_generator_state": (
+                device_generator.get_state() if device_generator is not None else None
+            ),
             "model_config": asdict(model_config),
             "training_config": asdict(config),
             "step": step,
@@ -632,6 +761,7 @@ def _load_training_state(
     model: Any,
     optimizer: Any,
     generator: Any,
+    device_generator: Any | None,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
@@ -652,6 +782,9 @@ def _load_training_state(
     generator_state = checkpoint.get("generator_state")
     if generator_state is not None:
         generator.set_state(generator_state)
+    device_generator_state = checkpoint.get("device_generator_state")
+    if device_generator is not None and device_generator_state is not None:
+        device_generator.set_state(device_generator_state)
     step = int(checkpoint["step"])
     final_loss = float(checkpoint.get("final_loss", 0.0))
     losses = list(checkpoint.get("losses", []))
@@ -726,114 +859,51 @@ def _evaluate_validation_loss(
     model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
+    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
 ) -> float:
     was_training = model.training
     model.eval()
-    generator = torch.Generator(device="cpu").manual_seed(config.seed + 10_000)
+    random_device = (
+        device if config.device_random and getattr(device, "type", str(device)) == "cuda" else "cpu"
+    )
+    generator = torch.Generator(device=random_device).manual_seed(config.seed + 10_000)
     losses: list[float] = []
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
             crop_boxes = [
-                _center_square_crop_box(sample, crop_size=model_config.image_size)
+                training_data.center_square_crop_box(
+                    sample,
+                    crop_size=model_config.image_size,
+                    preloaded_samples=preloaded_samples,
+                )
                 for sample in samples
             ]
-            clean, semantic_mask = _load_batch(
+            clean, semantic_mask = training_data.load_batch(
                 samples,
                 crop_boxes,
                 torch=torch,
                 model_config=model_config,
                 device=device,
+                preloaded_samples=preloaded_samples,
             )
-            noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
+            noise = torch.randn(clean.shape, generator=generator, device=random_device).to(device)
             timestep = _sample_flow_timesteps(
                 clean.shape[0],
                 torch=torch,
                 generator=generator,
                 device=device,
+                random_device=random_device,
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
-            prediction = model(noisy, semantic_mask, timestep)
-            losses.append(float(torch.nn.functional.mse_loss(prediction, target).cpu().item()))
+            with _autocast_context(torch, device, config.precision):
+                prediction = model(noisy, semantic_mask, timestep)
+            loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+            losses.append(float(loss.cpu().item()))
 
     if was_training:
         model.train()
     return sum(losses) / len(losses)
-
-
-def _load_batch(
-    samples: tuple[SatelliteSample, ...],
-    crop_boxes: list[tuple[int, int, int, int]],
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    device: Any,
-) -> tuple[Any, Any]:
-    images = [
-        load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
-    masks = [
-        load_mask_tensor(sample.mask_path, torch=torch, config=model_config, crop_box=crop_box)
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
-    return torch.stack(images).to(device), torch.stack(masks).to(device)
-
-
-def _random_square_crop_box(
-    sample: SatelliteSample,
-    *,
-    crop_size: int,
-    torch: Any,
-    generator: Any,
-) -> tuple[int, int, int, int]:
-    width, height = _aligned_image_size(sample)
-    size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
-
-    max_left = width - size
-    max_top = height - size
-    left = (
-        0
-        if max_left <= 0
-        else int(torch.randint(0, max_left + 1, (1,), generator=generator, device="cpu").item())
-    )
-    top = (
-        0
-        if max_top <= 0
-        else int(torch.randint(0, max_top + 1, (1,), generator=generator, device="cpu").item())
-    )
-    return left, top, left + size, top + size
-
-
-def _center_square_crop_box(
-    sample: SatelliteSample,
-    *,
-    crop_size: int,
-) -> tuple[int, int, int, int]:
-    width, height = _aligned_image_size(sample)
-    size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
-    left = (width - size) // 2
-    top = (height - size) // 2
-    return left, top, left + size, top + size
-
-
-def _aligned_image_size(sample: SatelliteSample) -> tuple[int, int]:
-    from PIL import Image
-
-    with Image.open(sample.image_path) as image:
-        image_size = image.size
-    with Image.open(sample.mask_path) as mask:
-        mask_size = mask.size
-    if image_size != mask_size:
-        raise ValueError(
-            f"Image and mask sizes must match for aligned crops: "
-            f"{sample.image_path} is {image_size}, {sample.mask_path} is {mask_size}"
-        )
-    return image_size
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

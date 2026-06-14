@@ -23,6 +23,16 @@ def load_image_tensor(
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> Any:
     image = Image.open(path).convert("RGB")
+    return image_to_tensor(image, torch=torch, config=config, crop_box=crop_box)
+
+
+def image_to_tensor(
+    image: Image.Image,
+    *,
+    torch: Any,
+    config: ModelConfig,
+    crop_box: tuple[int, int, int, int] | None = None,
+) -> Any:
     if crop_box is not None:
         image = image.crop(crop_box)
     image = image.resize((config.image_size, config.image_size), Image.Resampling.BILINEAR)
@@ -38,6 +48,16 @@ def load_mask_tensor(
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> Any:
     mask = Image.open(path)
+    return mask_to_tensor(mask, torch=torch, config=config, crop_box=crop_box)
+
+
+def mask_to_tensor(
+    mask: Image.Image,
+    *,
+    torch: Any,
+    config: ModelConfig,
+    crop_box: tuple[int, int, int, int] | None = None,
+) -> Any:
     if crop_box is not None:
         mask = mask.crop(crop_box)
     mask = mask.resize((config.image_size, config.image_size), Image.Resampling.NEAREST)

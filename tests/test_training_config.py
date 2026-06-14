@@ -16,10 +16,10 @@ from sim_satellite.train import (
     TrainingConfig,
     _load_training_samples,
     _load_validation_batches,
-    _random_square_crop_box,
     _run_timing_payload,
     _sample_flow_timesteps,
 )
+from sim_satellite.training_data import random_square_crop_box
 
 
 def test_training_cli_loads_json_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -81,6 +81,14 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(validation_every=-1)
     with pytest.raises(ValueError):
         TrainingConfig(validation_batches=0)
+    with pytest.raises(ValueError):
+        TrainingConfig(precision="fp16")
+    with pytest.raises(ValueError):
+        TrainingConfig(device_random="yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        TrainingConfig(preload_samples="yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        TrainingConfig(timing_sample_every=-1)
 
 
 def test_run_timing_payload_estimates_remaining_runtime() -> None:
@@ -207,7 +215,7 @@ def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> 
     Image.new("L", (10, 8)).save(mask_path)
     sample = SatelliteSample(image_path=image_path, mask_path=mask_path, split="train")
 
-    crop_box = _random_square_crop_box(
+    crop_box = random_square_crop_box(
         sample,
         crop_size=4,
         torch=_FakeTorch([3, 2]),

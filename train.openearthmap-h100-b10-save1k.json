@@ -21,5 +21,9 @@
   "mask_channels": 9,
   "hidden_channels": 128,
   "mask_drop_probability": 0.1,
+  "precision": "bf16",
+  "device_random": true,
+  "preload_samples": true,
+  "timing_sample_every": 100,
   "log_every": 100
 }
