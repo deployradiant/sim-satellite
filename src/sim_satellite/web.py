@@ -52,7 +52,7 @@ class WebConfig:
     device: str = "cpu"
     steps: int = 8
     guidance_scale: float = 1.0
-    seed: int = 1337
+    seed: int = 2026
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     max_samples: int = DEFAULT_MAX_SAMPLES

@@ -32,7 +32,7 @@ TIMESTEP_LOGIT_NORMAL_STD = 1.0
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    seed: int = 1337
+    seed: int = 2026
     steps: int = 8
     batch_size: int = 4
     learning_rate: float = 1e-3

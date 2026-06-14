@@ -21,7 +21,7 @@ DEFAULT_TARGET = "modal"
 
 @dataclass(frozen=True)
 class InferenceConfig:
-    seed: int = 1337
+    seed: int = 2026
     checkpoint_path: str = "artifacts/tiny-sim-satellite.pt"
     output_path: str = "artifacts/sample.pt"
     manifest_path: str = DEFAULT_MANIFEST_PATH
@@ -52,7 +52,7 @@ class InferenceConfig:
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    seed: int = 1337
+    seed: int = 2026
     mask_path: str = ""
     steps: int = 8
     guidance_scale: float = 1.0

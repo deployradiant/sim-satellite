@@ -19,7 +19,7 @@ class ModelConfig:
     image_channels: int = 3
     mask_channels: int = 9
     hidden_channels: int = 32
-    seed: int = 1337
+    seed: int = 2026
 
     def __post_init__(self) -> None:
         if self.image_size < 8:
