@@ -195,6 +195,22 @@ def _modal_artifact_path(value: str) -> str:
 
 
 def _modal_data_path(value: str, *, field_name: str) -> str:
+    path = Path(value)
+    if MODAL_DATA_ROOT.exists():
+        if path.is_absolute():
+            try:
+                path.relative_to(MODAL_DATA_ROOT)
+            except ValueError:
+                raise ValueError(
+                    f"Modal {field_name} must be under {MODAL_DATA_ROOT}: {value!r}"
+                ) from None
+            return str(path)
+        if path.parts and path.parts[0] == "data":
+            path = path.relative_to("data")
+        if ".." in path.parts:
+            raise ValueError(f"Modal {field_name} must stay under {MODAL_DATA_ROOT}: {value!r}")
+        return str(MODAL_DATA_ROOT / path)
+
     if not DATA_MOUNT_CONFIGURED:
         raise RuntimeError(
             f"Modal {field_name} cannot be used because {LOCAL_DATA_ROOT}/ did not exist when "

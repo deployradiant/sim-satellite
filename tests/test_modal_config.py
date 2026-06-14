@@ -320,6 +320,30 @@ def test_modal_data_mount_ignores_raw_archives() -> None:
     )
 
 
+def test_modal_data_path_maps_inside_modal_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    modal_data_root = tmp_path / "data"
+    modal_data_root.mkdir()
+    monkeypatch.setattr(modal_app, "MODAL_DATA_ROOT", modal_data_root)
+
+    assert (
+        modal_app._modal_data_path("data/openearthmap/manifest.jsonl", field_name="manifest_path")
+        == str(modal_data_root / "openearthmap/manifest.jsonl")
+    )
+    assert (
+        modal_app._modal_data_path(
+            str(modal_data_root / "openearthmap/manifest.jsonl"),
+            field_name="manifest_path",
+        )
+        == str(modal_data_root / "openearthmap/manifest.jsonl")
+    )
+
+    with pytest.raises(ValueError, match="must be under"):
+        modal_app._modal_data_path("/tmp/manifest.jsonl", field_name="manifest_path")
+
+
 def _install_modal_fakes(
     monkeypatch: pytest.MonkeyPatch,
     fake_app: _FakeApp,
