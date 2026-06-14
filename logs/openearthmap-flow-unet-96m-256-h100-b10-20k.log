@@ -1,0 +1,67 @@
+✓ Initialized. View run at 
+https://modal.com/apps/koogle-frick/main/ap-Uao24YU5JzoNeZ3833iymu
+✓ Created objects.
+├── 🔨 Created mount 
+│   /Users/jakob/Projects/sim-satellite/src/sim_satellite/web_static/index.html
+├── 🔨 Created mount PythonPackage:sim_satellite
+├── 🔨 Created mount PythonPackage:sim_satellite
+├── 🔨 Created mount /Users/jakob/Projects/sim-satellite/data
+├── 🔨 Created function train_remote.
+├── 🔨 Created function infer_remote.
+└── 🔨 Created web function web_remote => 
+    https://koogle-frick--sim-satellite-web-remote-dev.modal.run
+{"batch_size": 10, "device": "cuda", "event": "train_start", "image_size": 256, "model_parameters": 96535171, "remaining_steps": 20000, "start_step": 0, "started_at_epoch_utc": 1781396219.6712527, "steps": 20000, "torch_cuda_device_count": 1, "torch_device_name": "NVIDIA H100 80GB HBM3", "total_images_target": 200000, "train_batches": 77, "train_samples": 767}
+{"completed_images_this_run": 10, "completed_steps_this_run": 1, "elapsed_seconds": 5.40679865, "estimated_finish_epoch_utc": 1781504355.6442513, "estimated_remaining_seconds": 108130.56620135, "estimated_total_seconds": 108135.973, "event": "train_progress", "images_per_second": 1.8495232849109333, "logged_at_epoch_utc": 1781396225.07805, "loss": 1.460065484046936, "progress_fraction": 5e-05, "remaining_images": 199990, "remaining_steps": 19999, "started_at_epoch_utc": 1781396219.6712527, "step": 1, "steps": 20000, "steps_per_second": 0.18495232849109333}
+{"completed_images_this_run": 1000, "completed_steps_this_run": 100, "elapsed_seconds": 89.302530973, "estimated_finish_epoch_utc": 1781414080.1774461, "estimated_remaining_seconds": 17771.203663627002, "estimated_total_seconds": 17860.506194600002, "event": "train_progress", "images_per_second": 11.197890911987063, "logged_at_epoch_utc": 1781396308.9737825, "loss": 0.15064559876918793, "progress_fraction": 0.005, "remaining_images": 199000, "remaining_steps": 19900, "started_at_epoch_utc": 1781396219.6712527, "step": 100, "steps": 20000, "steps_per_second": 1.1197890911987063}
+{"completed_images_this_run": 2000, "completed_steps_this_run": 200, "elapsed_seconds": 172.667687887, "estimated_finish_epoch_utc": 1781413486.4400403, "estimated_remaining_seconds": 17094.101100813, "estimated_total_seconds": 17266.7687887, "event": "train_progress", "images_per_second": 11.5829430768128, "logged_at_epoch_utc": 1781396392.3389394, "loss": 0.10190793871879578, "progress_fraction": 0.01, "remaining_images": 198000, "remaining_steps": 19800, "started_at_epoch_utc": 1781396219.6712527, "step": 200, "steps": 20000, "steps_per_second": 1.15829430768128}
+{"completed_images_this_run": 3000, "completed_steps_this_run": 300, "elapsed_seconds": 258.58617844, "estimated_finish_epoch_utc": 1781413458.7498143, "estimated_remaining_seconds": 16980.49238422667, "estimated_total_seconds": 17239.07856266667, "event": "train_progress", "images_per_second": 11.601548149628162, "logged_at_epoch_utc": 1781396478.25743, "loss": 0.1547027975320816, "progress_fraction": 0.015, "remaining_images": 197000, "remaining_steps": 19700, "started_at_epoch_utc": 1781396219.6712527, "step": 300, "steps": 20000, "steps_per_second": 1.1601548149628162}
+{"completed_images_this_run": 4000, "completed_steps_this_run": 400, "elapsed_seconds": 344.732875786, "estimated_finish_epoch_utc": 1781413456.3150406, "estimated_remaining_seconds": 16891.910913514, "estimated_total_seconds": 17236.6437893, "event": "train_progress", "images_per_second": 11.603186933882924, "logged_at_epoch_utc": 1781396564.4041271, "loss": 0.04541328176856041, "progress_fraction": 0.02, "remaining_images": 196000, "remaining_steps": 19600, "started_at_epoch_utc": 1781396219.6712527, "step": 400, "steps": 20000, "steps_per_second": 1.1603186933882923}
+{"completed_images_this_run": 5000, "completed_steps_this_run": 500, "elapsed_seconds": 439.39062906000004, "estimated_finish_epoch_utc": 1781413795.296414, "estimated_remaining_seconds": 17136.23453334, "estimated_total_seconds": 17575.6251624, "event": "train_progress", "images_per_second": 11.379396075643744, "logged_at_epoch_utc": 1781396659.0618806, "loss": 0.05009836703538895, "progress_fraction": 0.025, "remaining_images": 195000, "remaining_steps": 19500, "started_at_epoch_utc": 1781396219.6712527, "step": 500, "steps": 20000, "steps_per_second": 1.1379396075643744}
+{"completed_images_this_run": 6000, "completed_steps_this_run": 600, "elapsed_seconds": 532.612550456, "estimated_finish_epoch_utc": 1781413973.422933, "estimated_remaining_seconds": 17221.139131410666, "estimated_total_seconds": 17753.751681866666, "event": "train_progress", "images_per_second": 11.265224589362488, "logged_at_epoch_utc": 1781396752.2838018, "loss": 0.08252432197332382, "progress_fraction": 0.03, "remaining_images": 194000, "remaining_steps": 19400, "started_at_epoch_utc": 1781396219.6712527, "step": 600, "steps": 20000, "steps_per_second": 1.1265224589362488}
+{"completed_images_this_run": 7000, "completed_steps_this_run": 700, "elapsed_seconds": 622.448082184, "estimated_finish_epoch_utc": 1781414003.9021711, "estimated_remaining_seconds": 17161.782837358856, "estimated_total_seconds": 17784.230919542857, "event": "train_progress", "images_per_second": 11.245917853002158, "logged_at_epoch_utc": 1781396842.1193337, "loss": 0.07662779092788696, "progress_fraction": 0.035, "remaining_images": 193000, "remaining_steps": 19300, "started_at_epoch_utc": 1781396219.6712527, "step": 700, "steps": 20000, "steps_per_second": 1.1245917853002159}
+{"completed_images_this_run": 8000, "completed_steps_this_run": 800, "elapsed_seconds": 711.180531917, "estimated_finish_epoch_utc": 1781413999.1845493, "estimated_remaining_seconds": 17068.332766008003, "estimated_total_seconds": 17779.513297925005, "event": "train_progress", "images_per_second": 11.248901848361701, "logged_at_epoch_utc": 1781396930.8517833, "loss": 0.048501044511795044, "progress_fraction": 0.04, "remaining_images": 192000, "remaining_steps": 19200, "started_at_epoch_utc": 1781396219.6712527, "step": 800, "steps": 20000, "steps_per_second": 1.12489018483617}
+{"completed_images_this_run": 9000, "completed_steps_this_run": 900, "elapsed_seconds": 794.488050687, "estimated_finish_epoch_utc": 1781413874.9612668, "estimated_remaining_seconds": 16860.80196457967, "estimated_total_seconds": 17655.29001526667, "event": "train_progress", "images_per_second": 11.328049543624513, "logged_at_epoch_utc": 1781397014.1593022, "loss": 0.03813159093260765, "progress_fraction": 0.045, "remaining_images": 191000, "remaining_steps": 19100, "started_at_epoch_utc": 1781396219.6712527, "step": 900, "steps": 20000, "steps_per_second": 1.1328049543624512}
+{"completed_images_this_run": 10000, "completed_steps_this_run": 1000, "elapsed_seconds": 881.91807026, "estimated_finish_epoch_utc": 1781413858.0326564, "estimated_remaining_seconds": 16756.44333494, "estimated_total_seconds": 17638.361405199998, "event": "train_progress", "images_per_second": 11.338921762938682, "logged_at_epoch_utc": 1781397101.5893214, "loss": 0.059238217771053314, "progress_fraction": 0.05, "remaining_images": 190000, "remaining_steps": 19000, "started_at_epoch_utc": 1781396219.6712527, "step": 1000, "steps": 20000, "steps_per_second": 1.1338921762938683}
+{"completed_images_this_run": 11000, "completed_steps_this_run": 1100, "elapsed_seconds": 966.636855632, "estimated_finish_epoch_utc": 1781413794.8868082, "estimated_remaining_seconds": 16608.578701313454, "estimated_total_seconds": 17575.215556945455, "event": "train_progress", "images_per_second": 11.379661282217565, "logged_at_epoch_utc": 1781397186.308107, "loss": 0.04288296774029732, "progress_fraction": 0.055, "remaining_images": 189000, "remaining_steps": 18900, "started_at_epoch_utc": 1781396219.6712527, "step": 1100, "steps": 20000, "steps_per_second": 1.1379661282217566}
+{"completed_images_this_run": 12000, "completed_steps_this_run": 1200, "elapsed_seconds": 1051.509861822, "estimated_finish_epoch_utc": 1781413744.8356152, "estimated_remaining_seconds": 16473.654501877998, "estimated_total_seconds": 17525.164363699998, "event": "train_progress", "images_per_second": 11.412161155775603, "logged_at_epoch_utc": 1781397271.1811132, "loss": 0.0738038420677185, "progress_fraction": 0.06, "remaining_images": 188000, "remaining_steps": 18800, "started_at_epoch_utc": 1781396219.6712527, "step": 1200, "steps": 20000, "steps_per_second": 1.1412161155775604}
+{"completed_images_this_run": 13000, "completed_steps_this_run": 1300, "elapsed_seconds": 1136.975872579, "estimated_finish_epoch_utc": 1781413711.607752, "estimated_remaining_seconds": 16354.960628636385, "estimated_total_seconds": 17491.936501215387, "event": "train_progress", "images_per_second": 11.433839814482718, "logged_at_epoch_utc": 1781397356.6471233, "loss": 0.10566888749599457, "progress_fraction": 0.065, "remaining_images": 187000, "remaining_steps": 18700, "started_at_epoch_utc": 1781396219.6712527, "step": 1300, "steps": 20000, "steps_per_second": 1.1433839814482718}
+Stopping app - user stopped from CLI.
+Traceback (most recent call last):
+  File "/Users/jakob/Projects/sim-satellite/.venv/bin/sim-satellite", line 10, in <module>
+    sys.exit(cli())
+             ^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/click/core.py", line 1524, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/click/core.py", line 1445, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/click/core.py", line 1912, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/click/core.py", line 1308, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/click/core.py", line 877, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/src/sim_satellite/train.py", line 968, in command
+  File "/Users/jakob/Projects/sim-satellite/src/sim_satellite/train.py", line 877, in _run_with_target
+  File "/Users/jakob/Projects/sim-satellite/src/sim_satellite/modal_app.py", line 112, in run_training_target
+    return train_remote.remote(modal_config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/modal/_object.py", line 45, in wrapped
+    return await method(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/modal/_functions.py", line 1761, in remote
+    return await self._call_function(args, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/modal/_functions.py", line 1699, in _call_function
+    return await invocation.run_function()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/modal/_functions.py", line 291, in run_function
+    return await _process_result(item.result, item.data_format, self.stub, self.client)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jakob/Projects/sim-satellite/.venv/lib/python3.12/site-packages/modal/_utils/function_utils.py", line 550, in _process_result
+    raise RemoteError(result.exception)
+modal.exception.RemoteError
