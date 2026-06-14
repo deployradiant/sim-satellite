@@ -15,7 +15,7 @@ from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_R
 from sim_satellite.infer import GenerationConfig
 
 
-def test_web_state_and_mask_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = _write_web_fixture(tmp_path)
     app = web.create_app(config)
 
@@ -30,6 +30,13 @@ def test_web_state_and_mask_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert mask.status_code == 200
     assert mask.headers["content-type"] == "image/png"
     assert mask.content.startswith(b"\x89PNG")
+
+    image = _request(app, "GET", "/api/image", query_string="index=0")
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+    with Image.open(BytesIO(image.content)) as preview:
+        assert preview.size == (config.display_size, config.display_size)
+        assert preview.mode == "RGB"
 
 
 def test_web_create_app_does_not_load_generator(

@@ -138,6 +138,14 @@ def create_app(
             media_type="image/png",
         )
 
+    @app.get("/api/image")
+    def image(index: int = Query(default=0, ge=0)) -> Response:
+        sample = _sample_at(samples, index)
+        return Response(
+            content=_image_preview_png(sample.image_path, config),
+            media_type="image/png",
+        )
+
     @app.post("/api/generate")
     def generate(payload: GenerateRequest) -> dict[str, Any]:
         prepared = _prepare_generation(payload, samples, config)
@@ -188,6 +196,9 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
     missing_masks = [sample.mask_path for sample in samples if not sample.mask_path.exists()]
     if missing_masks:
         raise FileNotFoundError(f"Web app mask not found: {missing_masks[0]}")
+    missing_images = [sample.image_path for sample in samples if not sample.image_path.exists()]
+    if missing_images:
+        raise FileNotFoundError(f"Web app image not found: {missing_images[0]}")
     return samples
 
 
@@ -402,6 +413,15 @@ def _mask_preview_png(mask_path: Path, config: WebConfig) -> bytes:
     image = Image.new("RGB", (config.display_size, config.display_size))
     image.putdata([MASK_COLORS[label] for label in labels])
     return _pil_png(image)
+
+
+def _image_preview_png(image_path: Path, config: WebConfig) -> bytes:
+    with Image.open(image_path) as image:
+        preview = image.convert("RGB").resize(
+            (config.display_size, config.display_size),
+            Image.Resampling.BILINEAR,
+        )
+    return _pil_png(preview)
 
 
 def _write_request_mask(mask_image: str, config: WebConfig) -> Path:
