@@ -6,6 +6,7 @@ for small PyTorch debugging runs.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
 MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
-MODAL_GPU = "A10G"
+MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
 

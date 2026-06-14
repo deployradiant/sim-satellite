@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import click
+import torch
 
 from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
-from sim_satellite.model import ModelConfig, build_model, require_torch
+from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
@@ -106,7 +107,6 @@ def run_inference(
             guidance_scale=config.guidance_scale,
         ),
     )
-    torch, _ = require_torch()
 
     output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,8 +129,6 @@ def run_inference(
 
 
 def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerator:
-    torch, _ = require_torch()
-
     torch_device = torch.device(device)
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():

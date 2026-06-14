@@ -10,13 +10,8 @@ dependencies = [
     "matplotlib>=3.9",
     "modal>=1.0",
     "pillow>=10.0",
-    "uvicorn>=0.30",
-]
-
-[project.optional-dependencies]
-local = [
-    "numpy>=2.0",
     "torch>=2.3",
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]

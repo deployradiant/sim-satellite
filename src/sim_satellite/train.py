@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
 import click
+import torch
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
@@ -18,11 +20,13 @@ from sim_satellite.model import (
     build_model,
     flow_velocity,
     interpolate_flow_sample,
-    require_torch,
 )
 
 DEFAULT_TARGET = "modal"
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
+TIMESTEP_SAMPLING = "logit_normal"
+TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
+TIMESTEP_LOGIT_NORMAL_STD = 1.0
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,8 @@ def run_training(
     after_save: Callable[[], None] | None = None,
 ) -> TrainingResult:
     config = config or TrainingConfig()
-    torch, _ = require_torch()
+    started_at_epoch_utc = time.time()
+    started_at_monotonic = time.monotonic()
 
     torch.manual_seed(config.seed)
     device = torch.device(config.device)
@@ -119,7 +124,7 @@ def run_training(
     model_parameters = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    batches = _load_manifest_batches(config)
+    batches = tuple(iter_batches(_load_training_samples(config), config.batch_size))
     validation_batches = _load_validation_batches(config)
 
     final_loss = 0.0
@@ -139,40 +144,62 @@ def run_training(
 
     checkpoint_path = Path(config.checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path = _metrics_path(config, checkpoint_path)
-    loss_plot_path = _loss_plot_path(config, checkpoint_path)
+    metrics_path = (
+        Path(config.metrics_path)
+        if config.metrics_path
+        else checkpoint_path.with_suffix(".metrics.json")
+    )
+    loss_plot_path = (
+        Path(config.loss_plot_path)
+        if config.loss_plot_path
+        else checkpoint_path.with_suffix(".loss.png")
+    )
+
+    print(
+        json.dumps(
+            {
+                "event": "train_start",
+                "started_at_epoch_utc": started_at_epoch_utc,
+                "start_step": start_step,
+                "steps": config.steps,
+                "remaining_steps": max(config.steps - start_step, 0),
+                "train_samples": sum(len(batch) for batch in batches),
+                "train_batches": len(batches),
+                "batch_size": config.batch_size,
+                "total_images_target": config.steps * config.batch_size,
+                "timestep_sampling": TIMESTEP_SAMPLING,
+                "timestep_logit_normal_mean": TIMESTEP_LOGIT_NORMAL_MEAN,
+                "timestep_logit_normal_std": TIMESTEP_LOGIT_NORMAL_STD,
+                "model_parameters": model_parameters,
+                "image_size": config.image_size,
+                "device": str(device),
+                **_torch_device_payload(torch, device),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
-        clean, semantic_mask = _load_training_batch(
+        final_loss = _train_step(
             batches[step % len(batches)],
+            model=model,
+            optimizer=optimizer,
             torch=torch,
             model_config=model_config,
             device=device,
             generator=generator,
+            mask_drop_probability=config.mask_drop_probability,
         )
-        noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
-        timestep = torch.rand(clean.shape[0], generator=generator, device="cpu").to(device)
-        noisy = interpolate_flow_sample(clean, noise, timestep)
-        target = flow_velocity(clean, noise)
-
-        semantic_mask = _drop_conditioning_mask(
-            semantic_mask,
-            drop_probability=config.mask_drop_probability,
-            torch=torch,
-            generator=generator,
-        )
-
-        optimizer.zero_grad(set_to_none=True)
-        prediction = model(noisy, semantic_mask, timestep)
-        loss = torch.nn.functional.mse_loss(prediction, target)
-        loss.backward()
-        optimizer.step()
-        final_loss = float(loss.detach().cpu().item())
         losses.append({"step": step_number, "loss": final_loss})
 
-        if _should_run_validation(config, validation_batches, step_number):
+        if (
+            validation_batches
+            and config.validation_every > 0
+            and step_number % config.validation_every == 0
+        ):
             validation_loss = _evaluate_validation_loss(
                 model,
                 validation_batches,
@@ -189,6 +216,14 @@ def run_training(
                         "step": step_number,
                         "steps": config.steps,
                         "loss": validation_loss,
+                        **_run_timing_payload(
+                            started_at_epoch_utc=started_at_epoch_utc,
+                            started_at_monotonic=started_at_monotonic,
+                            start_step=start_step,
+                            step=step_number,
+                            steps=config.steps,
+                            batch_size=config.batch_size,
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -203,20 +238,33 @@ def run_training(
                         "step": step_number,
                         "steps": config.steps,
                         "loss": final_loss,
+                        **_run_timing_payload(
+                            started_at_epoch_utc=started_at_epoch_utc,
+                            started_at_monotonic=started_at_monotonic,
+                            start_step=start_step,
+                            step=step_number,
+                            steps=config.steps,
+                            batch_size=config.batch_size,
+                        ),
                     },
                     sort_keys=True,
                 ),
                 flush=True,
             )
 
-        if _should_write_progress_artifacts(config, step_number):
-            _write_training_state(
-                _snapshot_checkpoint_path(checkpoint_path, step_number),
+        if (config.save_every > 0 and step_number % config.save_every == 0) or (
+            config.plot_every > 0 and step_number % config.plot_every == 0
+        ):
+            progress_timing = _run_timing_payload(
+                started_at_epoch_utc=started_at_epoch_utc,
+                started_at_monotonic=started_at_monotonic,
+                start_step=start_step,
+                step=step_number,
+                steps=config.steps,
+                batch_size=config.batch_size,
+            )
+            _write_training_metrics(
                 metrics_path,
-                loss_plot_path,
-                model=model,
-                optimizer=optimizer,
-                generator=generator,
                 model_config=model_config,
                 config=config,
                 model_parameters=model_parameters,
@@ -224,6 +272,24 @@ def run_training(
                 validation_losses=validation_losses,
                 final_loss=final_loss,
                 step=step_number,
+                run_timing=progress_timing,
+            )
+            _write_loss_plot(loss_plot_path, losses, validation_losses)
+            _write_training_checkpoint(
+                checkpoint_path.with_name(
+                    f"{checkpoint_path.stem}-step-{step_number}{checkpoint_path.suffix}"
+                ),
+                model=model,
+                optimizer=optimizer,
+                generator=generator,
+                model_config=model_config,
+                config=config,
+                losses=losses,
+                validation_losses=validation_losses,
+                final_loss=final_loss,
+                step=step_number,
+                metrics_path=metrics_path,
+                loss_plot_path=loss_plot_path,
                 torch=torch,
             )
             if after_save is not None:
@@ -241,6 +307,14 @@ def run_training(
         validation_losses=validation_losses,
         final_loss=final_loss,
         step=final_step,
+        run_timing=_run_timing_payload(
+            started_at_epoch_utc=started_at_epoch_utc,
+            started_at_monotonic=started_at_monotonic,
+            start_step=start_step,
+            step=final_step,
+            steps=config.steps,
+            batch_size=config.batch_size,
+        ),
     )
     _write_loss_plot(loss_plot_path, losses, validation_losses)
     _write_training_checkpoint(
@@ -272,16 +346,131 @@ def run_training(
     )
 
 
-def _metrics_path(config: TrainingConfig, checkpoint_path: Path) -> Path:
-    if config.metrics_path:
-        return Path(config.metrics_path)
-    return checkpoint_path.with_suffix(".metrics.json")
+def _run_timing_payload(
+    *,
+    started_at_epoch_utc: float,
+    started_at_monotonic: float,
+    start_step: int,
+    step: int,
+    steps: int,
+    batch_size: int,
+    now_epoch_utc: float | None = None,
+    now_monotonic: float | None = None,
+) -> dict[str, float | int | None]:
+    now_epoch_utc = time.time() if now_epoch_utc is None else now_epoch_utc
+    now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+    elapsed_seconds = max(0.0, now_monotonic - started_at_monotonic)
+    completed_steps_this_run = max(0, step - start_step)
+    remaining_steps = max(0, steps - step)
+    completed_images_this_run = completed_steps_this_run * batch_size
+    remaining_images = remaining_steps * batch_size
+    steps_per_second = (
+        completed_steps_this_run / elapsed_seconds
+        if elapsed_seconds > 0.0 and completed_steps_this_run > 0
+        else 0.0
+    )
+    estimated_remaining_seconds = (
+        remaining_steps / steps_per_second if steps_per_second > 0.0 else None
+    )
+    return {
+        "started_at_epoch_utc": started_at_epoch_utc,
+        "logged_at_epoch_utc": now_epoch_utc,
+        "elapsed_seconds": elapsed_seconds,
+        "completed_steps_this_run": completed_steps_this_run,
+        "completed_images_this_run": completed_images_this_run,
+        "remaining_steps": remaining_steps,
+        "remaining_images": remaining_images,
+        "progress_fraction": step / steps if steps > 0 else 0.0,
+        "steps_per_second": steps_per_second,
+        "images_per_second": steps_per_second * batch_size,
+        "estimated_remaining_seconds": estimated_remaining_seconds,
+        "estimated_total_seconds": (
+            elapsed_seconds + estimated_remaining_seconds
+            if estimated_remaining_seconds is not None
+            else None
+        ),
+        "estimated_finish_epoch_utc": (
+            now_epoch_utc + estimated_remaining_seconds
+            if estimated_remaining_seconds is not None
+            else None
+        ),
+    }
 
 
-def _loss_plot_path(config: TrainingConfig, checkpoint_path: Path) -> Path:
-    if config.loss_plot_path:
-        return Path(config.loss_plot_path)
-    return checkpoint_path.with_suffix(".loss.png")
+def _torch_device_payload(torch: Any, device: Any) -> dict[str, int | str | None]:
+    if getattr(device, "type", str(device)) != "cuda":
+        return {
+            "torch_cuda_device_count": 0,
+            "torch_device_name": None,
+        }
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        return {
+            "torch_cuda_device_count": 0,
+            "torch_device_name": None,
+        }
+    return {
+        "torch_cuda_device_count": int(cuda.device_count()),
+        "torch_device_name": str(cuda.get_device_name(device)),
+    }
+
+
+def _sample_flow_timesteps(
+    batch_size: int,
+    *,
+    torch: Any,
+    generator: Any,
+    device: Any,
+) -> Any:
+    logits = torch.randn(batch_size, generator=generator, device="cpu")
+    logits = logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
+    return torch.sigmoid(logits).to(device)
+
+
+def _train_step(
+    samples: tuple[SatelliteSample, ...],
+    *,
+    model: Any,
+    optimizer: Any,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    generator: Any,
+    mask_drop_probability: float,
+) -> float:
+    clean, semantic_mask = _load_batch(
+        samples,
+        torch=torch,
+        model_config=model_config,
+        device=device,
+        random_crop=True,
+        generator=generator,
+    )
+    noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
+    timestep = _sample_flow_timesteps(
+        clean.shape[0],
+        torch=torch,
+        generator=generator,
+        device=device,
+    )
+    noisy = interpolate_flow_sample(clean, noise, timestep)
+    target = flow_velocity(clean, noise)
+
+    if mask_drop_probability > 0.0:
+        keep_mask = torch.rand(
+            semantic_mask.shape[0],
+            generator=generator,
+            device="cpu",
+        ).to(semantic_mask.device)
+        keep_mask = (keep_mask >= mask_drop_probability).float().view(-1, 1, 1, 1)
+        semantic_mask = semantic_mask * keep_mask
+
+    optimizer.zero_grad(set_to_none=True)
+    prediction = model(noisy, semantic_mask, timestep)
+    loss = torch.nn.functional.mse_loss(prediction, target)
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach().cpu().item())
 
 
 def _write_training_metrics(
@@ -294,6 +483,7 @@ def _write_training_metrics(
     validation_losses: list[dict[str, float | int]],
     final_loss: float,
     step: int,
+    run_timing: Mapping[str, float | int | None],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -304,6 +494,7 @@ def _write_training_metrics(
                 "model_parameters": model_parameters,
                 "step": step,
                 "final_loss": final_loss,
+                "run_timing": dict(run_timing),
                 "losses": losses,
                 "validation_losses": validation_losses,
             },
@@ -364,51 +555,6 @@ def _exponential_moving_average(values: list[float], *, decay: float) -> list[fl
         average = decay * average + (1.0 - decay) * value
         smoothed.append(average)
     return smoothed
-
-
-def _write_training_state(
-    checkpoint_path: Path,
-    metrics_path: Path,
-    loss_plot_path: Path,
-    *,
-    model: Any,
-    optimizer: Any,
-    generator: Any,
-    model_config: ModelConfig,
-    config: TrainingConfig,
-    model_parameters: int,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
-    final_loss: float,
-    step: int,
-    torch: Any,
-) -> None:
-    _write_training_metrics(
-        metrics_path,
-        model_config=model_config,
-        config=config,
-        model_parameters=model_parameters,
-        losses=losses,
-        validation_losses=validation_losses,
-        final_loss=final_loss,
-        step=step,
-    )
-    _write_loss_plot(loss_plot_path, losses, validation_losses)
-    _write_training_checkpoint(
-        checkpoint_path,
-        model=model,
-        optimizer=optimizer,
-        generator=generator,
-        model_config=model_config,
-        config=config,
-        losses=losses,
-        validation_losses=validation_losses,
-        final_loss=final_loss,
-        step=step,
-        metrics_path=metrics_path,
-        loss_plot_path=loss_plot_path,
-        torch=torch,
-    )
 
 
 def _write_training_checkpoint(
@@ -474,52 +620,6 @@ def _load_training_state(
     losses = list(checkpoint.get("losses", []))
     validation_losses = list(checkpoint.get("validation_losses", []))
     return step, final_loss, losses, validation_losses
-
-
-def _snapshot_checkpoint_path(checkpoint_path: Path, step: int) -> Path:
-    return checkpoint_path.with_name(f"{checkpoint_path.stem}-step-{step}{checkpoint_path.suffix}")
-
-
-def _should_write_progress_artifacts(config: TrainingConfig, step: int) -> bool:
-    return (config.save_every > 0 and step % config.save_every == 0) or (
-        config.plot_every > 0 and step % config.plot_every == 0
-    )
-
-
-def _should_run_validation(
-    config: TrainingConfig,
-    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
-    step: int,
-) -> bool:
-    return (
-        bool(validation_batches)
-        and config.validation_every > 0
-        and step % config.validation_every == 0
-    )
-
-
-def _drop_conditioning_mask(
-    semantic_mask: Any,
-    *,
-    drop_probability: float,
-    torch: Any,
-    generator: Any,
-) -> Any:
-    if drop_probability <= 0.0:
-        return semantic_mask
-
-    keep_mask = torch.rand(
-        semantic_mask.shape[0],
-        generator=generator,
-        device="cpu",
-    ).to(semantic_mask.device)
-    keep_mask = (keep_mask >= drop_probability).float().view(-1, 1, 1, 1)
-    return semantic_mask * keep_mask
-
-
-def _load_manifest_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
-    samples = _load_training_samples(config)
-    return tuple(iter_batches(samples, config.batch_size))
 
 
 def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...]:
@@ -596,14 +696,20 @@ def _evaluate_validation_loss(
     losses: list[float] = []
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
-            clean, semantic_mask = _load_evaluation_batch(
+            clean, semantic_mask = _load_batch(
                 samples,
                 torch=torch,
                 model_config=model_config,
                 device=device,
+                random_crop=False,
             )
             noise = torch.randn(clean.shape, generator=generator, device="cpu").to(device)
-            timestep = torch.rand(clean.shape[0], generator=generator, device="cpu").to(device)
+            timestep = _sample_flow_timesteps(
+                clean.shape[0],
+                torch=torch,
+                generator=generator,
+                device=device,
+            )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
             prediction = model(noisy, semantic_mask, timestep)
@@ -614,47 +720,31 @@ def _evaluate_validation_loss(
     return sum(losses) / len(losses)
 
 
-def _load_evaluation_batch(
-    samples: tuple[SatelliteSample, ...],
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    device: Any,
-) -> tuple[Any, Any]:
-    crop_boxes = [
-        _center_square_crop_box(sample, crop_size=model_config.image_size) for sample in samples
-    ]
-    return _load_batch(samples, crop_boxes, torch=torch, model_config=model_config, device=device)
-
-
-def _load_training_batch(
-    samples: tuple[SatelliteSample, ...],
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    device: Any,
-    generator: Any,
-) -> tuple[Any, Any]:
-    crop_boxes = [
-        _random_square_crop_box(
-            sample,
-            crop_size=model_config.image_size,
-            torch=torch,
-            generator=generator,
-        )
-        for sample in samples
-    ]
-    return _load_batch(samples, crop_boxes, torch=torch, model_config=model_config, device=device)
-
-
 def _load_batch(
     samples: tuple[SatelliteSample, ...],
-    crop_boxes: list[tuple[int, int, int, int]],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
+    random_crop: bool,
+    generator: Any | None = None,
 ) -> tuple[Any, Any]:
+    crop_boxes: list[tuple[int, int, int, int]] = []
+    for sample in samples:
+        if random_crop:
+            if generator is None:
+                raise ValueError("generator is required for random crop loading")
+            crop_boxes.append(
+                _random_square_crop_box(
+                    sample,
+                    crop_size=model_config.image_size,
+                    torch=torch,
+                    generator=generator,
+                )
+            )
+        else:
+            crop_boxes.append(_center_square_crop_box(sample, crop_size=model_config.image_size))
+
     images = [
         load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
         for sample, crop_box in zip(samples, crop_boxes, strict=True)
@@ -680,8 +770,16 @@ def _random_square_crop_box(
 
     max_left = width - size
     max_top = height - size
-    left = _random_offset(max_left, torch=torch, generator=generator)
-    top = _random_offset(max_top, torch=torch, generator=generator)
+    left = (
+        0
+        if max_left <= 0
+        else int(torch.randint(0, max_left + 1, (1,), generator=generator, device="cpu").item())
+    )
+    top = (
+        0
+        if max_top <= 0
+        else int(torch.randint(0, max_top + 1, (1,), generator=generator, device="cpu").item())
+    )
     return left, top, left + size, top + size
 
 
@@ -714,12 +812,6 @@ def _aligned_image_size(sample: SatelliteSample) -> tuple[int, int]:
     return image_size
 
 
-def _random_offset(max_offset: int, *, torch: Any, generator: Any) -> int:
-    if max_offset <= 0:
-        return 0
-    return int(torch.randint(0, max_offset + 1, (1,), generator=generator, device="cpu").item())
-
-
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:
     return tuple(
         pattern.strip()
@@ -747,100 +839,31 @@ def _run_with_target(config: TrainingConfig, target: str) -> dict[str, Any]:
     return run_training_target(config)
 
 
-def _build_click_command() -> click.Command:
-    @click.command("train", help="Run model training.")
-    @click.option(
-        "--target",
-        type=click.Choice(["modal", "local"]),
-        default=DEFAULT_TARGET,
-        show_default=True,
-    )
-    @click.option("--steps", default=TrainingConfig.steps, show_default=True)
-    @click.option("--batch-size", default=TrainingConfig.batch_size, show_default=True)
-    @click.option("--learning-rate", default=TrainingConfig.learning_rate, show_default=True)
-    @click.option("--manifest-path", default=TrainingConfig.manifest_path, show_default=True)
-    @click.option("--split", default=TrainingConfig.split, show_default=True)
-    @click.option("--checkpoint-path", default=TrainingConfig.checkpoint_path, show_default=True)
-    @click.option("--metrics-path", default=TrainingConfig.metrics_path, show_default=True)
-    @click.option("--loss-plot-path", default=TrainingConfig.loss_plot_path, show_default=True)
-    @click.option("--resume-from", default=TrainingConfig.resume_from, show_default=True)
-    @click.option("--save-every", default=TrainingConfig.save_every, show_default=True)
-    @click.option("--plot-every", default=TrainingConfig.plot_every, show_default=True)
-    @click.option("--validation-split", default=TrainingConfig.validation_split, show_default=True)
-    @click.option(
-        "--validation-holdout-patterns",
-        default=TrainingConfig.validation_holdout_patterns,
-        show_default=True,
-    )
-    @click.option("--validation-every", default=TrainingConfig.validation_every, show_default=True)
-    @click.option(
-        "--validation-batches",
-        default=TrainingConfig.validation_batches,
-        show_default=True,
-    )
-    @click.option("--device", default=TrainingConfig.device, show_default=True)
-    @click.option("--seed", default=TrainingConfig.seed, show_default=True)
-    @click.option("--image-size", default=TrainingConfig.image_size, show_default=True)
-    @click.option("--hidden-channels", default=TrainingConfig.hidden_channels, show_default=True)
-    @click.option(
-        "--mask-drop-probability",
-        default=TrainingConfig.mask_drop_probability,
-        show_default=True,
-    )
-    @click.option("--log-every", default=TrainingConfig.log_every, show_default=True)
-    def command(
-        target: str,
-        steps: int,
-        batch_size: int,
-        learning_rate: float,
-        manifest_path: str,
-        split: str,
-        checkpoint_path: str,
-        metrics_path: str,
-        loss_plot_path: str,
-        resume_from: str,
-        save_every: int,
-        plot_every: int,
-        validation_split: str,
-        validation_holdout_patterns: str,
-        validation_every: int,
-        validation_batches: int,
-        device: str,
-        seed: int,
-        image_size: int,
-        hidden_channels: int,
-        mask_drop_probability: float,
-        log_every: int,
-    ) -> None:
-        config = TrainingConfig(
-            seed=seed,
-            steps=steps,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            manifest_path=manifest_path,
-            split=split,
-            checkpoint_path=checkpoint_path,
-            metrics_path=metrics_path,
-            loss_plot_path=loss_plot_path,
-            resume_from=resume_from,
-            save_every=save_every,
-            plot_every=plot_every,
-            validation_split=validation_split,
-            validation_holdout_patterns=validation_holdout_patterns,
-            validation_every=validation_every,
-            validation_batches=validation_batches,
-            device=device,
-            image_size=image_size,
-            hidden_channels=hidden_channels,
-            mask_drop_probability=mask_drop_probability,
-            log_every=log_every,
-        )
-        click.echo(json.dumps(_run_with_target(config, target), indent=2))
-
-    return command
+def _load_training_config(config_path: Path) -> TrainingConfig:
+    values = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(values, Mapping):
+        raise ValueError("Training config JSON must be an object")
+    return TrainingConfig.from_dict(values)
 
 
-cli = _build_click_command()
+@click.command("train", help="Run model training from a JSON config file.")
+@click.argument(
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+)
+@click.option(
+    "--target",
+    type=click.Choice(["modal", "local"]),
+    default=DEFAULT_TARGET,
+    show_default=True,
+)
+def cli(config_path: Path, target: str) -> None:
+    try:
+        config = _load_training_config(config_path)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise click.ClickException(str(error)) from error
+
+    click.echo(json.dumps(_run_with_target(config, target), indent=2))
 
 
 if __name__ == "__main__":

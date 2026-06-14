@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 import pytest
+import torch
 
 from sim_satellite.model import ModelConfig, build_model
 
@@ -15,7 +16,6 @@ def test_model_config_rejects_unknown_checkpoint_fields() -> None:
 
 
 def test_conditional_unet_forward_shape_is_deterministic() -> None:
-    torch = pytest.importorskip("torch")
     torch.manual_seed(123)
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
     model = build_model(config)

@@ -1593,13 +1593,8 @@ dependencies = [
     { name = "matplotlib" },
     { name = "modal" },
     { name = "pillow" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-local = [
-    { name = "numpy" },
     { name = "torch" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -1614,12 +1609,10 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "modal", specifier = ">=1.0" },
-    { name = "numpy", marker = "extra == 'local'", specifier = ">=2.0" },
     { name = "pillow", specifier = ">=10.0" },
-    { name = "torch", marker = "extra == 'local'", specifier = ">=2.3" },
+    { name = "torch", specifier = ">=2.3" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
-provides-extras = ["local"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from sim_satellite import infer
 from sim_satellite.infer import InferenceConfig, InferenceResult
@@ -78,18 +79,16 @@ def test_inference_rejects_malformed_checkpoints(
     )
 
     for checkpoint, message in cases:
-        fake_torch = _FakeTorch(checkpoint)
-        monkeypatch.setattr(
-            infer,
-            "require_torch",
-            lambda fake_torch=fake_torch: (fake_torch, object()),
-        )
+
+        def fake_load(*_: Any, checkpoint: Any = checkpoint, **__: Any) -> Any:
+            return checkpoint
+
+        monkeypatch.setattr(infer.torch, "load", fake_load)
         with pytest.raises(RuntimeError, match=message):
             infer.run_inference(config)
 
 
 def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
-    torch = pytest.importorskip("torch")
     checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
 
     loaded = infer.load_generator(checkpoint_path, device="cpu")
@@ -104,7 +103,6 @@ def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
-    torch = pytest.importorskip("torch")
     checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     checkpoint["model_state"]["input_conv.weight"] = torch.zeros(4, 99, 3, 3)
@@ -112,22 +110,6 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="incompatible with flow U-Net"):
         infer.load_generator(checkpoint_path, device="cpu")
-
-
-class _FakeTorch:
-    def __init__(self, checkpoint: Any) -> None:
-        self.checkpoint = checkpoint
-
-    def manual_seed(self, seed: int) -> None:
-        self.seed = seed
-
-    def device(self, name: str) -> str:
-        return name
-
-    def load(self, path: Path, map_location: str) -> dict[str, Any]:
-        self.loaded_path = path
-        self.map_location = map_location
-        return self.checkpoint
 
 
 def _write_flow_checkpoint(

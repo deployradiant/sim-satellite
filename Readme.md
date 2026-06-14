@@ -16,8 +16,19 @@ The project is written in Python with uv. It uses Modal by default for training 
 uv sync
 uv run sim-satellite --help
 uv run sim-satellite openearthmap
-uv run sim-satellite train --target modal
+uv run sim-satellite train train.json --target modal
 uv run sim-satellite infer --target modal
+```
+
+Training reads run settings from a JSON file. Omitted fields use
+`TrainingConfig` defaults.
+
+```json
+{
+  "steps": 8,
+  "batch_size": 4,
+  "checkpoint_path": "artifacts/tiny-sim-satellite.pt"
+}
 ```
 
 The OpenEarthMap data command writes a local `manifest.jsonl` plus `classes.json` under
@@ -27,12 +38,30 @@ The OpenEarthMap data command writes a local `manifest.jsonl` plus `classes.json
 uv run python -m sim_satellite.data.openearthmap
 ```
 
-For local PyTorch debugging runs, install the optional local extra:
+For local PyTorch debugging runs:
 
 ```bash
-uv sync --extra local
-uv run sim-satellite train --target local --steps 1
+uv sync
+uv run sim-satellite train train.local.json --target local
 uv run sim-satellite infer --target local --steps 1
+```
+
+For the remote Modal web app, authenticate once, make sure the web checkpoint is
+available in the Modal artifact volume, and start the hot-reloaded web endpoint:
+
+```bash
+uv run modal setup
+uv run modal volume create sim-satellite-artifacts
+uv run modal volume put --force sim-satellite-artifacts artifacts/tiny-sim-satellite-modal.pt tiny-sim-satellite-modal.pt
+uv run modal serve -m sim_satellite.modal_app
+```
+
+If `sim-satellite-artifacts` already exists, skip the `modal volume create`
+command. Modal prints the temporary `web_remote` URL when `modal serve` starts.
+For a persistent URL, deploy the same app instead:
+
+```bash
+uv run modal deploy -m sim_satellite.modal_app
 ```
 
 ### Data
@@ -72,7 +101,9 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   329 images skipped because the downloaded archive has no matching mask, and 9 mask
   channels including `unlabeled`.
 - 2026-06-13 03:23 PDT: Modal GPU run completed with
-  `uv run sim-satellite train --target modal --steps 8 --batch-size 4 --checkpoint-path artifacts/tiny-sim-satellite.pt`.
+  `uv run sim-satellite train train.json --target modal`, where `train.json`
+  set `steps=8`, `batch_size=4`, and
+  `checkpoint_path=artifacts/tiny-sim-satellite.pt`.
   Result: `device=cuda`, `final_loss=0.9386278390884399`, checkpoint written to
   Modal volume path `/artifacts/tiny-sim-satellite.pt`.
 - 2026-06-13 03:23 PDT: Pulled the Modal checkpoint locally with
@@ -81,3 +112,9 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
 - 2026-06-13 03:23 PDT: Verified the web app at `http://127.0.0.1:8765`
   against `artifacts/tiny-sim-satellite-modal.pt`; browser generation produced a
   256px PNG from an OpenEarthMap mask.
+- 2026-06-13 17:21 PDT: Replaced uniform flow timestep sampling with
+  logit-normal sampling, `t = sigmoid(N(0, 1))`, for both training and validation.
+  Research rationale: rectified-flow work such as Stable Diffusion 3 biases
+  training toward perceptually useful intermediate noise levels while keeping the
+  linear flow path and velocity target. The old uniform sampler was removed
+  rather than kept as a compatibility mode.
