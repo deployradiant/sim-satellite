@@ -33,7 +33,7 @@ LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
 MODAL_EPHEMERAL_DISK_MIB = int(
-    os.environ.get("SIM_SATELLITE_MODAL_EPHEMERAL_DISK_MIB", str(64 * 1024))
+    os.environ.get("SIM_SATELLITE_MODAL_EPHEMERAL_DISK_MIB", str(512 * 1024))
 )
 MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
 MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")

@@ -284,7 +284,7 @@ def test_modal_web_config_uses_artifact_checkpoint_and_remote_local_manifest(
 
 
 def test_modal_requests_local_scratch_disk() -> None:
-    assert modal_app.MODAL_EPHEMERAL_DISK_MIB >= 64 * 1024
+    assert modal_app.MODAL_EPHEMERAL_DISK_MIB >= 512 * 1024
 
 
 def test_modal_data_path_maps_inside_modal_container(
