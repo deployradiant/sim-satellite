@@ -30,7 +30,8 @@ def test_cli_target_resolves_default_manifest_mask(
     mask_path = tmp_path / "mask.png"
     mask_path.write_bytes(b"mask")
     manifest_path.write_text(
-        '{"image": "image.png", "mask": "mask.png", "split": "train"}\n',
+        '{"image": "image.png", "mask": "mask.png", '
+        '"prepared": "prepared/sample.pt", "split": "train"}\n',
         encoding="utf-8",
     )
     received: dict[str, InferenceConfig] = {}

@@ -3,26 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image
-
 from sim_satellite.data.loader import SatelliteSample
-from sim_satellite.data.tensors import (
-    image_to_tensor,
-    load_image_tensor,
-    load_mask_tensor,
-    mask_to_tensor,
-)
+from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
+from sim_satellite.data.tensors import labels_to_one_hot
 from sim_satellite.model import ModelConfig
-
-
-@dataclass(frozen=True)
-class PreloadedSample:
-    image: Image.Image
-    mask: Image.Image
-    size: tuple[int, int]
 
 
 def unique_samples(
@@ -43,24 +29,12 @@ def unique_samples(
     return tuple(samples)
 
 
-def preload_samples(samples: tuple[SatelliteSample, ...]) -> dict[SatelliteSample, PreloadedSample]:
-    preloaded: dict[SatelliteSample, PreloadedSample] = {}
+def preload_samples(samples: tuple[SatelliteSample, ...]) -> dict[SatelliteSample, PreparedSample]:
+    import torch
+
+    preloaded: dict[SatelliteSample, PreparedSample] = {}
     for sample in samples:
-        with Image.open(sample.image_path) as image:
-            loaded_image = image.convert("RGB").copy()
-        with Image.open(sample.mask_path) as mask:
-            loaded_mask = mask.copy()
-        if loaded_image.size != loaded_mask.size:
-            raise ValueError(
-                f"Image and mask sizes must match for aligned crops: "
-                f"{sample.image_path} is {loaded_image.size}, "
-                f"{sample.mask_path} is {loaded_mask.size}"
-            )
-        preloaded[sample] = PreloadedSample(
-            image=loaded_image,
-            mask=loaded_mask,
-            size=loaded_image.size,
-        )
+        preloaded[sample] = load_prepared_sample(sample.prepared_path, torch=torch)
     return preloaded
 
 
@@ -71,9 +45,8 @@ def load_batch(
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample] | None = None,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[Any, Any]:
-    preloaded_samples = preloaded_samples or {}
     images = [
         _load_image_sample_tensor(
             sample,
@@ -84,7 +57,7 @@ def load_batch(
         )
         for sample, crop_box in zip(samples, crop_boxes, strict=True)
     ]
-    masks = [
+    mask_labels = [
         _load_mask_sample_tensor(
             sample,
             crop_box,
@@ -94,7 +67,9 @@ def load_batch(
         )
         for sample, crop_box in zip(samples, crop_boxes, strict=True)
     ]
-    return torch.stack(images).to(device), torch.stack(masks).to(device)
+    image_batch = torch.stack(images).to(device).float() / 127.5 - 1.0
+    label_batch = torch.stack(mask_labels).to(device)
+    return image_batch, labels_to_one_hot(label_batch, torch=torch, config=model_config)
 
 
 def random_square_crop_box(
@@ -103,9 +78,9 @@ def random_square_crop_box(
     crop_size: int,
     torch: Any,
     generator: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample] | None = None,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    width, height = _sample_image_size(sample, preloaded_samples or {})
+    width, height = _sample_image_size(sample, preloaded_samples)
     size = min(width, height, crop_size)
     if size < 1:
         raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
@@ -129,9 +104,9 @@ def center_square_crop_box(
     sample: SatelliteSample,
     *,
     crop_size: int,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample] | None = None,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    width, height = _sample_image_size(sample, preloaded_samples or {})
+    width, height = _sample_image_size(sample, preloaded_samples)
     size = min(width, height, crop_size)
     if size < 1:
         raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
@@ -146,17 +121,20 @@ def _load_image_sample_tensor(
     *,
     torch: Any,
     model_config: ModelConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> Any:
-    preloaded = preloaded_samples.get(sample)
-    if preloaded is not None:
-        return image_to_tensor(
-            preloaded.image,
-            torch=torch,
-            config=model_config,
-            crop_box=crop_box,
-        )
-    return load_image_tensor(sample.image_path, torch=torch, config=model_config, crop_box=crop_box)
+    prepared = _prepared_sample(sample, torch=torch, preloaded_samples=preloaded_samples)
+    left, top, right, bottom = crop_box
+    image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
+    if image.shape[-2:] == (model_config.image_size, model_config.image_size):
+        return image.contiguous()
+    resized = torch.nn.functional.interpolate(
+        image.float().unsqueeze(0),
+        size=(model_config.image_size, model_config.image_size),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+    return resized.clamp(0, 255).round().to(torch.uint8)
 
 
 def _load_mask_sample_tensor(
@@ -165,37 +143,38 @@ def _load_mask_sample_tensor(
     *,
     torch: Any,
     model_config: ModelConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> Any:
-    preloaded = preloaded_samples.get(sample)
-    if preloaded is not None:
-        return mask_to_tensor(
-            preloaded.mask,
-            torch=torch,
-            config=model_config,
-            crop_box=crop_box,
+    prepared = _prepared_sample(sample, torch=torch, preloaded_samples=preloaded_samples)
+    left, top, right, bottom = crop_box
+    mask = prepared.mask[top:bottom, left:right]
+    if mask.shape[-2:] == (model_config.image_size, model_config.image_size):
+        return mask.long().contiguous()
+    return (
+        torch.nn.functional.interpolate(
+            mask.float().view(1, 1, mask.shape[0], mask.shape[1]),
+            size=(model_config.image_size, model_config.image_size),
+            mode="nearest",
         )
-    return load_mask_tensor(sample.mask_path, torch=torch, config=model_config, crop_box=crop_box)
+        .view(model_config.image_size, model_config.image_size)
+        .long()
+    )
 
 
 def _sample_image_size(
     sample: SatelliteSample,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int]:
-    preloaded = preloaded_samples.get(sample)
-    if preloaded is not None:
-        return preloaded.size
-    return _aligned_image_size(sample)
+    return _prepared_sample(sample, torch=None, preloaded_samples=preloaded_samples).size
 
 
-def _aligned_image_size(sample: SatelliteSample) -> tuple[int, int]:
-    with Image.open(sample.image_path) as image:
-        image_size = image.size
-    with Image.open(sample.mask_path) as mask:
-        mask_size = mask.size
-    if image_size != mask_size:
-        raise ValueError(
-            f"Image and mask sizes must match for aligned crops: "
-            f"{sample.image_path} is {image_size}, {sample.mask_path} is {mask_size}"
-        )
-    return image_size
+def _prepared_sample(
+    sample: SatelliteSample,
+    *,
+    torch: Any | None,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
+) -> PreparedSample:
+    prepared = preloaded_samples.get(sample)
+    if prepared is not None:
+        return prepared
+    raise KeyError(f"Prepared sample was not preloaded: {sample.prepared_path}")

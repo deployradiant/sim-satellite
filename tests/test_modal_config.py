@@ -166,7 +166,7 @@ def test_modal_inference_requires_mask_path_before_app_run(
     assert fake_infer_remote.received is None
 
 
-def test_modal_training_uses_cuda_for_any_configured_device(
+def test_modal_training_uses_cuda_device(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -180,7 +180,6 @@ def test_modal_training_uses_cuda_for_any_configured_device(
         TrainingConfig(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="/artifacts/checkpoints/model.pt",
-            device="mps",
         )
     )
 
@@ -299,7 +298,7 @@ def test_modal_web_config_uses_artifact_checkpoint_and_mounted_manifest(
             checkpoint_path="artifacts/checkpoints/web.pt",
             checkpoint_glob="artifacts/checkpoints/web-step-*.pt",
             manifest_path=str(manifest_path),
-            device="cpu",
+            device="cuda",
             steps=3,
             max_samples=7,
         )
@@ -328,17 +327,13 @@ def test_modal_data_path_maps_inside_modal_container(
     modal_data_root.mkdir()
     monkeypatch.setattr(modal_app, "MODAL_DATA_ROOT", modal_data_root)
 
-    assert (
-        modal_app._modal_data_path("data/openearthmap/manifest.jsonl", field_name="manifest_path")
-        == str(modal_data_root / "openearthmap/manifest.jsonl")
-    )
-    assert (
-        modal_app._modal_data_path(
-            str(modal_data_root / "openearthmap/manifest.jsonl"),
-            field_name="manifest_path",
-        )
-        == str(modal_data_root / "openearthmap/manifest.jsonl")
-    )
+    assert modal_app._modal_data_path(
+        "data/openearthmap/manifest.jsonl", field_name="manifest_path"
+    ) == str(modal_data_root / "openearthmap/manifest.jsonl")
+    assert modal_app._modal_data_path(
+        str(modal_data_root / "openearthmap/manifest.jsonl"),
+        field_name="manifest_path",
+    ) == str(modal_data_root / "openearthmap/manifest.jsonl")
 
     with pytest.raises(ValueError, match="must be under"):
         modal_app._modal_data_path("/tmp/manifest.jsonl", field_name="manifest_path")

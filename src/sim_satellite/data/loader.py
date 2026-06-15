@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,25 +13,31 @@ from pathlib import Path
 class SatelliteSample:
     image_path: Path
     mask_path: Path
+    prepared_path: Path
     split: str
     source: str = "openearthmap"
 
     @classmethod
     def from_json(cls, value: dict[str, str], root: Path) -> SatelliteSample:
+        if not value.get("prepared"):
+            raise ValueError("manifest sample is missing required prepared path")
         return cls(
             image_path=_resolve(root, value["image"]),
             mask_path=_resolve(root, value["mask"]),
+            prepared_path=_resolve(root, value["prepared"]),
             split=value["split"],
             source=value.get("source", "openearthmap"),
         )
 
     def to_json(self, root: Path) -> dict[str, str]:
-        return {
+        value = {
             "image": _relative_or_absolute(self.image_path, root),
             "mask": _relative_or_absolute(self.mask_path, root),
             "split": self.split,
             "source": self.source,
         }
+        value["prepared"] = _relative_or_absolute(self.prepared_path, root)
+        return value
 
 
 class SatelliteDataset(Sequence[SatelliteSample]):
@@ -57,6 +63,7 @@ class SatelliteDataset(Sequence[SatelliteSample]):
 
     def __getitem__(self, index: int | slice) -> SatelliteSample | tuple[SatelliteSample, ...]:
         return self.samples[index]
+
 
 def read_manifest(manifest_path: str | Path) -> list[SatelliteSample]:
     path = Path(manifest_path)

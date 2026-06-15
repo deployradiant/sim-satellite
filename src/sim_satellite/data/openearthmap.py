@@ -38,6 +38,8 @@ OPENEARTHMAP_RGB = {
     "agriculture land": (75, 181, 73),
     "building": (222, 31, 7),
 }
+EXTRACT_COMPLETE_MARKER = ".openearthmap-extract-complete.json"
+EXTRACT_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 ProgressReporter = Callable[[str], None]
 
 
@@ -46,9 +48,11 @@ class OpenEarthMapResult:
     data_dir: Path
     archive_path: Path
     extracted_dir: Path
+    prepared_dir: Path
     manifest_path: Path
     classes_path: Path
     samples: int
+    prepared_samples: int
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
@@ -56,10 +60,17 @@ class OpenEarthMapResult:
 
 @dataclass(frozen=True)
 class OpenEarthMapScan:
-    samples: tuple[SatelliteSample, ...]
+    samples: tuple[_OpenEarthMapPair, ...]
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
+
+
+@dataclass(frozen=True)
+class _OpenEarthMapPair:
+    image_path: Path
+    mask_path: Path
+    split: str
 
 
 def download_and_prepare_openearthmap(
@@ -69,6 +80,7 @@ def download_and_prepare_openearthmap(
     extract: bool = True,
     force_download: bool = False,
     force_extract: bool = False,
+    force_prepared: bool = False,
     progress: ProgressReporter | None = None,
 ) -> OpenEarthMapResult:
     paths = _paths(data_dir)
@@ -100,8 +112,16 @@ def download_and_prepare_openearthmap(
     if not scan.samples:
         raise RuntimeError(f"No OpenEarthMap image/mask pairs found under {paths.extracted_dir}")
 
+    _report(progress, f"Preparing sample data in {paths.prepared_dir}")
+    prepared_samples = _prepare_sample_data(
+        scan.samples,
+        prepared_dir=paths.prepared_dir,
+        extracted_dir=paths.extracted_dir,
+        force=force_prepared,
+        progress=progress,
+    )
     _report(progress, f"Writing manifest to {paths.manifest_path}")
-    write_manifest(scan.samples, paths.manifest_path)
+    write_manifest(prepared_samples, paths.manifest_path)
     _report(progress, f"Writing class metadata to {paths.classes_path}")
     write_classes(paths.classes_path)
     _report(
@@ -116,9 +136,11 @@ def download_and_prepare_openearthmap(
         data_dir=paths.data_dir,
         archive_path=paths.archive_path,
         extracted_dir=paths.extracted_dir,
+        prepared_dir=paths.prepared_dir,
         manifest_path=paths.manifest_path,
         classes_path=paths.classes_path,
-        samples=len(scan.samples),
+        samples=len(prepared_samples),
+        prepared_samples=len(prepared_samples),
         scanned_images=scan.scanned_images,
         missing_masks=scan.missing_masks,
         image_dirs_without_labels=scan.image_dirs_without_labels,
@@ -131,7 +153,7 @@ def scan_openearthmap(
     progress: ProgressReporter | None = None,
 ) -> OpenEarthMapScan:
     root = Path(extracted_dir)
-    pairs: list[SatelliteSample] = []
+    pairs: list[_OpenEarthMapPair] = []
     scanned_images = 0
     missing_masks = 0
     image_dirs_without_labels = 0
@@ -161,7 +183,7 @@ def scan_openearthmap(
                 missing_masks += 1
                 continue
             pairs.append(
-                SatelliteSample(
+                _OpenEarthMapPair(
                     image_path=image_path,
                     mask_path=mask_path,
                     split=_split_from_path(image_path),
@@ -182,6 +204,56 @@ def scan_openearthmap(
         missing_masks=missing_masks,
         image_dirs_without_labels=image_dirs_without_labels,
     )
+
+
+def _prepare_sample_data(
+    samples: tuple[_OpenEarthMapPair, ...],
+    *,
+    prepared_dir: Path,
+    extracted_dir: Path,
+    force: bool,
+    progress: ProgressReporter | None,
+) -> tuple[SatelliteSample, ...]:
+    import torch
+
+    from sim_satellite.data.prepared import write_prepared_sample
+    from sim_satellite.model import ModelConfig
+
+    config = ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES))
+    prepared_samples: list[SatelliteSample] = []
+    for index, sample in enumerate(samples, start=1):
+        prepared = SatelliteSample(
+            image_path=sample.image_path,
+            mask_path=sample.mask_path,
+            prepared_path=_prepared_path_for_sample(
+                sample,
+                prepared_dir=prepared_dir,
+                extracted_dir=extracted_dir,
+            ),
+            split=sample.split,
+            source="openearthmap",
+        )
+        write_prepared_sample(prepared, torch=torch, config=config, force=force)
+        prepared_samples.append(prepared)
+        if _should_report(index, len(samples)):
+            _report(
+                progress,
+                f"Prepared {index}/{len(samples)} samples ({_percent(index, len(samples))}%)",
+            )
+    return tuple(prepared_samples)
+
+
+def _prepared_path_for_sample(
+    sample: _OpenEarthMapPair,
+    *,
+    prepared_dir: Path,
+    extracted_dir: Path,
+) -> Path:
+    try:
+        relative_path = sample.image_path.relative_to(extracted_dir)
+    except ValueError:
+        relative_path = Path(sample.split) / sample.image_path.name
+    return prepared_dir / relative_path.with_suffix(".pt")
 
 
 def write_classes(classes_path: str | Path) -> Path:
@@ -253,16 +325,87 @@ def _extract(
     force: bool,
     progress: ProgressReporter | None,
 ) -> None:
-    if extracted_dir.exists() and any(extracted_dir.iterdir()) and not force:
-        _report(progress, f"Using cached extracted data {extracted_dir}")
-        return
-    if force and extracted_dir.exists():
-        _report(progress, f"Removing existing extracted data {extracted_dir}")
-        shutil.rmtree(extracted_dir)
-
-    extracted_dir.mkdir(parents=True, exist_ok=True)
+    replace_existing = extracted_dir.exists() and any(extracted_dir.iterdir())
     with zipfile.ZipFile(archive_path) as archive:
+        if replace_existing and not force:
+            if _extraction_complete(extracted_dir, archive):
+                _report(progress, f"Using cached extracted data {extracted_dir}")
+                return
+            _report(progress, f"Cached extracted data is incomplete; replacing {extracted_dir}")
+        elif force and extracted_dir.exists():
+            _report(progress, f"Replacing extracted data {extracted_dir}")
+
+        _ensure_extraction_space(extracted_dir, archive, replacing=replace_existing)
+        if replace_existing:
+            shutil.rmtree(extracted_dir)
+
+        extracted_dir.mkdir(parents=True, exist_ok=True)
         _safe_extract(archive, extracted_dir, progress=progress)
+        _write_extraction_marker(extracted_dir, archive)
+
+
+def _ensure_extraction_space(
+    extracted_dir: Path,
+    archive: zipfile.ZipFile,
+    *,
+    replacing: bool,
+) -> None:
+    parent = extracted_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    available_bytes = shutil.disk_usage(parent).free
+    if replacing and extracted_dir.exists():
+        available_bytes += _path_size(extracted_dir)
+    required_bytes = _archive_uncompressed_size(archive) + EXTRACT_FREE_SPACE_MARGIN_BYTES
+    if available_bytes < required_bytes:
+        raise OSError(
+            "Not enough disk space to extract OpenEarthMap: "
+            f"need at least {_format_bytes(required_bytes)}, "
+            f"but only {_format_bytes(available_bytes)} is available after cleanup. "
+            "Free more space or use a different data directory."
+        )
+
+
+def _archive_uncompressed_size(archive: zipfile.ZipFile) -> int:
+    return sum(member.file_size for member in archive.infolist())
+
+
+def _path_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _extraction_complete(extracted_dir: Path, archive: zipfile.ZipFile) -> bool:
+    marker_path = extracted_dir / EXTRACT_COMPLETE_MARKER
+    if not marker_path.exists():
+        return False
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload != _archive_marker_payload(archive):
+        return False
+    return all(
+        (extracted_dir / member.filename).exists()
+        for member in archive.infolist()
+        if not member.is_dir()
+    )
+
+
+def _write_extraction_marker(extracted_dir: Path, archive: zipfile.ZipFile) -> None:
+    marker_path = extracted_dir / EXTRACT_COMPLETE_MARKER
+    marker_path.write_text(
+        json.dumps(_archive_marker_payload(archive), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _archive_marker_payload(archive: zipfile.ZipFile) -> dict[str, object]:
+    return {
+        "archive": Path(archive.filename).name,
+        "archive_size": Path(archive.filename).stat().st_size,
+        "member_count": len(archive.infolist()),
+    }
 
 
 def _safe_extract(
@@ -383,6 +526,7 @@ class _OpenEarthMapPaths:
     data_dir: Path
     archive_path: Path
     extracted_dir: Path
+    prepared_dir: Path
     manifest_path: Path
     classes_path: Path
 
@@ -393,6 +537,7 @@ def _paths(data_dir: str | Path) -> _OpenEarthMapPaths:
         data_dir=root,
         archive_path=root / "raw" / "OpenEarthMap.zip",
         extracted_dir=root / "extracted",
+        prepared_dir=root / "prepared",
         manifest_path=root / "manifest.jsonl",
         classes_path=root / "classes.json",
     )
@@ -407,24 +552,32 @@ def _build_click_command():
     @click.option("--skip-extract", is_flag=True, help="Use an existing extracted directory.")
     @click.option("--force-download", is_flag=True, help="Replace the existing archive.")
     @click.option("--force-extract", is_flag=True, help="Replace the extracted directory.")
+    @click.option("--force-prepared", is_flag=True, help="Rewrite prepared sample data files.")
     def command(
         data_dir: Path,
         skip_download: bool,
         skip_extract: bool,
         force_download: bool,
         force_extract: bool,
+        force_prepared: bool,
     ) -> None:
-        result = download_and_prepare_openearthmap(
-            data_dir,
-            download=not skip_download,
-            extract=not skip_extract,
-            force_download=force_download,
-            force_extract=force_extract,
-            progress=click.echo,
-        )
+        try:
+            result = download_and_prepare_openearthmap(
+                data_dir,
+                download=not skip_download,
+                extract=not skip_extract,
+                force_download=force_download,
+                force_extract=force_extract,
+                force_prepared=force_prepared,
+                progress=click.echo,
+            )
+        except OSError as exc:
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"manifest={result.manifest_path}")
         click.echo(f"classes={result.classes_path}")
+        click.echo(f"prepared={result.prepared_dir}")
         click.echo(f"samples={result.samples}")
+        click.echo(f"prepared_samples={result.prepared_samples}")
         click.echo(f"scanned_images={result.scanned_images}")
 
     return command

@@ -14,12 +14,14 @@ from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TrainingConfig,
+    _autocast_context,
     _load_training_samples,
     _load_validation_batches,
     _run_timing_payload,
     _sample_flow_timesteps,
+    _training_device,
 )
-from sim_satellite.training_data import random_square_crop_box
+from sim_satellite.training_data import preload_samples, random_square_crop_box
 
 
 def test_training_cli_loads_json_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -66,6 +68,10 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
+def test_training_config_defaults_to_cuda() -> None:
+    assert TrainingConfig().device == "cuda"
+
+
 def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(steps=0)
@@ -84,11 +90,29 @@ def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(precision="fp16")
     with pytest.raises(ValueError):
-        TrainingConfig(device_random="yes")  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        TrainingConfig(preload_samples="yes")  # type: ignore[arg-type]
+        TrainingConfig(device="mps")
     with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
+
+
+def test_training_device_requires_available_cuda() -> None:
+    with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
+        _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
+
+
+def test_training_device_accepts_available_cuda() -> None:
+    device = _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=True))
+
+    assert str(device) == "cuda"
+
+
+def test_bf16_autocast_is_cuda_only() -> None:
+    fake_torch = _FakeTorch(cuda_available=True)
+
+    context = _autocast_context(fake_torch, "bf16")
+
+    assert context == "autocast-context"
+    assert fake_torch.autocast_calls == [("cuda", fake_torch.bfloat16)]
 
 
 def test_run_timing_payload_estimates_remaining_runtime() -> None:
@@ -140,12 +164,15 @@ def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) 
             [
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
+                '"prepared": "prepared/maputo/c.pt", '
                 '"split": "train"}',
             ]
         )
@@ -170,9 +197,11 @@ def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
             [
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
                 '"split": "train"}',
             ]
         )
@@ -196,7 +225,8 @@ def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
 def test_validation_requires_split_or_holdout_patterns(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     manifest_path.write_text(
-        '{"image": "images/a.tif", "mask": "labels/a.tif", "split": "train"}\n',
+        '{"image": "images/a.tif", "mask": "labels/a.tif", '
+        '"prepared": "prepared/a.pt", "split": "train"}\n',
         encoding="utf-8",
     )
 
@@ -211,23 +241,56 @@ def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> 
 
     image_path = tmp_path / "image.png"
     mask_path = tmp_path / "mask.png"
+    prepared_path = tmp_path / "prepared.pt"
     Image.new("RGB", (10, 8)).save(image_path)
     Image.new("L", (10, 8)).save(mask_path)
-    sample = SatelliteSample(image_path=image_path, mask_path=mask_path, split="train")
+    torch.save(
+        {
+            "version": 1,
+            "image": torch.zeros(8, 10, 3, dtype=torch.uint8),
+            "mask": torch.zeros(8, 10, dtype=torch.uint8),
+            "size": (10, 8),
+        },
+        prepared_path,
+    )
+    sample = SatelliteSample(
+        image_path=image_path,
+        mask_path=mask_path,
+        prepared_path=prepared_path,
+        split="train",
+    )
+    preloaded = preload_samples((sample,))
 
     crop_box = random_square_crop_box(
         sample,
         crop_size=4,
         torch=_FakeTorch([3, 2]),
         generator=object(),
+        preloaded_samples=preloaded,
     )
 
     assert crop_box == (3, 2, 7, 6)
 
 
 class _FakeTorch:
-    def __init__(self, values: list[int]) -> None:
-        self.values = values
+    bfloat16 = object()
+
+    def __init__(
+        self,
+        values: list[int] | None = None,
+        *,
+        cuda_available: bool = True,
+    ) -> None:
+        self.values = values or []
+        self.cuda = _FakeCuda(cuda_available)
+        self.autocast_calls: list[tuple[str, object]] = []
+
+    def device(self, value: str) -> torch.device:
+        return torch.device(value)
+
+    def autocast(self, *, device_type: str, dtype: object) -> str:
+        self.autocast_calls.append((device_type, dtype))
+        return "autocast-context"
 
     def randint(
         self,
@@ -244,6 +307,14 @@ class _FakeTorch:
         value = self.values.pop(0)
         assert value < high
         return _FakeTensor(value)
+
+
+class _FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self.available = available
+
+    def is_available(self) -> bool:
+        return self.available
 
 
 class _FakeTensor:

@@ -417,6 +417,7 @@ def _write_web_fixture(tmp_path: Path) -> tuple[web.WebConfig, Path]:
             {
                 "image": "images/tile.png",
                 "mask": "labels/tile.png",
+                "prepared": "prepared/tile.pt",
                 "split": "train",
                 "source": "openearthmap",
             }

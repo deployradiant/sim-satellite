@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from sim_satellite.data.loader import SatelliteSample
+from sim_satellite.data.prepared import write_prepared_sample
 from sim_satellite.model import ModelConfig
 from sim_satellite.training_data import (
     load_batch,
@@ -17,9 +18,17 @@ from sim_satellite.training_data import (
 def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
     image_path = tmp_path / "image.png"
     mask_path = tmp_path / "mask.png"
+    prepared_path = tmp_path / "prepared.pt"
     Image.new("RGB", (16, 12), (255, 0, 0)).save(image_path)
     Image.new("L", (16, 12), 1).save(mask_path)
-    sample = SatelliteSample(image_path=image_path, mask_path=mask_path, split="train")
+    config = ModelConfig(image_size=8, mask_channels=2)
+    sample = SatelliteSample(
+        image_path=image_path,
+        mask_path=mask_path,
+        prepared_path=prepared_path,
+        split="train",
+    )
+    write_prepared_sample(sample, torch=torch, config=config)
 
     preloaded = preload_samples((sample,))
     crop_box = random_square_crop_box(
@@ -33,7 +42,7 @@ def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
         (sample,),
         [crop_box],
         torch=torch,
-        model_config=ModelConfig(image_size=8, mask_channels=2),
+        model_config=config,
         device=torch.device("cpu"),
         preloaded_samples=preloaded,
     )

@@ -33,11 +33,30 @@ def image_to_tensor(
     config: ModelConfig,
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> Any:
+    values = image_to_uint8_tensor(
+        image,
+        torch=torch,
+        crop_box=crop_box,
+        size=(config.image_size, config.image_size),
+    ).float()
+    return values.permute(2, 0, 1) / 127.5 - 1.0
+
+
+def image_to_uint8_tensor(
+    image: Image.Image,
+    *,
+    torch: Any,
+    crop_box: tuple[int, int, int, int] | None = None,
+    size: tuple[int, int] | None = None,
+) -> Any:
     if crop_box is not None:
         image = image.crop(crop_box)
-    image = image.resize((config.image_size, config.image_size), Image.Resampling.BILINEAR)
-    values = torch.tensor(list(_image_data(image)), dtype=torch.float32)
-    return values.view(config.image_size, config.image_size, 3).permute(2, 0, 1) / 127.5 - 1.0
+    image = image.convert("RGB")
+    if size is not None:
+        image = image.resize(size, Image.Resampling.BILINEAR)
+    width, height = image.size
+    values = _uint8_image_tensor(image, torch=torch)
+    return values.view(height, width, 3)
 
 
 def load_mask_tensor(
@@ -58,14 +77,43 @@ def mask_to_tensor(
     config: ModelConfig,
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> Any:
+    labels = mask_to_label_tensor(
+        mask,
+        torch=torch,
+        config=config,
+        crop_box=crop_box,
+        size=(config.image_size, config.image_size),
+    )
+    return labels_to_one_hot(labels, torch=torch, config=config)
+
+
+def mask_to_label_tensor(
+    mask: Image.Image,
+    *,
+    torch: Any,
+    config: ModelConfig,
+    crop_box: tuple[int, int, int, int] | None = None,
+    size: tuple[int, int] | None = None,
+) -> Any:
     if crop_box is not None:
         mask = mask.crop(crop_box)
-    mask = mask.resize((config.image_size, config.image_size), Image.Resampling.NEAREST)
-    labels = torch.tensor(mask_to_class_ids(mask, config), dtype=torch.long)
-    labels = labels.view(config.image_size, config.image_size)
+    if size is not None:
+        mask = mask.resize(size, Image.Resampling.NEAREST)
+    if mask.mode == "L":
+        labels = _grayscale_mask_labels(mask, torch=torch, config=config)
+    else:
+        labels = torch.tensor(mask_to_class_ids(mask, config), dtype=torch.long)
+    width, height = mask.size
+    return labels.view(height, width)
+
+
+def labels_to_one_hot(labels: Any, *, torch: Any, config: ModelConfig) -> Any:
     return (
-        torch.nn.functional.one_hot(labels, num_classes=config.mask_channels)
-        .permute(2, 0, 1)
+        torch.nn.functional.one_hot(labels.long(), num_classes=config.mask_channels)
+        .movedim(
+            -1,
+            -3,
+        )
         .float()
     )
 
@@ -101,6 +149,22 @@ def _class_id_from_grayscale(value: int, config: ModelConfig) -> int:
             f"Mask contains class id {value}, but mask_channels is {config.mask_channels}"
         )
     return value
+
+
+def _grayscale_mask_labels(mask: Image.Image, *, torch: Any, config: ModelConfig) -> Any:
+    labels = _uint8_image_tensor(mask, torch=torch).long()
+    if labels.numel() == 0:
+        return labels
+    max_class_id = int(labels.max().item())
+    if max_class_id >= config.mask_channels:
+        raise ValueError(
+            f"Mask contains class id {max_class_id}, but mask_channels is {config.mask_channels}"
+        )
+    return labels
+
+
+def _uint8_image_tensor(image: Image.Image, *, torch: Any) -> Any:
+    return torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
 
 
 def _image_data(image: Image.Image) -> Any:

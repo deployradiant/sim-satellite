@@ -23,7 +23,7 @@ from sim_satellite.train import (
 )
 from sim_satellite.web import WebConfig, create_app
 
-APP_NAME = "sim-satellite"
+APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
 LOCAL_DATA_ROOT = Path("data")
 LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
@@ -33,7 +33,7 @@ MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
 MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
 MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
-    "artifacts/openearthmap-flow-unet-94m-256-dualattn-h100-b10-20k-save1k-step-*.pt",
+    "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()

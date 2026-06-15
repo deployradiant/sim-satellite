@@ -18,5 +18,6 @@ dist/
 
 /artifacts/
 /data/
+/logs/
 
 .DS_Store
