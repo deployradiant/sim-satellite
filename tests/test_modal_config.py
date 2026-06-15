@@ -314,9 +314,10 @@ def test_modal_web_config_uses_artifact_checkpoint_and_mounted_manifest(
 
 def test_modal_data_mount_ignores_raw_archives() -> None:
     assert modal_app._ignore_modal_data_path(Path("data/openearthmap/raw/OpenEarthMap.zip"))
-    assert not modal_app._ignore_modal_data_path(
+    assert modal_app._ignore_modal_data_path(
         Path("data/openearthmap/extracted/train/images/tile.tif")
     )
+    assert not modal_app._ignore_modal_data_path(Path("data/openearthmap/prepared/train/tile.pt"))
 
 
 def test_modal_data_path_maps_inside_modal_container(

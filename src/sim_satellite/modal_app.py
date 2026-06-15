@@ -35,12 +35,15 @@ MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
     "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
+MODAL_INCLUDE_EXTRACTED_DATA = os.environ.get("SIM_SATELLITE_MODAL_INCLUDE_EXTRACTED") == "1"
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
 
 
 def _ignore_modal_data_path(path: Path) -> bool:
-    return "raw" in path.parts or path.suffix == ".zip"
+    if "raw" in path.parts or path.suffix == ".zip":
+        return True
+    return not MODAL_INCLUDE_EXTRACTED_DATA and "extracted" in path.parts
 
 
 app = modal.App(APP_NAME)
