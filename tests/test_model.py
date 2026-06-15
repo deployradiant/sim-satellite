@@ -5,7 +5,7 @@ from dataclasses import asdict
 import pytest
 import torch
 
-from sim_satellite.model import ModelConfig, build_model
+from sim_satellite.model import ModelConfig, _semantic_mask_at, build_model
 
 
 def test_model_config_rejects_unknown_checkpoint_fields() -> None:
@@ -51,3 +51,17 @@ def test_model_uses_direct_timestep_embedding_and_deep_attention() -> None:
 
     assert output.shape == image.shape
     assert torch.isfinite(output).all()
+
+
+def test_semantic_mask_pyramid_downsamples_one_hot_with_area() -> None:
+    semantic_mask = torch.zeros(1, 2, 4, 4)
+    semantic_mask[:, 0, :, :1] = 1.0
+    semantic_mask[:, 1, :, 1:] = 1.0
+    mask_pyramid = {(4, 4): semantic_mask}
+
+    resized = _semantic_mask_at(semantic_mask, (2, 2), mask_pyramid)
+
+    assert resized.shape == (1, 2, 2, 2)
+    assert torch.allclose(resized[:, :, :, 0], torch.tensor([[[0.5, 0.5], [0.5, 0.5]]]))
+    assert torch.allclose(resized[:, :, :, 1], torch.tensor([[[0.0, 0.0], [1.0, 1.0]]]))
+    assert mask_pyramid[(2, 2)] is resized
