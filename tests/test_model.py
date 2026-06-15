@@ -15,6 +15,11 @@ def test_model_config_rejects_unknown_checkpoint_fields() -> None:
         ModelConfig.from_dict({**config, "timesteps": 1000})
 
 
+def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:
+    with pytest.raises(ValueError, match="4096 tokens to avoid attention OOM"):
+        build_model(ModelConfig(image_size=512))
+
+
 def test_conditional_unet_forward_shape_is_deterministic() -> None:
     torch.manual_seed(123)
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
