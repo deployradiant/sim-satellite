@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from sim_satellite.data.loader import SatelliteSample
@@ -29,13 +29,28 @@ def unique_samples(
     return tuple(samples)
 
 
-def preload_samples(samples: tuple[SatelliteSample, ...]) -> dict[SatelliteSample, PreparedSample]:
+def preload_samples(
+    samples: tuple[SatelliteSample, ...],
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[SatelliteSample, PreparedSample]:
     import torch
 
     preloaded: dict[SatelliteSample, PreparedSample] = {}
-    for sample in samples:
+    for index, sample in enumerate(samples, start=1):
         preloaded[sample] = load_prepared_sample(sample.prepared_path, torch=torch)
+        if progress is not None and _should_report(index, len(samples)):
+            progress(index, len(samples))
     return preloaded
+
+
+def _should_report(current: int, total: int) -> bool:
+    if total <= 0:
+        return False
+    if current == 1 or current == total or total <= 10:
+        return True
+    step = max(1, total // 10)
+    return current % step == 0
 
 
 def load_batch(

@@ -58,6 +58,55 @@ def print_train_start(
     )
 
 
+def print_preload_start(
+    *,
+    manifest_path: str,
+    split: str,
+    sample_count: int,
+    train_samples: int,
+    validation_batches: int,
+) -> None:
+    _print_event(
+        {
+            "event": "preload_start",
+            "manifest_path": manifest_path,
+            "split": split,
+            "sample_count": sample_count,
+            "train_samples": train_samples,
+            "validation_batches": validation_batches,
+            "logged_at_epoch_utc": time.time(),
+        }
+    )
+
+
+def print_preload_progress(
+    *,
+    started_at_monotonic: float,
+    completed: int,
+    total: int,
+) -> None:
+    now_monotonic = time.monotonic()
+    elapsed_seconds = max(0.0, now_monotonic - started_at_monotonic)
+    samples_per_second = completed / elapsed_seconds if elapsed_seconds > 0.0 else 0.0
+    remaining = max(total - completed, 0)
+    estimated_remaining_seconds = (
+        remaining / samples_per_second if samples_per_second > 0.0 else None
+    )
+    _print_event(
+        {
+            "event": "preload_progress",
+            "completed_samples": completed,
+            "total_samples": total,
+            "remaining_samples": remaining,
+            "progress_fraction": completed / total if total > 0 else 0.0,
+            "elapsed_seconds": elapsed_seconds,
+            "samples_per_second": samples_per_second,
+            "estimated_remaining_seconds": estimated_remaining_seconds,
+            "logged_at_epoch_utc": time.time(),
+        }
+    )
+
+
 def print_validation_progress(
     *,
     started_at_epoch_utc: float,

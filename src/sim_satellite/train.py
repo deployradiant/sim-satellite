@@ -140,7 +140,26 @@ def run_training(
     validation_batches = _load_validation_batches(config)
     preload_started_at = time.monotonic()
     samples_to_preload = training_data.unique_samples(training_samples, validation_batches)
-    preloaded_samples = training_data.preload_samples(samples_to_preload)
+    train_sample_count = sum(len(batch) for batch in batches)
+    training_log.print_preload_start(
+        manifest_path=config.manifest_path,
+        split=config.split,
+        sample_count=len(samples_to_preload),
+        train_samples=train_sample_count,
+        validation_batches=len(validation_batches),
+    )
+
+    def report_preload_progress(completed: int, total: int) -> None:
+        training_log.print_preload_progress(
+            started_at_monotonic=preload_started_at,
+            completed=completed,
+            total=total,
+        )
+
+    preloaded_samples = training_data.preload_samples(
+        samples_to_preload,
+        progress=report_preload_progress,
+    )
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
     final_loss = 0.0
@@ -176,7 +195,7 @@ def run_training(
         started_at_epoch_utc=started_at_epoch_utc,
         start_step=start_step,
         steps=config.steps,
-        train_samples=sum(len(batch) for batch in batches),
+        train_samples=train_sample_count,
         train_batches=len(batches),
         batch_size=config.batch_size,
         timestep_sampling=TIMESTEP_SAMPLING,
