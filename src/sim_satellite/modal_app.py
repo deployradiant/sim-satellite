@@ -25,6 +25,7 @@ from sim_satellite.web import WebConfig, create_app
 
 APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
+DATA_VOLUME_NAME = os.environ.get("SIM_SATELLITE_DATA_VOLUME_NAME", "sim-satellite-data")
 LOCAL_DATA_ROOT = Path("data")
 LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
@@ -35,15 +36,8 @@ MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
     "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
-MODAL_INCLUDE_EXTRACTED_DATA = os.environ.get("SIM_SATELLITE_MODAL_INCLUDE_EXTRACTED") == "1"
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
-
-
-def _ignore_modal_data_path(path: Path) -> bool:
-    if "raw" in path.parts or path.suffix == ".zip":
-        return True
-    return not MODAL_INCLUDE_EXTRACTED_DATA and "extracted" in path.parts
 
 
 app = modal.App(APP_NAME)
@@ -56,24 +50,19 @@ image = (
         str(MODAL_PACKAGE_ROOT / "web_static" / "index.html"),
     )
 )
-if DATA_MOUNT_CONFIGURED:
-    image = image.add_local_dir(
-        LOCAL_DATA_ROOT,
-        str(MODAL_DATA_ROOT),
-        copy=False,
-        ignore=_ignore_modal_data_path,
-    )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
+data_volume = modal.Volume.from_name(DATA_VOLUME_NAME, create_if_missing=True)
 
 
 @app.function(
     image=image,
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
+    data_volume.reload()
     result = run_training(
         TrainingConfig.from_dict(config),
         after_save=artifact_volume.commit,
@@ -88,9 +77,10 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     image=image,
     timeout=900,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
+    data_volume.reload()
     artifact_volume.reload()
     result = asdict(run_inference(InferenceConfig.from_dict(config)))
     artifact_volume.commit()
@@ -102,10 +92,11 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     image=image,
     timeout=900,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
 )
 @modal.asgi_app()
 def web_remote() -> Any:
+    data_volume.reload()
     artifact_volume.reload()
     return create_app(
         _modal_web_config(WebConfig(checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB)),
