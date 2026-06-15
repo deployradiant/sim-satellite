@@ -13,6 +13,7 @@ import torch
 
 from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
+from sim_satellite.latent import decode_image_latent
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
@@ -90,6 +91,8 @@ class LoadedGenerator:
     model_config: ModelConfig
     checkpoint_path: Path
     device: Any
+    latent_downsample_factor: int
+    output_image_size: int
 
 
 def run_inference(
@@ -137,6 +140,12 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
+    latent_downsample_factor = _checkpoint_latent_downsample_factor(checkpoint)
+    output_image_size = _checkpoint_output_image_size(
+        checkpoint,
+        model_config=model_config,
+        latent_downsample_factor=latent_downsample_factor,
+    )
     model = build_model(model_config).to(torch_device)
     _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
     model.eval()
@@ -146,6 +155,8 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
         model_config=model_config,
         checkpoint_path=checkpoint_path,
         device=torch_device,
+        latent_downsample_factor=latent_downsample_factor,
+        output_image_size=output_image_size,
     )
 
 
@@ -193,6 +204,12 @@ def generate_image_with_model(
             image = image - velocity / float(config.steps)
             if progress is not None:
                 progress(completed_steps, config.steps)
+        image = decode_image_latent(
+            image,
+            factor=loaded_generator.latent_downsample_factor,
+            output_size=loaded_generator.output_image_size,
+            torch=torch,
+        )
         image = (image.clamp(-1.0, 1.0) + 1.0) / 2.0
 
     return GenerationResult(
@@ -239,6 +256,30 @@ def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     if not isinstance(checkpoint["model_state"], Mapping):
         raise RuntimeError(f"Inference checkpoint model_state must be a mapping: {checkpoint_path}")
     return checkpoint
+
+
+def _checkpoint_latent_downsample_factor(checkpoint: Mapping[str, Any]) -> int:
+    training_config = checkpoint.get("training_config")
+    if not isinstance(training_config, Mapping):
+        return 1
+    return int(training_config.get("latent_downsample_factor", 1))
+
+
+def _checkpoint_output_image_size(
+    checkpoint: Mapping[str, Any],
+    *,
+    model_config: ModelConfig,
+    latent_downsample_factor: int,
+) -> int:
+    training_config = checkpoint.get("training_config")
+    if isinstance(training_config, Mapping):
+        return int(
+            training_config.get(
+                "image_size",
+                model_config.image_size * latent_downsample_factor,
+            )
+        )
+    return model_config.image_size * latent_downsample_factor
 
 
 def _load_model_state(

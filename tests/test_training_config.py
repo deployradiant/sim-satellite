@@ -92,6 +92,12 @@ def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(device="mps")
     with pytest.raises(ValueError):
+        TrainingConfig(image_size=256, latent_downsample_factor=0)
+    with pytest.raises(ValueError):
+        TrainingConfig(image_size=250, latent_downsample_factor=4)
+    with pytest.raises(ValueError):
+        TrainingConfig(image_size=64, latent_downsample_factor=4)
+    with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
 
 
@@ -113,6 +119,12 @@ def test_bf16_autocast_is_cuda_only() -> None:
 
     assert context == "autocast-context"
     assert fake_torch.autocast_calls == [("cuda", fake_torch.bfloat16)]
+
+
+def test_training_model_config_uses_latent_image_size() -> None:
+    config = TrainingConfig(image_size=256, latent_downsample_factor=4)
+
+    assert config.model_config().image_size == 64
 
 
 def test_run_timing_payload_estimates_remaining_runtime() -> None:

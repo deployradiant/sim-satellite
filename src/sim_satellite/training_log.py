@@ -31,7 +31,10 @@ def print_train_start(
     image_size: int,
     device: Any,
     torch_device_payload: Mapping[str, int | str | None],
+    latent_downsample_factor: int = 1,
+    flow_image_size: int | None = None,
 ) -> None:
+    flow_image_size = image_size if flow_image_size is None else flow_image_size
     _print_event(
         {
             "event": "train_start",
@@ -52,6 +55,8 @@ def print_train_start(
             "timing_sample_every": timing_sample_every,
             "model_parameters": model_parameters,
             "image_size": image_size,
+            "latent_downsample_factor": latent_downsample_factor,
+            "flow_image_size": flow_image_size,
             "device": str(device),
             **torch_device_payload,
         }

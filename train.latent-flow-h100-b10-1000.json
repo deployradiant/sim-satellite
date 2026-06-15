@@ -1,0 +1,16 @@
+{
+  "steps": 1000,
+  "batch_size": 10,
+  "learning_rate": 0.0002,
+  "manifest_path": "data/openearthmap/manifest.jsonl",
+  "checkpoint_path": "artifacts/latent-flow-fixedavg-64-from256-h100-b10-1000.pt",
+  "metrics_path": "artifacts/latent-flow-fixedavg-64-from256-h100-b10-1000-metrics.json",
+  "loss_plot_path": "artifacts/latent-flow-fixedavg-64-from256-h100-b10-1000-loss.png",
+  "image_size": 256,
+  "hidden_channels": 128,
+  "latent_downsample_factor": 4,
+  "mask_drop_probability": 0.1,
+  "precision": "bf16",
+  "timing_sample_every": 100,
+  "log_every": 100
+}

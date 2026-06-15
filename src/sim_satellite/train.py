@@ -17,6 +17,11 @@ from sim_satellite import training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.prepared import PreparedSample
+from sim_satellite.latent import (
+    encode_image_latent,
+    encode_mask_latent,
+    validate_latent_downsample_factor,
+)
 from sim_satellite.model import (
     ModelConfig,
     build_model,
@@ -54,6 +59,7 @@ class TrainingConfig:
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
+    latent_downsample_factor: int = 1
     mask_drop_probability: float = 0.0
     precision: str = "float32"
     timing_sample_every: int = 0
@@ -80,6 +86,7 @@ class TrainingConfig:
             raise ValueError("mask_drop_probability must be between 0 and 1")
         if self.precision not in {"float32", "bf16"}:
             raise ValueError("precision must be 'float32' or 'bf16'")
+        validate_latent_downsample_factor(self.image_size, self.latent_downsample_factor)
         if self.device != "cuda" and not self.device.startswith("cuda:"):
             raise ValueError("device must be a CUDA device")
         if self.timing_sample_every < 0:
@@ -99,7 +106,7 @@ class TrainingConfig:
 
     def model_config(self) -> ModelConfig:
         return ModelConfig(
-            image_size=self.image_size,
+            image_size=self.image_size // self.latent_downsample_factor,
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
             hidden_channels=self.hidden_channels,
@@ -130,6 +137,7 @@ def run_training(
     torch.manual_seed(config.seed)
     device = _training_device(config, torch=torch)
     model_config = config.model_config()
+    data_model_config = _data_model_config(config)
     model = build_model(model_config).to(device)
     model_parameters = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -207,6 +215,8 @@ def run_training(
         timing_sample_every=config.timing_sample_every,
         model_parameters=model_parameters,
         image_size=config.image_size,
+        latent_downsample_factor=config.latent_downsample_factor,
+        flow_image_size=model_config.image_size,
         device=device,
         torch_device_payload=training_log.torch_device_payload(torch, device),
     )
@@ -221,6 +231,8 @@ def run_training(
             optimizer=optimizer,
             torch=torch,
             model_config=model_config,
+            data_model_config=data_model_config,
+            latent_downsample_factor=config.latent_downsample_factor,
             device=device,
             crop_generator=crop_generator,
             random_generator=random_generator,
@@ -258,6 +270,7 @@ def run_training(
                 validation_batches,
                 torch=torch,
                 model_config=model_config,
+                data_model_config=data_model_config,
                 device=device,
                 config=config,
                 preloaded_samples=preloaded_samples,
@@ -388,6 +401,16 @@ def _training_device(config: TrainingConfig, *, torch: Any) -> Any:
     return device
 
 
+def _data_model_config(config: TrainingConfig) -> ModelConfig:
+    return ModelConfig(
+        image_size=config.image_size,
+        image_channels=config.image_channels,
+        mask_channels=config.mask_channels,
+        hidden_channels=config.hidden_channels,
+        seed=config.seed,
+    )
+
+
 def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool:
     return config.timing_sample_every > 0 and (
         step_number == 1
@@ -427,6 +450,8 @@ def _train_step(
     optimizer: Any,
     torch: Any,
     model_config: ModelConfig,
+    data_model_config: ModelConfig,
+    latent_downsample_factor: int,
     device: Any,
     crop_generator: Any,
     random_generator: Any,
@@ -442,7 +467,7 @@ def _train_step(
     crop_boxes = [
         training_data.random_square_crop_box(
             sample,
-            crop_size=model_config.image_size,
+            crop_size=data_model_config.image_size,
             torch=torch,
             generator=crop_generator,
             preloaded_samples=preloaded_samples,
@@ -458,10 +483,12 @@ def _train_step(
         samples,
         crop_boxes,
         torch=torch,
-        model_config=model_config,
+        model_config=data_model_config,
         device=device,
         preloaded_samples=preloaded_samples,
     )
+    clean = encode_image_latent(clean, factor=latent_downsample_factor, torch=torch)
+    semantic_mask = encode_mask_latent(semantic_mask, size=model_config.image_size, torch=torch)
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
@@ -605,6 +632,7 @@ def _evaluate_validation_loss(
     *,
     torch: Any,
     model_config: ModelConfig,
+    data_model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
@@ -618,7 +646,7 @@ def _evaluate_validation_loss(
             crop_boxes = [
                 training_data.center_square_crop_box(
                     sample,
-                    crop_size=model_config.image_size,
+                    crop_size=data_model_config.image_size,
                     preloaded_samples=preloaded_samples,
                 )
                 for sample in samples
@@ -627,9 +655,19 @@ def _evaluate_validation_loss(
                 samples,
                 crop_boxes,
                 torch=torch,
-                model_config=model_config,
+                model_config=data_model_config,
                 device=device,
                 preloaded_samples=preloaded_samples,
+            )
+            clean = encode_image_latent(
+                clean,
+                factor=config.latent_downsample_factor,
+                torch=torch,
+            )
+            semantic_mask = encode_mask_latent(
+                semantic_mask,
+                size=model_config.image_size,
+                torch=torch,
             )
             noise = torch.randn(clean.shape, generator=generator, device=device)
             timestep = _sample_flow_timesteps(

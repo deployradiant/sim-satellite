@@ -101,6 +101,37 @@ def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
         hidden_channels=4,
         seed=99,
     )
+    assert loaded.latent_downsample_factor == 1
+    assert loaded.output_image_size == 32
+
+
+def test_latent_checkpoint_generation_decodes_to_training_image_size(tmp_path: Path) -> None:
+    checkpoint_path = _write_flow_checkpoint(
+        tmp_path,
+        torch=torch,
+        model_config=ModelConfig(
+            image_size=32,
+            image_channels=3,
+            mask_channels=2,
+            hidden_channels=4,
+            seed=99,
+        ),
+        training_config={"image_size": 64, "latent_downsample_factor": 2},
+    )
+    mask_path = tmp_path / "mask.png"
+    from PIL import Image
+
+    Image.new("L", (64, 64), 1).save(mask_path)
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+    generation = infer.generate_image_with_model(
+        loaded,
+        infer.GenerationConfig(mask_path=str(mask_path), steps=1),
+    )
+
+    assert loaded.latent_downsample_factor == 2
+    assert loaded.output_image_size == 64
+    assert generation.image.shape == (1, 3, 64, 64)
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
@@ -117,9 +148,11 @@ def _write_flow_checkpoint(
     tmp_path: Path,
     *,
     torch: Any,
+    model_config: ModelConfig | None = None,
+    training_config: dict[str, int] | None = None,
 ) -> Path:
     checkpoint_path = tmp_path / "flow.pt"
-    config = ModelConfig(
+    config = model_config or ModelConfig(
         image_size=32,
         image_channels=3,
         mask_channels=2,
@@ -131,5 +164,7 @@ def _write_flow_checkpoint(
         "model_config": asdict(config),
         "model_state": model.state_dict(),
     }
+    if training_config is not None:
+        checkpoint["training_config"] = training_config
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
