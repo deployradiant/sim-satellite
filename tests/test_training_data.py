@@ -41,7 +41,7 @@ def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
     assert crop_box == (3, 2, 11, 10)
     assert images.shape == (1, 3, 8, 8)
     assert masks.shape == (1, 2, 8, 8)
-    assert torch.allclose(images[0, :, 0, 0], torch.tensor([1.0, 0.0, 0.0]))
+    assert torch.allclose(images[0, :, 0, 0], torch.tensor([1.0, -1.0, -1.0]))
     assert torch.all(masks[:, 1] == 1.0)
 
 

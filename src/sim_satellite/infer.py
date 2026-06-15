@@ -193,7 +193,7 @@ def generate_image_with_model(
             image = image - velocity / float(config.steps)
             if progress is not None:
                 progress(completed_steps, config.steps)
-        image = image.clamp(0.0, 1.0)
+        image = (image.clamp(-1.0, 1.0) + 1.0) / 2.0
 
     return GenerationResult(
         image=image,

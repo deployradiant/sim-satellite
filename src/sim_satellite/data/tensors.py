@@ -37,7 +37,7 @@ def image_to_tensor(
         image = image.crop(crop_box)
     image = image.resize((config.image_size, config.image_size), Image.Resampling.BILINEAR)
     values = torch.tensor(list(_image_data(image)), dtype=torch.float32)
-    return values.view(config.image_size, config.image_size, 3).permute(2, 0, 1) / 255.0
+    return values.view(config.image_size, config.image_size, 3).permute(2, 0, 1) / 127.5 - 1.0
 
 
 def load_mask_tensor(
