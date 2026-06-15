@@ -11,6 +11,8 @@ from torch import nn
 
 CHANNEL_MULTIPLIERS = (1, 2, 4, 4)
 BLOCKS_PER_LEVEL = 2
+DEEP_ATTENTION_DOWNSAMPLE_FACTOR = 4
+MAX_FULL_ATTENTION_TOKENS = 4096
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,12 @@ def build_model(config: ModelConfig | None = None) -> Any:
         raise ValueError("unet architecture requires image_size of at least 32")
     if config.image_size % 8 != 0:
         raise ValueError("unet architecture requires image_size divisible by 8")
+    deep_attention_size = config.image_size // DEEP_ATTENTION_DOWNSAMPLE_FACTOR
+    if deep_attention_size * deep_attention_size > MAX_FULL_ATTENTION_TOKENS:
+        raise ValueError(
+            "unet architecture requires deep full attention to stay at or below "
+            f"{MAX_FULL_ATTENTION_TOKENS} tokens"
+        )
     return ConditionalUNet(config)
 
 
