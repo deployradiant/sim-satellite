@@ -27,15 +27,15 @@ See README.md for architecture.
 - Keep the full OpenEarthMap download, extraction, and prepared tensor data under
   `data/openearthmap/` locally when disk space allows. This directory is
   generated state and must not be committed.
-- Prefer preparing OpenEarthMap once locally with `uv run sim-satellite
-  openearthmap`, then mount the local `data/` directory into Modal for training.
-  The Modal app maps local `data/openearthmap` to `/data/openearthmap`.
+- Modal training should download, extract, and prepare OpenEarthMap on the remote
+  box's local `/data/openearthmap` scratch disk. Do not upload the full dataset
+  or prepared tensor tree into a shared Modal data volume for standard runs.
+- Keep local preparation useful for inspection and local debugging with
+  `uv run sim-satellite openearthmap`, but do not require the local checkout to
+  contain the full dataset before starting Modal training.
 - Reuse prepared tensors between runs when the preparation code, class mapping,
   image size assumptions, and tensor format have not changed. Use
   `--force-prepared` after changing those assumptions.
-- Avoid downloading and preparing the full dataset inside temporary Modal
-  containers for standard experiments. Use that only as a one-off fallback when
-  local data is unavailable.
 - Training should require prepared data manifests and fail clearly when prepared
   data is unavailable, instead of falling back to raw local PIL/image paths.
 

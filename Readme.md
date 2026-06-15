@@ -32,9 +32,10 @@ Training reads run settings from a JSON file. Omitted fields use
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl`, `classes.json`,
-and prepared tensor samples under `data/openearthmap/prepared/`. The Modal app
-mounts local `data/` to `/data`, so Modal training can reuse the local prepared
-dataset instead of downloading or preparing it again in a temporary container.
+and prepared tensor samples under `data/openearthmap/prepared/`. Modal training
+downloads, extracts, and prepares the same dataset on the remote box's local
+`/data/openearthmap` scratch disk before training starts, so the full local data
+tree does not need to be uploaded into a shared Modal data volume.
 The command can also be called directly as a package script:
 
 ```bash
@@ -85,9 +86,10 @@ uv run modal deploy -m sim_satellite.modal_app
 
 Data is generated locally under `data/` by default and is not committed.
 OpenEarthMap should normally be fully downloaded, extracted, and prepared once
-under `data/openearthmap/`, then mounted into Modal for training. Prepared
-samples track the source dataset, split, image path, mask path, semantic classes,
-and preparation metadata.
+under `data/openearthmap/` for local inspection and debugging. Modal runs prepare
+their own copy under `/data/openearthmap` on remote local scratch disk. Prepared
+samples track the source dataset, split, image path, mask path, semantic
+classes, and preparation metadata.
 
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.

@@ -6,13 +6,16 @@ for small PyTorch debugging runs.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import modal
 
+from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
@@ -25,11 +28,13 @@ from sim_satellite.web import WebConfig, create_app
 
 APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
-DATA_VOLUME_NAME = os.environ.get("SIM_SATELLITE_DATA_VOLUME_NAME", "sim-satellite-data")
 LOCAL_DATA_ROOT = Path("data")
 LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
+MODAL_EPHEMERAL_DISK_MIB = int(
+    os.environ.get("SIM_SATELLITE_MODAL_EPHEMERAL_DISK_MIB", str(64 * 1024))
+)
 MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
 MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
 MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
@@ -37,7 +42,7 @@ MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
-DATA_MOUNT_CONFIGURED = LOCAL_DATA_ROOT.exists()
+MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
 
 
 app = modal.App(APP_NAME)
@@ -52,17 +57,17 @@ image = (
 )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
-data_volume = modal.Volume.from_name(DATA_VOLUME_NAME, create_if_missing=True)
 
 
 @app.function(
     image=image,
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
-    data_volume.reload()
+    _ensure_modal_openearthmap_data(config["manifest_path"])
     result = run_training(
         TrainingConfig.from_dict(config),
         after_save=artifact_volume.commit,
@@ -75,12 +80,13 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
-    timeout=900,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
-    data_volume.reload()
+    _ensure_modal_openearthmap_data(config["manifest_path"])
     artifact_volume.reload()
     result = asdict(run_inference(InferenceConfig.from_dict(config)))
     artifact_volume.commit()
@@ -90,13 +96,14 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
-    timeout=900,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_GPU,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume, str(MODAL_DATA_ROOT): data_volume},
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 @modal.asgi_app()
 def web_remote() -> Any:
-    data_volume.reload()
+    _ensure_modal_openearthmap_data(WebConfig.manifest_path)
     artifact_volume.reload()
     return create_app(
         _modal_web_config(WebConfig(checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB)),
@@ -190,49 +197,90 @@ def _modal_artifact_path(value: str) -> str:
 
 def _modal_data_path(value: str, *, field_name: str) -> str:
     path = Path(value)
-    if MODAL_DATA_ROOT.exists():
-        if path.is_absolute():
+    if path.is_absolute():
+        try:
+            path.relative_to(MODAL_DATA_ROOT)
+        except ValueError:
             try:
-                path.relative_to(MODAL_DATA_ROOT)
+                relative_path = path.relative_to((Path.cwd() / LOCAL_DATA_ROOT).resolve())
             except ValueError:
                 raise ValueError(
-                    f"Modal {field_name} must be under {MODAL_DATA_ROOT}: {value!r}"
+                    f"Modal {field_name} must be relative, under local {LOCAL_DATA_ROOT}/, "
+                    f"or under {MODAL_DATA_ROOT}: {value!r}"
                 ) from None
-            return str(path)
-        if path.parts and path.parts[0] == "data":
-            path = path.relative_to("data")
-        if ".." in path.parts:
-            raise ValueError(f"Modal {field_name} must stay under {MODAL_DATA_ROOT}: {value!r}")
-        return str(MODAL_DATA_ROOT / path)
+            return str(MODAL_DATA_ROOT / relative_path)
+        return str(path)
 
-    if not DATA_MOUNT_CONFIGURED:
-        raise RuntimeError(
-            f"Modal {field_name} cannot be used because {LOCAL_DATA_ROOT}/ did not exist when "
-            "sim_satellite.modal_app was imported, so it was not mounted into the Modal image. "
-            "Run `sim-satellite openearthmap` before starting Modal training or inference."
-        )
-    relative_path = _local_data_relative_path(value, field_name=field_name)
-    return str(MODAL_DATA_ROOT / relative_path)
+    if path.parts and path.parts[0] == str(LOCAL_DATA_ROOT):
+        path = path.relative_to(LOCAL_DATA_ROOT)
+    if ".." in path.parts:
+        raise ValueError(f"Modal {field_name} must stay under {MODAL_DATA_ROOT}: {value!r}")
+    return str(MODAL_DATA_ROOT / path)
 
 
-def _local_data_relative_path(value: str, *, field_name: str) -> Path:
-    path = Path(value)
-    local_path = path if path.is_absolute() else Path.cwd() / path
-    data_root = LOCAL_DATA_ROOT.resolve()
-    resolved_path = local_path.resolve()
+def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
+    data_dir = _modal_data_dir_for_manifest(manifest_path)
+    if _modal_openearthmap_data_ready(data_dir, Path(manifest_path)):
+        _print_modal_data_event("modal_data_ready", data_dir=str(data_dir))
+        return
 
+    _print_modal_data_event(
+        "modal_data_setup_start",
+        data_dir=str(data_dir),
+        ephemeral_disk_mib=MODAL_EPHEMERAL_DISK_MIB,
+    )
+    result = download_and_prepare_openearthmap(
+        data_dir,
+        progress=lambda message: _print_modal_data_event(
+            "modal_data_setup_progress",
+            data_dir=str(data_dir),
+            message=message,
+        ),
+    )
+    _print_modal_data_event(
+        "modal_data_setup_done",
+        data_dir=str(result.data_dir),
+        manifest_path=str(result.manifest_path),
+        prepared_dir=str(result.prepared_dir),
+        samples=result.samples,
+        prepared_samples=result.prepared_samples,
+        scanned_images=result.scanned_images,
+        missing_masks=result.missing_masks,
+    )
+
+
+def _modal_data_dir_for_manifest(manifest_path: str) -> Path:
+    manifest = Path(manifest_path)
+    if not manifest.is_absolute():
+        manifest = Path(_modal_data_path(manifest_path, field_name="manifest_path"))
     try:
-        relative_path = resolved_path.relative_to(data_root)
+        manifest.relative_to(MODAL_DATA_ROOT)
     except ValueError:
         raise ValueError(
-            f"Modal {field_name} must be under the local data/ cache: {value!r}. "
-            f"Modal only mounts {LOCAL_DATA_ROOT}/ at {MODAL_DATA_ROOT}."
+            f"Modal manifest_path must be under {MODAL_DATA_ROOT}: {manifest_path!r}"
         ) from None
+    return manifest.parent
 
-    if not resolved_path.exists():
-        raise FileNotFoundError(
-            f"Modal {field_name} not found locally: {value!r}. "
-            f"Modal only mounts existing files from {LOCAL_DATA_ROOT}/ at {MODAL_DATA_ROOT}."
-        )
 
-    return relative_path
+def _modal_openearthmap_data_ready(data_dir: Path, manifest_path: Path) -> bool:
+    prepared_dir = data_dir / "prepared"
+    return (
+        manifest_path.exists()
+        and (data_dir / "classes.json").exists()
+        and prepared_dir.exists()
+        and any(prepared_dir.rglob("*.pt"))
+    )
+
+
+def _print_modal_data_event(event: str, **payload: Any) -> None:
+    print(
+        json.dumps(
+            {
+                "event": event,
+                "logged_at_epoch_utc": time.time(),
+                **payload,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
