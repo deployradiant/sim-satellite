@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
+import torch
 from PIL import Image
 
-from sim_satellite.data.tensors import mask_to_class_ids
+from sim_satellite.data.tensors import image_to_tensor, mask_to_class_ids
 from sim_satellite.model import ModelConfig
 
 OPENEARTHMAP_CLASSES = (
@@ -28,6 +29,16 @@ OPENEARTHMAP_RGB = {
     "agriculture land": (75, 181, 73),
     "building": (222, 31, 7),
 }
+
+
+def test_image_tensor_uses_centered_model_scale() -> None:
+    image = Image.new("RGB", (1, 1), (0, 127, 255))
+
+    tensor = image_to_tensor(image, torch=torch, config=ModelConfig(image_size=8))
+
+    assert tensor[0, 0, 0].item() == -1.0
+    assert tensor[1, 0, 0].item() == pytest.approx(-0.0039215689)
+    assert tensor[2, 0, 0].item() == 1.0
 
 
 def test_rgb_mask_decodes_openearthmap_palette() -> None:
