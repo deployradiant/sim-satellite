@@ -90,6 +90,7 @@ class LoadedGenerator:
     model_config: ModelConfig
     checkpoint_path: Path
     device: Any
+    mask_drop_probability: float
 
 
 def run_inference(
@@ -146,6 +147,7 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
         model_config=model_config,
         checkpoint_path=checkpoint_path,
         device=torch_device,
+        mask_drop_probability=_checkpoint_mask_drop_probability(checkpoint),
     )
 
 
@@ -160,6 +162,7 @@ def generate_image_with_model(
     model_config = loaded_generator.model_config
     device = loaded_generator.device
 
+    _validate_guidance_training(loaded_generator, config.guidance_scale)
     torch.manual_seed(config.seed)
     generator = torch.Generator(device="cpu").manual_seed(config.seed)
     image_shape = (
@@ -222,6 +225,19 @@ def _guided_prediction(
     return unconditional + guidance_scale * (conditional - unconditional)
 
 
+def _validate_guidance_training(
+    loaded_generator: LoadedGenerator,
+    guidance_scale: float,
+) -> None:
+    if guidance_scale == 1.0:
+        return
+    if loaded_generator.mask_drop_probability <= 0.0:
+        raise ValueError(
+            "guidance_scale other than 1.0 requires a checkpoint trained with "
+            "mask_drop_probability greater than 0"
+        )
+
+
 def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if not isinstance(checkpoint, Mapping):
@@ -239,6 +255,13 @@ def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     if not isinstance(checkpoint["model_state"], Mapping):
         raise RuntimeError(f"Inference checkpoint model_state must be a mapping: {checkpoint_path}")
     return checkpoint
+
+
+def _checkpoint_mask_drop_probability(checkpoint: Mapping[str, Any]) -> float:
+    training_config = checkpoint.get("training_config")
+    if not isinstance(training_config, Mapping):
+        return 0.0
+    return float(training_config.get("mask_drop_probability", 0.0))
 
 
 def _load_model_state(

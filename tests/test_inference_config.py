@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,27 @@ def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
         hidden_channels=4,
         seed=99,
     )
+    assert loaded.mask_drop_probability == 0.0
+
+
+def test_load_generator_reads_mask_drop_probability(tmp_path: Path) -> None:
+    checkpoint_path = _write_flow_checkpoint(
+        tmp_path,
+        torch=torch,
+        training_config={"mask_drop_probability": 0.1},
+    )
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    assert loaded.mask_drop_probability == 0.1
+
+
+def test_guidance_requires_mask_dropout_training(tmp_path: Path) -> None:
+    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    with pytest.raises(ValueError, match="mask_drop_probability greater than 0"):
+        infer._validate_guidance_training(loaded, 2.0)
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
@@ -116,6 +138,7 @@ def _write_flow_checkpoint(
     tmp_path: Path,
     *,
     torch: Any,
+    training_config: Mapping[str, Any] | None = None,
 ) -> Path:
     checkpoint_path = tmp_path / "flow.pt"
     config = ModelConfig(
@@ -130,5 +153,7 @@ def _write_flow_checkpoint(
         "model_config": asdict(config),
         "model_state": model.state_dict(),
     }
+    if training_config is not None:
+        checkpoint["training_config"] = dict(training_config)
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
