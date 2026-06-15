@@ -51,8 +51,8 @@ def build_model(config: ModelConfig | None = None) -> Any:
     deep_attention_size = config.image_size // DEEP_ATTENTION_DOWNSAMPLE_FACTOR
     if deep_attention_size * deep_attention_size > MAX_FULL_ATTENTION_TOKENS:
         raise ValueError(
-            "unet architecture requires deep full attention to stay at or below "
-            f"{MAX_FULL_ATTENTION_TOKENS} tokens"
+            f"unet architecture limits deep full attention to {MAX_FULL_ATTENTION_TOKENS} "
+            "tokens to avoid attention OOM"
         )
     return ConditionalUNet(config)
 

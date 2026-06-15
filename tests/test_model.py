@@ -16,7 +16,7 @@ def test_model_config_rejects_unknown_checkpoint_fields() -> None:
 
 
 def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:
-    with pytest.raises(ValueError, match="deep full attention"):
+    with pytest.raises(ValueError, match="4096 tokens to avoid attention OOM"):
         build_model(ModelConfig(image_size=512))
 
 
