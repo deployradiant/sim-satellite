@@ -15,33 +15,6 @@ _RGB_MASK_MODES = {"RGB", "RGBA", "P"}
 _GRAYSCALE_CLASS_ID_MODES = {"1", "L", "I", "I;16", "I;16B", "I;16L"}
 
 
-def load_image_tensor(
-    path: Path,
-    *,
-    torch: Any,
-    config: ModelConfig,
-    crop_box: tuple[int, int, int, int] | None = None,
-) -> Any:
-    image = Image.open(path).convert("RGB")
-    return image_to_tensor(image, torch=torch, config=config, crop_box=crop_box)
-
-
-def image_to_tensor(
-    image: Image.Image,
-    *,
-    torch: Any,
-    config: ModelConfig,
-    crop_box: tuple[int, int, int, int] | None = None,
-) -> Any:
-    values = image_to_uint8_tensor(
-        image,
-        torch=torch,
-        crop_box=crop_box,
-        size=(config.image_size, config.image_size),
-    ).float()
-    return values.permute(2, 0, 1) / 127.5 - 1.0
-
-
 def image_to_uint8_tensor(
     image: Image.Image,
     *,

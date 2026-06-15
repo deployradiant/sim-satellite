@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -12,13 +12,18 @@ from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.data.tensors import image_to_uint8_tensor, mask_to_label_tensor
 from sim_satellite.model import ModelConfig
 
+if TYPE_CHECKING:
+    from torch import Tensor
+else:
+    Tensor = Any
+
 PREPARED_DATA_VERSION = 1
 
 
 @dataclass(frozen=True)
 class PreparedSample:
-    image: Any
-    mask: Any
+    image: Tensor
+    mask: Tensor
     size: tuple[int, int]
 
 
@@ -89,6 +94,10 @@ def load_prepared_sample(path: Path, *, torch: Any) -> PreparedSample:
     image = payload.get("image")
     mask = payload.get("mask")
     size = payload.get("size")
-    if image is None or mask is None or not isinstance(size, tuple):
+    if (
+        not isinstance(image, torch.Tensor)
+        or not isinstance(mask, torch.Tensor)
+        or not isinstance(size, tuple)
+    ):
         raise RuntimeError(f"Prepared sample data is missing image, mask, or size: {path}")
     return PreparedSample(image=image, mask=mask, size=size)

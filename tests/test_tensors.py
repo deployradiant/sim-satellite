@@ -4,7 +4,7 @@ import pytest
 import torch
 from PIL import Image
 
-from sim_satellite.data.tensors import image_to_tensor, mask_to_class_ids, mask_to_tensor
+from sim_satellite.data.tensors import image_to_uint8_tensor, mask_to_class_ids, mask_to_tensor
 from sim_satellite.model import ModelConfig
 
 OPENEARTHMAP_CLASSES = (
@@ -29,16 +29,6 @@ OPENEARTHMAP_RGB = {
     "agriculture land": (75, 181, 73),
     "building": (222, 31, 7),
 }
-
-
-def test_image_tensor_uses_centered_model_scale() -> None:
-    image = Image.new("RGB", (1, 1), (0, 127, 255))
-
-    tensor = image_to_tensor(image, torch=torch, config=ModelConfig(image_size=8))
-
-    assert tensor[0, 0, 0].item() == -1.0
-    assert tensor[1, 0, 0].item() == pytest.approx(-0.0039215689)
-    assert tensor[2, 0, 0].item() == 1.0
 
 
 def test_rgb_mask_decodes_openearthmap_palette() -> None:
@@ -87,21 +77,21 @@ def test_grayscale_mask_decodes_class_ids_without_clamping() -> None:
     assert class_ids == [0, 8]
 
 
-def test_image_to_tensor_uses_centered_rgb_byte_values() -> None:
+def test_image_to_uint8_tensor_uses_rgb_byte_values() -> None:
     image = Image.new("RGB", (8, 8), (0, 0, 0))
     image.putpixel((0, 0), (0, 127, 255))
     image.putpixel((1, 0), (255, 0, 127))
 
-    tensor = image_to_tensor(image, torch=torch, config=ModelConfig(image_size=8))
+    tensor = image_to_uint8_tensor(image, torch=torch)
 
-    assert tensor.shape == (3, 8, 8)
+    assert tensor.shape == (8, 8, 3)
     assert torch.allclose(
-        tensor[:, 0, 0],
-        torch.tensor([-1.0, -0.0039215689, 1.0]),
+        tensor[0, 0],
+        torch.tensor([0, 127, 255], dtype=torch.uint8),
     )
     assert torch.allclose(
-        tensor[:, 0, 1],
-        torch.tensor([1.0, -1.0, -0.0039215689]),
+        tensor[0, 1],
+        torch.tensor([255, 0, 127], dtype=torch.uint8),
     )
 
 

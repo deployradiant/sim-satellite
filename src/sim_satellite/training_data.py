@@ -47,26 +47,43 @@ def load_batch(
     device: Any,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[Any, Any]:
-    images = [
-        _load_image_sample_tensor(
-            sample,
-            crop_box,
-            torch=torch,
-            model_config=model_config,
-            preloaded_samples=preloaded_samples,
-        )
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
-    mask_labels = [
-        _load_mask_sample_tensor(
-            sample,
-            crop_box,
-            torch=torch,
-            model_config=model_config,
-            preloaded_samples=preloaded_samples,
-        )
-        for sample, crop_box in zip(samples, crop_boxes, strict=True)
-    ]
+    missing_samples = tuple(sample for sample in samples if sample not in preloaded_samples)
+    assert not missing_samples, "Samples must be preloaded prepared data: " + ", ".join(
+        str(sample.prepared_path) for sample in missing_samples
+    )
+
+    images: list[Any] = []
+    mask_labels: list[Any] = []
+    for sample, crop_box in zip(samples, crop_boxes, strict=True):
+        prepared = preloaded_samples[sample]
+        left, top, right, bottom = crop_box
+
+        image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
+        if image.shape[-2:] == (model_config.image_size, model_config.image_size):
+            images.append(image.contiguous())
+        else:
+            resized = torch.nn.functional.interpolate(
+                image.float().unsqueeze(0),
+                size=(model_config.image_size, model_config.image_size),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            images.append(resized.clamp(0, 255).round().to(torch.uint8))
+
+        mask = prepared.mask[top:bottom, left:right]
+        if mask.shape[-2:] == (model_config.image_size, model_config.image_size):
+            mask_labels.append(mask.long().contiguous())
+        else:
+            mask_labels.append(
+                torch.nn.functional.interpolate(
+                    mask.float().view(1, 1, mask.shape[0], mask.shape[1]),
+                    size=(model_config.image_size, model_config.image_size),
+                    mode="nearest",
+                )
+                .view(model_config.image_size, model_config.image_size)
+                .long()
+            )
+
     image_batch = torch.stack(images).to(device).float() / 127.5 - 1.0
     label_batch = torch.stack(mask_labels).to(device)
     return image_batch, labels_to_one_hot(label_batch, torch=torch, config=model_config)
@@ -80,7 +97,10 @@ def random_square_crop_box(
     generator: Any,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    width, height = _sample_image_size(sample, preloaded_samples)
+    assert sample in preloaded_samples, (
+        f"Sample must be preloaded prepared data: {sample.prepared_path}"
+    )
+    width, height = preloaded_samples[sample].size
     size = min(width, height, crop_size)
     if size < 1:
         raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
@@ -106,75 +126,13 @@ def center_square_crop_box(
     crop_size: int,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    width, height = _sample_image_size(sample, preloaded_samples)
+    assert sample in preloaded_samples, (
+        f"Sample must be preloaded prepared data: {sample.prepared_path}"
+    )
+    width, height = preloaded_samples[sample].size
     size = min(width, height, crop_size)
     if size < 1:
         raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
     left = (width - size) // 2
     top = (height - size) // 2
     return left, top, left + size, top + size
-
-
-def _load_image_sample_tensor(
-    sample: SatelliteSample,
-    crop_box: tuple[int, int, int, int],
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> Any:
-    prepared = _prepared_sample(sample, torch=torch, preloaded_samples=preloaded_samples)
-    left, top, right, bottom = crop_box
-    image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
-    if image.shape[-2:] == (model_config.image_size, model_config.image_size):
-        return image.contiguous()
-    resized = torch.nn.functional.interpolate(
-        image.float().unsqueeze(0),
-        size=(model_config.image_size, model_config.image_size),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0)
-    return resized.clamp(0, 255).round().to(torch.uint8)
-
-
-def _load_mask_sample_tensor(
-    sample: SatelliteSample,
-    crop_box: tuple[int, int, int, int],
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> Any:
-    prepared = _prepared_sample(sample, torch=torch, preloaded_samples=preloaded_samples)
-    left, top, right, bottom = crop_box
-    mask = prepared.mask[top:bottom, left:right]
-    if mask.shape[-2:] == (model_config.image_size, model_config.image_size):
-        return mask.long().contiguous()
-    return (
-        torch.nn.functional.interpolate(
-            mask.float().view(1, 1, mask.shape[0], mask.shape[1]),
-            size=(model_config.image_size, model_config.image_size),
-            mode="nearest",
-        )
-        .view(model_config.image_size, model_config.image_size)
-        .long()
-    )
-
-
-def _sample_image_size(
-    sample: SatelliteSample,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> tuple[int, int]:
-    return _prepared_sample(sample, torch=None, preloaded_samples=preloaded_samples).size
-
-
-def _prepared_sample(
-    sample: SatelliteSample,
-    *,
-    torch: Any | None,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> PreparedSample:
-    prepared = preloaded_samples.get(sample)
-    if prepared is not None:
-        return prepared
-    raise KeyError(f"Prepared sample was not preloaded: {sample.prepared_path}")
