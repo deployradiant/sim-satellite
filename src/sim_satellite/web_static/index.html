@@ -17,7 +17,7 @@
       --accent-soft: #e4e4e4;
       --accent-contrast: #ffffff;
       --accent-contrast-strong: #ffffff;
-      --warn: #b84a20;
+      --warn: #b3261e;
     }
     * {
       box-sizing: border-box;
@@ -36,9 +36,10 @@
     .shell {
       min-height: 100vh;
       display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto auto 1fr auto;
     }
     header {
+      grid-row: 1;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -121,9 +122,45 @@
       outline: 1px solid var(--accent);
       outline-offset: 2px;
     }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
     button:disabled {
       cursor: wait;
       opacity: 0.65;
+    }
+    button.icon-button {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-color: var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      font-weight: 400;
+    }
+    button.icon-button:hover {
+      border-color: var(--accent);
+      background: var(--panel-strong);
+      color: var(--ink);
+    }
+    .legend-toggle::before {
+      width: 8px;
+      height: 8px;
+      border-left: 1px solid currentColor;
+      border-bottom: 1px solid currentColor;
+      content: "";
+      transform: rotate(45deg);
+      transition: transform 160ms ease;
     }
     button.switch-toggle {
       position: relative;
@@ -174,6 +211,7 @@
       border-color: var(--accent);
     }
     .draw-toolbar {
+      grid-row: 3;
       display: grid;
       grid-template-columns: minmax(180px, 300px) minmax(180px, 280px) auto;
       gap: 12px;
@@ -188,11 +226,16 @@
       display: none;
     }
     main {
+      grid-row: 4;
       display: grid;
-      grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
       gap: 18px;
       padding: 22px;
       align-items: start;
+      transition: grid-template-columns 180ms ease;
+    }
+    main.legend-collapsed {
+      grid-template-columns: 38px minmax(0, 1fr) minmax(0, 1fr);
     }
     .viewer {
       min-width: 0;
@@ -244,9 +287,13 @@
       font-size: 13px;
     }
     .progress {
+      grid-row: 2;
       display: grid;
       gap: 6px;
-      min-height: 34px;
+      min-height: 42px;
+      padding: 8px 22px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
     }
     .progress[hidden] {
       display: none;
@@ -258,12 +305,16 @@
       gap: 12px;
       color: var(--muted);
       font-size: 12px;
-      font-weight: 700;
+      font-weight: 400;
     }
     .progress-count {
       color: var(--ink);
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
+    }
+    .progress.error .progress-line,
+    .progress.error .progress-count {
+      color: var(--warn);
     }
     progress {
       width: 100%;
@@ -283,16 +334,49 @@
     progress::-moz-progress-bar {
       background: var(--accent);
     }
+    .progress.error progress {
+      accent-color: var(--warn);
+    }
+    .progress.error progress::-webkit-progress-value {
+      background: var(--warn);
+    }
+    .progress.error progress::-moz-progress-bar {
+      background: var(--warn);
+    }
     .classes {
       display: grid;
       gap: 10px;
+      min-width: 0;
       padding-left: 0;
+      overflow: hidden;
+      transition: gap 180ms ease;
+    }
+    main.legend-collapsed .classes {
+      gap: 0;
     }
     .side-heading {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      min-height: 28px;
+    }
+    .legend-title {
+      min-width: 0;
+      max-width: 140px;
+      overflow: hidden;
+      white-space: nowrap;
+      transition: max-width 180ms ease, opacity 140ms ease;
+    }
+    main.legend-collapsed .legend-title {
+      max-width: 0;
+      opacity: 0;
+    }
+    main.legend-collapsed .side-heading {
+      justify-content: center;
+    }
+    main.legend-collapsed .legend-toggle::before {
+      transform: rotate(-135deg);
     }
     .draw-tools {
       display: contents;
@@ -323,6 +407,17 @@
     .class-list {
       display: grid;
       gap: 7px;
+      max-height: 520px;
+      overflow: hidden;
+      opacity: 1;
+      transform: translateX(0);
+      transition: max-height 180ms ease, opacity 140ms ease, transform 180ms ease;
+    }
+    main.legend-collapsed .class-list {
+      max-height: 0;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-8px);
     }
     .class-row {
       display: grid;
@@ -354,6 +449,7 @@
       color: var(--muted);
     }
     footer {
+      grid-row: 5;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -384,6 +480,9 @@
       main {
         grid-template-columns: 1fr;
       }
+      main.legend-collapsed {
+        grid-template-columns: 1fr;
+      }
       .frame {
         max-height: none;
       }
@@ -408,6 +507,7 @@
       main,
       header,
       .controls,
+      .progress,
       footer {
         padding-left: 14px;
         padding-right: 14px;
@@ -446,6 +546,13 @@
         </button>
       </div>
     </header>
+    <div class="progress" id="progress" hidden>
+      <div class="progress-line">
+        <span id="progress-label">Starting</span>
+        <span class="progress-count" id="progress-count">0 / 0</span>
+      </div>
+      <progress id="progress-bar" max="1" value="0"></progress>
+    </div>
     <div class="draw-toolbar" id="draw-toolbar" hidden>
       <div class="draw-tools">
         <label>
@@ -463,7 +570,10 @@
     <main>
       <aside class="classes">
         <div class="side-heading">
-          <h2>Classes</h2>
+          <h2 class="legend-title">Classes</h2>
+          <button id="legend-toggle" class="icon-button legend-toggle" type="button" aria-expanded="true" aria-controls="classes" title="Hide classes">
+            <span class="sr-only">Hide classes</span>
+          </button>
         </div>
         <div id="classes" class="class-list"></div>
       </aside>
@@ -477,13 +587,6 @@
       </section>
       <section class="viewer">
         <h2>Generated image</h2>
-        <div class="progress" id="progress" hidden>
-          <div class="progress-line">
-            <span id="progress-label">Starting</span>
-            <span class="progress-count" id="progress-count">0 / 0</span>
-          </div>
-          <progress id="progress-bar" max="1" value="0"></progress>
-        </div>
         <div class="frame" id="output-frame"><div class="empty">No image yet</div></div>
       </section>
     </main>
@@ -508,6 +611,9 @@
     const resetMaskButton = document.getElementById("reset-mask");
     const outputFrame = document.getElementById("output-frame");
     const statusEl = document.getElementById("status");
+    const mainEl = document.querySelector("main");
+    const legendToggle = document.getElementById("legend-toggle");
+    const legendToggleLabel = legendToggle.querySelector(".sr-only");
     const classesEl = document.getElementById("classes");
     const metaEl = document.getElementById("meta");
     const progressEl = document.getElementById("progress");
@@ -521,15 +627,33 @@
     let isDrawing = false;
     let lastPoint = null;
     let latestState = null;
+    let legendCollapsed = false;
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
       statusEl.classList.toggle("error", isError);
     }
 
+    function updateLegendCollapsed() {
+      mainEl.classList.toggle("legend-collapsed", legendCollapsed);
+      legendToggle.setAttribute("aria-expanded", String(!legendCollapsed));
+      legendToggle.title = legendCollapsed ? "Show classes" : "Hide classes";
+      legendToggleLabel.textContent = legendCollapsed ? "Show classes" : "Hide classes";
+      classesEl.setAttribute("aria-hidden", String(legendCollapsed));
+      [...classesEl.querySelectorAll(".class-row")].forEach((row) => {
+        row.tabIndex = legendCollapsed ? -1 : 0;
+      });
+    }
+
+    function toggleLegend() {
+      legendCollapsed = !legendCollapsed;
+      updateLegendCollapsed();
+    }
+
     function showProgress(steps) {
       const total = Math.max(Number(steps) || 1, 1);
       progressEl.hidden = false;
+      progressEl.classList.remove("error");
       progressBar.max = total;
       progressBar.value = 0;
       progressLabel.textContent = "Starting";
@@ -539,6 +663,7 @@
     function updateProgress(step, steps) {
       const total = Math.max(Number(steps) || 1, 1);
       const current = Math.min(Math.max(Number(step) || 0, 0), total);
+      progressEl.classList.remove("error");
       progressBar.max = total;
       progressBar.value = current;
       progressLabel.textContent = current >= total ? "Complete" : "Generating";
@@ -547,6 +672,7 @@
 
     function failProgress() {
       if (!progressEl.hidden) {
+        progressEl.classList.add("error");
         progressLabel.textContent = "Failed";
       }
     }
@@ -632,6 +758,7 @@
         classesEl.appendChild(row);
       });
       updateClassSelection();
+      updateLegendCollapsed();
       updateBrushValue();
       updateDrawingMode();
 
@@ -860,6 +987,7 @@
 
     maskCanvas.addEventListener("pointerup", stopDrawing);
     maskCanvas.addEventListener("pointercancel", stopDrawing);
+    legendToggle.addEventListener("click", toggleLegend);
     drawModeInput.addEventListener("click", toggleDrawingMode);
     paintClassSelect.addEventListener("change", () => selectClass(Number(paintClassSelect.value)));
     brushSizeInput.addEventListener("input", updateBrushValue);
