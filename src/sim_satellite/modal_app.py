@@ -138,8 +138,6 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
         values["metrics_path"] = _modal_artifact_path(config.metrics_path)
     if config.loss_plot_path:
         values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
-    if config.diagnostics_path:
-        values["diagnostics_path"] = _modal_artifact_path(config.diagnostics_path)
     if config.resume_from:
         values["resume_from"] = _modal_artifact_path(config.resume_from)
     return values

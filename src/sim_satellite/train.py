@@ -58,12 +58,6 @@ class TrainingConfig:
     precision: str = "float32"
     timing_sample_every: int = 0
     log_every: int = 10
-    diagnostics_path: str = ""
-    diagnostics_every: int = 0
-    diagnostics_sample_count: int = 0
-    diagnostics_reference_samples: int = 128
-    diagnostics_inference_steps: int = 8
-    diagnostics_guidance_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -90,16 +84,6 @@ class TrainingConfig:
             raise ValueError("device must be a CUDA device")
         if self.timing_sample_every < 0:
             raise ValueError("timing_sample_every must be non-negative")
-        if self.diagnostics_every < 0:
-            raise ValueError("diagnostics_every must be non-negative")
-        if self.diagnostics_sample_count < 0:
-            raise ValueError("diagnostics_sample_count must be non-negative")
-        if self.diagnostics_reference_samples < 1:
-            raise ValueError("diagnostics_reference_samples must be positive")
-        if self.diagnostics_inference_steps < 1:
-            raise ValueError("diagnostics_inference_steps must be positive")
-        if self.diagnostics_guidance_scale < 0.0:
-            raise ValueError("diagnostics_guidance_scale must be non-negative")
         if not self.manifest_path:
             raise ValueError("manifest_path is required")
         if not self.split:
@@ -132,7 +116,6 @@ class TrainingResult:
     model_parameters: int
     metrics_path: str
     loss_plot_path: str
-    diagnostics_path: str
 
 
 def run_training(
@@ -207,7 +190,6 @@ def run_training(
         if config.loss_plot_path
         else checkpoint_path.with_suffix(".loss.png")
     )
-    diagnostics_path = _diagnostics_path(config, checkpoint_path)
 
     training_log.print_train_start(
         started_at_epoch_utc=started_at_epoch_utc,
@@ -355,25 +337,6 @@ def run_training(
             if after_save is not None:
                 after_save()
 
-        if _should_write_step_diagnostics(config, step_number):
-            _write_training_diagnostics(
-                _diagnostics_path_for_step(
-                    diagnostics_path,
-                    step=step_number,
-                    final_step=config.steps,
-                ),
-                step=step_number,
-                config=config,
-                model=model,
-                model_config=model_config,
-                device=device,
-                training_samples=training_samples,
-                preloaded_samples=preloaded_samples,
-                checkpoint_path=checkpoint_path,
-            )
-            if after_save is not None:
-                after_save()
-
     final_step = max(start_step, config.steps)
     if not losses and config.resume_from:
         losses.append({"step": final_step, "loss": final_loss})
@@ -402,18 +365,6 @@ def run_training(
         ),
         torch=torch,
     )
-    if _diagnostics_enabled(config):
-        _write_training_diagnostics(
-            diagnostics_path,
-            step=final_step,
-            config=config,
-            model=model,
-            model_config=model_config,
-            device=device,
-            training_samples=training_samples,
-            preloaded_samples=preloaded_samples,
-            checkpoint_path=checkpoint_path,
-        )
     if after_save is not None:
         after_save()
 
@@ -425,7 +376,6 @@ def run_training(
         model_parameters=model_parameters,
         metrics_path=str(metrics_path),
         loss_plot_path=str(loss_plot_path),
-        diagnostics_path=str(diagnostics_path) if _diagnostics_enabled(config) else "",
     )
 
 
@@ -444,31 +394,6 @@ def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool
         or step_number == config.steps
         or step_number % config.timing_sample_every == 0
     )
-
-
-def _diagnostics_enabled(config: TrainingConfig) -> bool:
-    return config.diagnostics_sample_count > 0
-
-
-def _should_write_step_diagnostics(config: TrainingConfig, step_number: int) -> bool:
-    return (
-        _diagnostics_enabled(config)
-        and config.diagnostics_every > 0
-        and step_number != config.steps
-        and step_number % config.diagnostics_every == 0
-    )
-
-
-def _diagnostics_path(config: TrainingConfig, checkpoint_path: Path) -> Path:
-    if config.diagnostics_path:
-        return Path(config.diagnostics_path)
-    return checkpoint_path.with_suffix(".diagnostics.json")
-
-
-def _diagnostics_path_for_step(path: Path, *, step: int, final_step: int) -> Path:
-    if step == final_step:
-        return path
-    return path.with_name(f"{path.stem}-step-{step}{path.suffix}")
 
 
 def _autocast_context(torch: Any, precision: str) -> Any:
@@ -723,45 +648,6 @@ def _evaluate_validation_loss(
     if was_training:
         model.train()
     return training_log.loss_scalar(torch.stack(losses).mean())
-
-
-def _write_training_diagnostics(
-    path: Path,
-    *,
-    step: int,
-    config: TrainingConfig,
-    model: Any,
-    model_config: ModelConfig,
-    device: Any,
-    training_samples: tuple[SatelliteSample, ...],
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-    checkpoint_path: Path,
-) -> None:
-    from sim_satellite import diagnostics
-
-    payload = diagnostics.run_training_generation_diagnostics(
-        model=model,
-        torch=torch,
-        model_config=model_config,
-        device=device,
-        samples=training_samples,
-        preloaded_samples=preloaded_samples,
-        sample_count=config.diagnostics_sample_count,
-        reference_sample_count=config.diagnostics_reference_samples,
-        steps=config.diagnostics_inference_steps,
-        guidance_scale=config.diagnostics_guidance_scale,
-        seed=config.seed,
-    )
-    payload["step"] = step
-    payload["checkpoint_path"] = str(checkpoint_path)
-    payload["diagnostics_inference_steps"] = config.diagnostics_inference_steps
-    payload["diagnostics_guidance_scale"] = config.diagnostics_guidance_scale
-    diagnostics.write_diagnostics_payload(path, payload)
-    training_log.print_diagnostics_progress(
-        step=step,
-        path=path,
-        target_count=len(payload["targets"]),
-    )
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

@@ -135,23 +135,6 @@ def print_validation_progress(
     )
 
 
-def print_diagnostics_progress(
-    *,
-    step: int,
-    path: Path,
-    target_count: int,
-) -> None:
-    _print_event(
-        {
-            "event": "diagnostics_written",
-            "step": step,
-            "path": str(path),
-            "target_count": target_count,
-            "logged_at_epoch_utc": time.time(),
-        }
-    )
-
-
 def print_train_progress(
     *,
     started_at_epoch_utc: float,
