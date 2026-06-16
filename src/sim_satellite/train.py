@@ -26,9 +26,10 @@ from sim_satellite.model import (
 
 DEFAULT_TARGET = "modal"
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
-TIMESTEP_SAMPLING = "logit_normal"
+TIMESTEP_SAMPLING = "logit_normal_uniform_mix"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
+TIMESTEP_UNIFORM_MIX_PROBABILITY = 0.5
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,7 @@ def run_training(
         timestep_sampling=TIMESTEP_SAMPLING,
         timestep_logit_normal_mean=TIMESTEP_LOGIT_NORMAL_MEAN,
         timestep_logit_normal_std=TIMESTEP_LOGIT_NORMAL_STD,
+        timestep_uniform_mix_probability=TIMESTEP_UNIFORM_MIX_PROBABILITY,
         precision=config.precision,
         preload_sample_count=len(preloaded_samples),
         preload_seconds=preload_seconds,
@@ -417,7 +419,14 @@ def _sample_flow_timesteps(
 ) -> Any:
     logits = torch.randn(batch_size, generator=generator, device=device)
     logits = logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    return torch.sigmoid(logits)
+    logit_normal = torch.sigmoid(logits)
+    uniform_timestep = torch.rand(batch_size, generator=generator, device=device)
+    use_uniform = torch.rand(batch_size, generator=generator, device=device)
+    return torch.where(
+        use_uniform < TIMESTEP_UNIFORM_MIX_PROBABILITY,
+        uniform_timestep,
+        logit_normal,
+    )
 
 
 def _train_step(

@@ -89,7 +89,7 @@ class ConditionedResBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.GroupNorm(_group_count(in_channels), in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.time_projection = nn.Linear(time_channels, out_channels)
+        self.time_projection = nn.Linear(time_channels, out_channels * 2)
         self.mask_projection = nn.Conv2d(mask_channels, out_channels, 3, padding=1)
         self.norm2 = nn.GroupNorm(_group_count(out_channels), out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
@@ -102,9 +102,14 @@ class ConditionedResBlock(nn.Module):
 
     def forward(self, x: Any, time_embedding: Any, semantic_mask: Any) -> Any:
         h = self.conv1(self.activation(self.norm1(x)))
-        h = h + self.time_projection(time_embedding)[:, :, None, None]
         h = h + self.mask_projection(semantic_mask)
-        h = self.conv2(self.activation(self.norm2(h)))
+        time_scale, time_shift = self.time_projection(time_embedding)[:, :, None, None].chunk(
+            2,
+            dim=1,
+        )
+        h = self.norm2(h)
+        h = h * (1.0 + time_scale) + time_shift
+        h = self.conv2(self.activation(h))
         return h + self.skip(x)
 
 
@@ -140,10 +145,15 @@ class ConditionalUNet(nn.Module):
     def __init__(self, model_config: ModelConfig) -> None:
         super().__init__()
         base_channels = model_config.hidden_channels
-        time_channels = base_channels
+        time_channels = base_channels * 4
         levels = [base_channels * multiplier for multiplier in CHANNEL_MULTIPLIERS]
 
-        self.time_embedding = SinusoidalTimeEmbedding(time_channels)
+        self.time_embedding = nn.Sequential(
+            SinusoidalTimeEmbedding(base_channels),
+            nn.Linear(base_channels, time_channels),
+            nn.SiLU(),
+            nn.Linear(time_channels, time_channels),
+        )
         self.input_conv = nn.Conv2d(
             model_config.image_channels + model_config.mask_channels,
             base_channels,
