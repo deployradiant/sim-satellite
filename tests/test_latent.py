@@ -7,18 +7,23 @@ from sim_satellite.latent import (
     decode_image_latent,
     encode_image_latent,
     encode_mask_latent,
+    latent_image_channels,
     validate_latent_downsample_factor,
 )
 
 
-def test_fixed_latent_codec_uses_average_pool_and_bilinear_decode() -> None:
-    image = torch.arange(16, dtype=torch.float32).view(1, 1, 4, 4)
+def test_spatial_latent_codec_round_trips_losslessly() -> None:
+    image = torch.arange(48, dtype=torch.float32).view(1, 3, 4, 4)
 
     latent = encode_image_latent(image, factor=2, torch=torch)
     decoded = decode_image_latent(latent, factor=2, output_size=4, torch=torch)
 
-    assert torch.equal(latent, torch.tensor([[[[2.5, 4.5], [10.5, 12.5]]]]))
-    assert decoded.shape == image.shape
+    assert latent.shape == (1, 12, 2, 2)
+    assert torch.equal(decoded, image)
+
+
+def test_latent_image_channels_expand_by_patch_area() -> None:
+    assert latent_image_channels(3, factor=4) == 48
 
 
 def test_fixed_latent_mask_codec_uses_nearest_resize() -> None:

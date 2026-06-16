@@ -111,7 +111,7 @@ def test_latent_checkpoint_generation_decodes_to_training_image_size(tmp_path: P
         torch=torch,
         model_config=ModelConfig(
             image_size=32,
-            image_channels=3,
+            image_channels=12,
             mask_channels=2,
             hidden_channels=4,
             seed=99,

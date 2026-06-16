@@ -20,6 +20,7 @@ from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.latent import (
     encode_image_latent,
     encode_mask_latent,
+    latent_image_channels,
     validate_latent_downsample_factor,
 )
 from sim_satellite.model import (
@@ -107,7 +108,10 @@ class TrainingConfig:
     def model_config(self) -> ModelConfig:
         return ModelConfig(
             image_size=self.image_size // self.latent_downsample_factor,
-            image_channels=self.image_channels,
+            image_channels=latent_image_channels(
+                self.image_channels,
+                factor=self.latent_downsample_factor,
+            ),
             mask_channels=self.mask_channels,
             hidden_channels=self.hidden_channels,
             seed=self.seed,

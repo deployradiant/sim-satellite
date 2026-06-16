@@ -1,4 +1,4 @@
-"""Fixed latent encode/decode helpers for flow-matching experiments."""
+"""Lossless spatial latent encode/decode helpers for flow-matching experiments."""
 
 from __future__ import annotations
 
@@ -14,10 +14,14 @@ def validate_latent_downsample_factor(image_size: int, factor: int) -> None:
         raise ValueError("latent image_size must be at least 32")
 
 
+def latent_image_channels(image_channels: int, *, factor: int) -> int:
+    return image_channels * factor * factor
+
+
 def encode_image_latent(image: Any, *, factor: int, torch: Any) -> Any:
     if factor == 1:
         return image
-    return torch.nn.functional.avg_pool2d(image, kernel_size=factor, stride=factor)
+    return torch.nn.functional.pixel_unshuffle(image, downscale_factor=factor)
 
 
 def encode_mask_latent(semantic_mask: Any, *, size: int, torch: Any) -> Any:
@@ -29,9 +33,10 @@ def encode_mask_latent(semantic_mask: Any, *, size: int, torch: Any) -> Any:
 def decode_image_latent(image: Any, *, factor: int, output_size: int, torch: Any) -> Any:
     if factor == 1 and image.shape[-2:] == (output_size, output_size):
         return image
-    return torch.nn.functional.interpolate(
-        image,
-        size=(output_size, output_size),
-        mode="bilinear",
-        align_corners=False,
-    )
+    decoded = torch.nn.functional.pixel_shuffle(image, upscale_factor=factor)
+    if decoded.shape[-2:] != (output_size, output_size):
+        raise ValueError(
+            f"Decoded latent image has size {decoded.shape[-2:]}, expected "
+            f"{(output_size, output_size)}"
+        )
+    return decoded

@@ -125,6 +125,7 @@ def test_training_model_config_uses_latent_image_size() -> None:
     config = TrainingConfig(image_size=256, latent_downsample_factor=4)
 
     assert config.model_config().image_size == 64
+    assert config.model_config().image_channels == 48
 
 
 def test_run_timing_payload_estimates_remaining_runtime() -> None:
