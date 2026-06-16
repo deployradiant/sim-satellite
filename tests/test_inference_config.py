@@ -8,13 +8,27 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.infer import InferenceConfig, InferenceResult
+from sim_satellite.infer import GenerationConfig, InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
 
 def test_inference_config_rejects_old_model_shape_fields() -> None:
     with pytest.raises(ValueError, match="Unknown inference config fields: image_size"):
         InferenceConfig.from_dict({**asdict(InferenceConfig()), "image_size": 64})
+
+
+def test_inference_defaults_use_more_sampler_steps() -> None:
+    assert InferenceConfig().steps == 16
+    assert GenerationConfig(mask_path="mask.png").steps == 16
+
+
+def test_flow_inference_schedule_uses_midpoint_timesteps() -> None:
+    schedule = infer._flow_inference_schedule(4)
+
+    assert [timestep for timestep, _ in schedule] == pytest.approx(
+        [0.875, 0.625, 0.375, 0.125]
+    )
+    assert [step_size for _, step_size in schedule] == pytest.approx([0.25] * 4)
 
 
 def test_run_inference_requires_explicit_mask_path() -> None:
