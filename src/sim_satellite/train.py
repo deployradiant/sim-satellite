@@ -27,6 +27,7 @@ from sim_satellite.model import (
 DEFAULT_TARGET = "modal"
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
 TIMESTEP_SAMPLING = "logit_normal"
+TIMESTEP_MIXED_SAMPLING = "logit_normal_uniform_mix"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
 
@@ -58,6 +59,7 @@ class TrainingConfig:
     precision: str = "float32"
     timing_sample_every: int = 0
     log_every: int = 10
+    timestep_uniform_mix_probability: float = 0.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -78,6 +80,11 @@ class TrainingConfig:
             raise ValueError("learning_rate must be positive")
         if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
             raise ValueError("mask_drop_probability must be between 0 and 1")
+        if (
+            self.timestep_uniform_mix_probability < 0.0
+            or self.timestep_uniform_mix_probability > 1.0
+        ):
+            raise ValueError("timestep_uniform_mix_probability must be between 0 and 1")
         if self.precision not in {"float32", "bf16"}:
             raise ValueError("precision must be 'float32' or 'bf16'")
         if self.device != "cuda" and not self.device.startswith("cuda:"):
@@ -198,7 +205,7 @@ def run_training(
         train_samples=train_sample_count,
         train_batches=len(batches),
         batch_size=config.batch_size,
-        timestep_sampling=TIMESTEP_SAMPLING,
+        timestep_sampling=_timestep_sampling_name(config),
         timestep_logit_normal_mean=TIMESTEP_LOGIT_NORMAL_MEAN,
         timestep_logit_normal_std=TIMESTEP_LOGIT_NORMAL_STD,
         precision=config.precision,
@@ -226,6 +233,7 @@ def run_training(
             random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            timestep_uniform_mix_probability=config.timestep_uniform_mix_probability,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
         )
@@ -396,6 +404,12 @@ def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool
     )
 
 
+def _timestep_sampling_name(config: TrainingConfig) -> str:
+    if config.timestep_uniform_mix_probability > 0.0:
+        return TIMESTEP_MIXED_SAMPLING
+    return TIMESTEP_SAMPLING
+
+
 def _autocast_context(torch: Any, precision: str) -> Any:
     if precision == "float32":
         return nullcontext()
@@ -414,10 +428,20 @@ def _sample_flow_timesteps(
     torch: Any,
     generator: Any,
     device: Any,
+    uniform_mix_probability: float,
 ) -> Any:
+    if uniform_mix_probability >= 1.0:
+        return torch.rand(batch_size, generator=generator, device=device)
+
     logits = torch.randn(batch_size, generator=generator, device=device)
     logits = logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    return torch.sigmoid(logits)
+    timestep = torch.sigmoid(logits)
+    if uniform_mix_probability <= 0.0:
+        return timestep
+
+    uniform_timestep = torch.rand(batch_size, generator=generator, device=device)
+    use_uniform = torch.rand(batch_size, generator=generator, device=device)
+    return torch.where(use_uniform < uniform_mix_probability, uniform_timestep, timestep)
 
 
 def _train_step(
@@ -432,6 +456,7 @@ def _train_step(
     random_generator: Any,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
+    timestep_uniform_mix_probability: float,
     precision: str,
     profile_timing: bool,
 ) -> tuple[Any, dict[str, float | int]]:
@@ -473,6 +498,7 @@ def _train_step(
         torch=torch,
         generator=random_generator,
         device=device,
+        uniform_mix_probability=timestep_uniform_mix_probability,
     )
     noisy = interpolate_flow_sample(clean, noise, timestep)
     target = flow_velocity(clean, noise)
@@ -637,6 +663,7 @@ def _evaluate_validation_loss(
                 torch=torch,
                 generator=generator,
                 device=device,
+                uniform_mix_probability=config.timestep_uniform_mix_probability,
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
