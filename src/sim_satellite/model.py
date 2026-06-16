@@ -165,8 +165,6 @@ class ConditionalUNet(nn.Module):
         skip_channels: list[int] = [current_channels]
         self.down_blocks = nn.ModuleList()
         self.downsamples = nn.ModuleList()
-        self.deep_attention_level_index = len(levels) - 2
-        self.deep_down_attention = SelfAttention2d(levels[self.deep_attention_level_index])
         for level_index, level_channels in enumerate(levels):
             level_blocks = nn.ModuleList()
             for _ in range(BLOCKS_PER_LEVEL):
@@ -242,9 +240,6 @@ class ConditionalUNet(nn.Module):
                     _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
                 )
                 skips.append(h)
-            if level_index == self.deep_attention_level_index:
-                h = self.deep_down_attention(h)
-                skips[-1] = h
             if level_index < len(self.downsamples):
                 h = self.downsamples[level_index](h)
                 skips.append(h)
