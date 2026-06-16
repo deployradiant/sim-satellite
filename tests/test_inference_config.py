@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.infer import InferenceConfig, InferenceResult
+from sim_satellite.infer import GenerationConfig, InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
 
