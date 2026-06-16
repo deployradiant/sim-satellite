@@ -152,12 +152,14 @@ def test_modal_training_uses_cuda_device(
         TrainingConfig(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="/artifacts/checkpoints/model.pt",
+            diagnostics_path="artifacts/diagnostics/model.json",
         )
     )
 
     assert fake_train_remote.received is not None
     assert fake_train_remote.received["device"] == "cuda"
     assert fake_train_remote.received["checkpoint_path"] == "/artifacts/checkpoints/model.pt"
+    assert fake_train_remote.received["diagnostics_path"] == "/artifacts/diagnostics/model.json"
 
 
 def test_modal_training_maps_resume_checkpoint_to_artifact_volume(

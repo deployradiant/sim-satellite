@@ -5,19 +5,24 @@ from pathlib import Path
 
 import pytest
 import torch
-from click.testing import CliRunner
 from PIL import Image
 
+from sim_satellite.data.loader import SatelliteSample
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION, PreparedSample
 from sim_satellite.diagnostics import (
+    GeneratedTarget,
     ReferenceInput,
     build_reference_stats,
     class_mean_distance,
-    cli,
     image_statistics,
     load_embedded_mask,
     load_rgb_image,
     run_diagnostics,
+    run_generated_diagnostics,
+    run_training_generation_diagnostics,
+    write_diagnostics_payload,
 )
+from sim_satellite.model import ModelConfig
 
 
 def test_image_statistics_report_saturation_and_rgb_std(tmp_path: Path) -> None:
@@ -128,13 +133,85 @@ def test_tensor_file_loading_supports_inference_outputs(tmp_path: Path) -> None:
     assert mask.tolist() == [[1]]
 
 
-def test_diagnostics_cli_outputs_json(tmp_path: Path) -> None:
-    target = tmp_path / "target.png"
-    Image.new("RGB", (1, 1), (10, 20, 30)).save(target)
+def test_run_generated_diagnostics_accepts_in_memory_targets() -> None:
+    payload = run_generated_diagnostics(
+        (
+            GeneratedTarget(
+                path="generated-sample",
+                image=torch.tensor([[[0.25, 0.5, 0.75]]]),
+                mask=torch.tensor([[0]]),
+            ),
+        )
+    )
 
-    result = CliRunner().invoke(cli, ["--format", "json", str(target)])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
     assert payload["reference"] is None
-    assert payload["targets"][0]["path"] == str(target)
+    assert payload["targets"][0]["path"] == "generated-sample"
+    assert payload["targets"][0]["rgb_mean"] == pytest.approx([0.25, 0.5, 0.75])
+
+
+def test_training_generation_diagnostics_uses_preloaded_samples(tmp_path: Path) -> None:
+    image = torch.full((32, 32, 3), 128, dtype=torch.uint8)
+    mask = torch.zeros((32, 32), dtype=torch.uint8)
+    prepared_path = tmp_path / "prepared.pt"
+    torch.save(
+        {
+            "version": PREPARED_DATA_VERSION,
+            "image": image,
+            "mask": mask,
+            "size": (32, 32),
+        },
+        prepared_path,
+    )
+    sample = SatelliteSample(
+        image_path=tmp_path / "image.png",
+        mask_path=tmp_path / "mask.png",
+        prepared_path=prepared_path,
+        split="train",
+    )
+    model = _ZeroVelocityModel()
+
+    payload = run_training_generation_diagnostics(
+        model=model,
+        torch=torch,
+        model_config=ModelConfig(image_size=32, mask_channels=2),
+        device=torch.device("cpu"),
+        samples=(sample,),
+        preloaded_samples={
+            sample: PreparedSample(image=image, mask=mask, size=(32, 32)),
+        },
+        sample_count=1,
+        reference_sample_count=1,
+        steps=1,
+        guidance_scale=1.0,
+        seed=7,
+    )
+
+    assert model.training
+    assert payload["reference"]["image_count"] == 1
+    assert payload["targets"][0]["classes_compared"] == 1
+
+
+def test_write_diagnostics_payload_outputs_json(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostics.json"
+
+    write_diagnostics_payload(path, {"targets": []})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"targets": []}
+
+
+class _ZeroVelocityModel:
+    training = True
+
+    def eval(self) -> None:
+        self.training = False
+
+    def train(self) -> None:
+        self.training = True
+
+    def __call__(
+        self,
+        image: torch.Tensor,
+        _semantic_mask: torch.Tensor,
+        _timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.zeros_like(image)

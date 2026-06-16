@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import json
-import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import click
 import torch
 from PIL import Image
 
-from sim_satellite.data.loader import read_manifest
-from sim_satellite.data.prepared import load_prepared_sample
+from sim_satellite import training_data
+from sim_satellite.data.loader import SatelliteSample, read_manifest
+from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
 from sim_satellite.data.tensors import mask_to_label_tensor
 from sim_satellite.model import ModelConfig
 
@@ -58,6 +58,13 @@ class ReferenceInput:
     prepared_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class GeneratedTarget:
+    path: str
+    image: Any
+    mask: Any | None = None
+
+
 def run_diagnostics(
     targets: tuple[Path, ...],
     *,
@@ -76,10 +83,22 @@ def run_diagnostics(
         diagnose_target(target, mask_path=mask_path, reference=reference)
         for target, mask_path in zip(targets, target_masks, strict=True)
     )
-    return {
-        "reference": _reference_payload(reference),
-        "targets": [_target_payload(result) for result in target_results],
-    }
+    return diagnostics_payload(reference, target_results)
+
+
+def run_generated_diagnostics(
+    targets: tuple[GeneratedTarget, ...],
+    *,
+    references: tuple[ReferenceInput, ...] = (),
+) -> dict[str, Any]:
+    if not targets:
+        raise ValueError("At least one generated target is required")
+
+    reference = build_reference_stats(references) if references else None
+    target_results = tuple(
+        diagnose_generated_target(target, reference=reference) for target in targets
+    )
+    return diagnostics_payload(reference, target_results)
 
 
 def diagnose_target(
@@ -91,6 +110,53 @@ def diagnose_target(
     image = load_rgb_image(target_path)
     image_stats = image_statistics(image, path=target_path)
     target_mask = load_mask(mask_path) if mask_path is not None else load_embedded_mask(target_path)
+
+    saturation_delta = None
+    rgb_std_delta = None
+    class_mean_l2 = None
+    classes_compared = 0
+    if reference is not None:
+        saturation_delta = image_stats.saturation_mean - reference.saturation_mean
+        rgb_std_delta = image_stats.rgb_std - reference.rgb_std
+        if target_mask is not None and reference.class_means:
+            class_mean_l2, classes_compared = class_mean_distance(
+                image,
+                target_mask,
+                reference.class_means,
+            )
+
+    return TargetDiagnostics(
+        image=image_stats,
+        saturation_delta=saturation_delta,
+        rgb_std_delta=rgb_std_delta,
+        class_mean_l2=class_mean_l2,
+        classes_compared=classes_compared,
+    )
+
+
+def diagnose_generated_target(
+    target: GeneratedTarget,
+    *,
+    reference: ReferenceStats | None,
+) -> TargetDiagnostics:
+    return diagnose_image_tensor(
+        target.image,
+        path=target.path,
+        mask=target.mask,
+        reference=reference,
+    )
+
+
+def diagnose_image_tensor(
+    image: Any,
+    *,
+    path: str | Path,
+    mask: Any | None,
+    reference: ReferenceStats | None,
+) -> TargetDiagnostics:
+    image = _rgb_tensor_from_any(image, path=Path(path))
+    target_mask = _mask_tensor_from_any(mask, path=Path(path)) if mask is not None else None
+    image_stats = image_statistics(image, path=path)
 
     saturation_delta = None
     rgb_std_delta = None
@@ -147,9 +213,9 @@ def build_reference_stats(references: tuple[ReferenceInput, ...]) -> ReferenceSt
         raise ValueError("Reference images contain no pixels")
 
     rgb_mean_tensor = rgb_sum / pixel_count
-    rgb_variance = (
-        rgb_squared_sum / pixel_count - rgb_mean_tensor * rgb_mean_tensor
-    ).clamp_min(0.0)
+    rgb_variance = (rgb_squared_sum / pixel_count - rgb_mean_tensor * rgb_mean_tensor).clamp_min(
+        0.0
+    )
     reference_class_means = {
         class_id: _rgb_tuple(class_rgb_sums[class_id] / class_pixel_counts[class_id])
         for class_id in sorted(class_rgb_sums)
@@ -229,7 +295,7 @@ def load_mask(path: Path | None) -> torch.Tensor | None:
     raise ValueError(f"Unsupported mask file suffix {path.suffix!r}: {path}")
 
 
-def image_statistics(image: torch.Tensor, *, path: Path) -> ImageStats:
+def image_statistics(image: torch.Tensor, *, path: str | Path) -> ImageStats:
     height, width, _ = image.shape
     flat = image.reshape(-1, 3)
     rgb_mean = flat.mean(dim=0)
@@ -306,6 +372,196 @@ def reference_inputs_from_manifest(
         )
         for sample in samples[:max_samples]
     )
+
+
+def reference_inputs_from_samples(
+    samples: Sequence[SatelliteSample],
+    *,
+    max_samples: int,
+) -> tuple[ReferenceInput, ...]:
+    if max_samples < 1:
+        raise ValueError("max_samples must be positive")
+    return tuple(
+        ReferenceInput(
+            image_path=sample.image_path,
+            mask_path=sample.mask_path,
+            prepared_path=sample.prepared_path,
+        )
+        for sample in samples[:max_samples]
+    )
+
+
+def run_training_generation_diagnostics(
+    *,
+    model: Any,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    samples: Sequence[SatelliteSample],
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
+    sample_count: int,
+    reference_sample_count: int,
+    steps: int,
+    guidance_scale: float,
+    seed: int,
+) -> dict[str, Any]:
+    if sample_count < 1:
+        raise ValueError("sample_count must be positive")
+    if reference_sample_count < 1:
+        raise ValueError("reference_sample_count must be positive")
+    if steps < 1:
+        raise ValueError("steps must be positive")
+    if guidance_scale < 0.0:
+        raise ValueError("guidance_scale must be non-negative")
+
+    diagnostic_samples = tuple(samples[:sample_count])
+    if not diagnostic_samples:
+        raise ValueError("At least one sample is required for diagnostics")
+
+    reference_inputs = reference_inputs_from_samples(
+        samples,
+        max_samples=min(reference_sample_count, len(samples)),
+    )
+    generated_targets = _generate_diagnostic_targets(
+        diagnostic_samples,
+        model=model,
+        torch=torch,
+        model_config=model_config,
+        device=device,
+        preloaded_samples=preloaded_samples,
+        steps=steps,
+        guidance_scale=guidance_scale,
+        seed=seed,
+    )
+    return run_generated_diagnostics(generated_targets, references=reference_inputs)
+
+
+def write_diagnostics_payload(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def diagnostics_payload(
+    reference: ReferenceStats | None,
+    targets: Sequence[TargetDiagnostics],
+) -> dict[str, Any]:
+    return {
+        "reference": _reference_payload(reference),
+        "targets": [_target_payload(result) for result in targets],
+    }
+
+
+def _generate_diagnostic_targets(
+    samples: tuple[SatelliteSample, ...],
+    *,
+    model: Any,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
+    steps: int,
+    guidance_scale: float,
+    seed: int,
+) -> tuple[GeneratedTarget, ...]:
+    was_training = bool(getattr(model, "training", False))
+    model.eval()
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    targets: list[GeneratedTarget] = []
+    try:
+        with torch.no_grad():
+            for index, sample in enumerate(samples):
+                crop_box = training_data.center_square_crop_box(
+                    sample,
+                    crop_size=model_config.image_size,
+                    preloaded_samples=preloaded_samples,
+                )
+                _, semantic_mask = training_data.load_batch(
+                    (sample,),
+                    [crop_box],
+                    torch=torch,
+                    model_config=model_config,
+                    device=device,
+                    preloaded_samples=preloaded_samples,
+                )
+                image = _generate_image_from_mask(
+                    semantic_mask,
+                    model=model,
+                    torch=torch,
+                    model_config=model_config,
+                    device=device,
+                    generator=generator,
+                    steps=steps,
+                    guidance_scale=guidance_scale,
+                )
+                targets.append(
+                    GeneratedTarget(
+                        path=f"{sample.image_path}#diagnostic-{index}",
+                        image=image,
+                        mask=semantic_mask[0].argmax(dim=0).detach().cpu(),
+                    )
+                )
+    finally:
+        if was_training:
+            model.train()
+    return tuple(targets)
+
+
+def _generate_image_from_mask(
+    semantic_mask: Any,
+    *,
+    model: Any,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    generator: Any,
+    steps: int,
+    guidance_scale: float,
+) -> Any:
+    image = torch.randn(
+        (
+            1,
+            model_config.image_channels,
+            model_config.image_size,
+            model_config.image_size,
+        ),
+        generator=generator,
+        device="cpu",
+    ).to(device)
+    for step in reversed(range(1, steps + 1)):
+        timestep = torch.full(
+            (1,),
+            step / float(steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        velocity = _guided_prediction(
+            model,
+            image,
+            semantic_mask,
+            timestep,
+            guidance_scale=guidance_scale,
+            torch=torch,
+        )
+        image = image - velocity / float(steps)
+    return ((image[0].clamp(-1.0, 1.0) + 1.0) / 2.0).permute(1, 2, 0).detach().cpu()
+
+
+def _guided_prediction(
+    model: Any,
+    image: Any,
+    semantic_mask: Any,
+    timestep: Any,
+    *,
+    guidance_scale: float,
+    torch: Any,
+) -> Any:
+    conditional = model(image, semantic_mask, timestep)
+    if guidance_scale == 1.0:
+        return conditional
+
+    empty_mask = torch.zeros_like(semantic_mask)
+    unconditional = model(image, empty_mask, timestep)
+    return unconditional + guidance_scale * (conditional - unconditional)
 
 
 def _pil_image_to_rgb_tensor(image: Image.Image) -> torch.Tensor:
@@ -434,184 +690,3 @@ def _target_payload(result: TargetDiagnostics) -> dict[str, Any]:
         "class_mean_l2": result.class_mean_l2,
         "classes_compared": result.classes_compared,
     }
-
-
-def _format_table(payload: dict[str, Any]) -> str:
-    lines: list[str] = []
-    reference = payload["reference"]
-    if reference is None:
-        lines.append("reference: none")
-    else:
-        lines.append(
-            "reference: "
-            f"images={reference['image_count']} "
-            f"pixels={reference['pixel_count']} "
-            f"sat={reference['saturation_mean']:.4f} "
-            f"rgb_std={reference['rgb_std']:.4f} "
-            f"class_baselines={reference['class_count']}"
-        )
-    lines.append(
-        "target\tsize\tsat\trgb_std\tsat_delta\trgb_std_delta\tclass_l2\tclasses"
-    )
-    for target in payload["targets"]:
-        size = f"{target['width']}x{target['height']}"
-        lines.append(
-            "\t".join(
-                (
-                    target["path"],
-                    size,
-                    _format_float(target["saturation_mean"]),
-                    _format_float(target["rgb_std"]),
-                    _format_float(target["saturation_delta"]),
-                    _format_float(target["rgb_std_delta"]),
-                    _format_float(target["class_mean_l2"]),
-                    str(target["classes_compared"]),
-                )
-            )
-        )
-    return "\n".join(lines)
-
-
-def _format_float(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    if math.isnan(value):
-        return "nan"
-    return f"{value:.4f}"
-
-
-def _reference_inputs_from_options(
-    reference_images: tuple[Path, ...],
-    reference_masks: tuple[Path, ...],
-    reference_prepared: tuple[Path, ...],
-    reference_manifest: Path | None,
-    *,
-    max_reference_samples: int,
-) -> tuple[ReferenceInput, ...]:
-    if reference_masks and len(reference_masks) != len(reference_images):
-        raise click.UsageError("--reference-mask must be provided once per --reference-image")
-
-    references: list[ReferenceInput] = []
-    for index, image_path in enumerate(reference_images):
-        mask_path = reference_masks[index] if reference_masks else None
-        references.append(ReferenceInput(image_path=image_path, mask_path=mask_path))
-    for prepared_path in reference_prepared:
-        references.append(
-            ReferenceInput(
-                image_path=prepared_path,
-                mask_path=None,
-                prepared_path=prepared_path,
-            )
-        )
-    if reference_manifest is not None:
-        references.extend(
-            reference_inputs_from_manifest(
-                reference_manifest,
-                max_samples=max_reference_samples,
-            )
-        )
-    return tuple(references)
-
-
-def _target_masks_from_options(
-    targets: tuple[Path, ...],
-    target_masks: tuple[Path, ...],
-) -> tuple[Path | None, ...]:
-    if not target_masks:
-        return tuple(None for _ in targets)
-    if len(target_masks) != len(targets):
-        raise click.UsageError("--target-mask must be provided once per target")
-    return target_masks
-
-
-def _build_click_command() -> click.Command:
-    @click.command("diagnostics", help="Measure generated image color and class-mean metrics.")
-    @click.argument(
-        "targets",
-        nargs=-1,
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    )
-    @click.option(
-        "--target-mask",
-        "target_masks",
-        multiple=True,
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        help="Mask for a target image. Repeat once per target.",
-    )
-    @click.option(
-        "--reference-image",
-        "reference_images",
-        multiple=True,
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        help="Reference RGB image. Repeat for multiple references.",
-    )
-    @click.option(
-        "--reference-mask",
-        "reference_masks",
-        multiple=True,
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        help="Reference mask paired by order with --reference-image.",
-    )
-    @click.option(
-        "--reference-prepared",
-        "reference_prepared",
-        multiple=True,
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        help="Prepared OpenEarthMap .pt sample containing image and mask tensors.",
-    )
-    @click.option(
-        "--reference-manifest",
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        default=None,
-        help="Manifest whose prepared samples are used as reference data.",
-    )
-    @click.option(
-        "--max-reference-samples",
-        type=click.IntRange(min=1),
-        default=128,
-        show_default=True,
-    )
-    @click.option(
-        "--format",
-        "output_format",
-        type=click.Choice(["table", "json"]),
-        default="table",
-        show_default=True,
-    )
-    def command(
-        targets: tuple[Path, ...],
-        target_masks: tuple[Path, ...],
-        reference_images: tuple[Path, ...],
-        reference_masks: tuple[Path, ...],
-        reference_prepared: tuple[Path, ...],
-        reference_manifest: Path | None,
-        max_reference_samples: int,
-        output_format: str,
-    ) -> None:
-        if not targets:
-            raise click.UsageError("At least one target image is required")
-        references = _reference_inputs_from_options(
-            reference_images,
-            reference_masks,
-            reference_prepared,
-            reference_manifest,
-            max_reference_samples=max_reference_samples,
-        )
-        payload = run_diagnostics(
-            targets,
-            target_masks=_target_masks_from_options(targets, target_masks),
-            references=references,
-        )
-        if output_format == "json":
-            click.echo(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            click.echo(_format_table(payload))
-
-    return command
-
-
-cli = _build_click_command()
-
-
-if __name__ == "__main__":
-    cli()

@@ -93,6 +93,16 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(device="mps")
     with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(diagnostics_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(diagnostics_sample_count=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(diagnostics_reference_samples=0)
+    with pytest.raises(ValueError):
+        TrainingConfig(diagnostics_inference_steps=0)
+    with pytest.raises(ValueError):
+        TrainingConfig(diagnostics_guidance_scale=-0.1)
 
 
 def test_training_device_requires_available_cuda() -> None:
