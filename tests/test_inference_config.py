@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.infer import GenerationConfig, InferenceConfig, InferenceResult
+from sim_satellite.infer import InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
 
@@ -20,6 +20,11 @@ def test_inference_config_rejects_old_model_shape_fields() -> None:
 def test_run_inference_requires_explicit_mask_path() -> None:
     with pytest.raises(ValueError, match="mask_path is required"):
         infer.run_inference(InferenceConfig())
+
+
+def test_inference_config_rejects_invalid_refiner_steps() -> None:
+    with pytest.raises(ValueError, match="refiner_steps"):
+        InferenceConfig(refiner_steps=0)
 
 
 def test_cli_target_resolves_default_manifest_mask(
@@ -57,6 +62,7 @@ def test_cli_target_resolves_default_manifest_mask(
         "checkpoint_path": "",
         "mask_path": "",
         "device": "",
+        "refiner_checkpoint_path": "",
         "execution_target": "local",
     }
     assert received["config"].mask_path == str(mask_path)
@@ -113,6 +119,40 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
         infer.load_generator(checkpoint_path, device="cpu")
 
 
+def test_refine_image_with_model_uses_base_image_as_draft(tmp_path: Path) -> None:
+    model_config = ModelConfig(
+        image_size=32,
+        image_channels=3,
+        mask_channels=2,
+        conditioning_image_channels=3,
+        hidden_channels=4,
+    )
+    base_image = torch.full((1, 3, 32, 32), 0.25)
+    base_generation = infer.GenerationResult(
+        image=base_image,
+        semantic_mask=torch.zeros(1, 2, 32, 32),
+        model_config=ModelConfig(image_size=32, mask_channels=2, hidden_channels=4),
+        checkpoint_path=tmp_path / "base.pt",
+        mask_path=tmp_path / "mask.png",
+    )
+    loaded_refiner = infer.LoadedGenerator(
+        torch=torch,
+        model=_ZeroVelocityModel(),
+        model_config=model_config,
+        checkpoint_path=tmp_path / "refiner.pt",
+        device=torch.device("cpu"),
+    )
+
+    refined = infer.refine_image_with_model(
+        loaded_refiner,
+        base_generation,
+        infer.RefinementConfig(steps=2),
+    )
+
+    assert refined.checkpoint_path == tmp_path / "refiner.pt"
+    assert torch.allclose(refined.image, base_image)
+
+
 def _write_flow_checkpoint(
     tmp_path: Path,
     *,
@@ -133,3 +173,16 @@ def _write_flow_checkpoint(
     }
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
+
+
+class _ZeroVelocityModel:
+    def __call__(
+        self,
+        image: torch.Tensor,
+        _semantic_mask: torch.Tensor,
+        _timestep: torch.Tensor,
+        *,
+        conditioning_image: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert conditioning_image is not None
+        return torch.zeros_like(image)

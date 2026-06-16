@@ -20,6 +20,7 @@ class ModelConfig:
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = 9
+    conditioning_image_channels: int = 0
     hidden_channels: int = 32
     seed: int = 2026
 
@@ -30,6 +31,8 @@ class ModelConfig:
             raise ValueError("image_channels must be positive")
         if self.mask_channels < 1:
             raise ValueError("mask_channels must be positive")
+        if self.conditioning_image_channels < 0:
+            raise ValueError("conditioning_image_channels must be non-negative")
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
 
@@ -155,11 +158,16 @@ class ConditionalUNet(nn.Module):
             nn.Linear(time_channels, time_channels),
         )
         self.input_conv = nn.Conv2d(
-            model_config.image_channels + model_config.mask_channels,
+            (
+                model_config.image_channels
+                + model_config.mask_channels
+                + model_config.conditioning_image_channels
+            ),
             base_channels,
             3,
             padding=1,
         )
+        self.conditioning_image_channels = model_config.conditioning_image_channels
 
         current_channels = base_channels
         skip_channels: list[int] = [current_channels]
@@ -228,10 +236,28 @@ class ConditionalUNet(nn.Module):
             padding=1,
         )
 
-    def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
+    def forward(
+        self,
+        image: Any,
+        semantic_mask: Any,
+        timestep: Any,
+        conditioning_image: Any | None = None,
+    ) -> Any:
         time_embedding = self.time_embedding(timestep)
         mask_pyramid = {(semantic_mask.shape[-2], semantic_mask.shape[-1]): semantic_mask}
-        h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
+        inputs = [image, semantic_mask]
+        if self.conditioning_image_channels:
+            if conditioning_image is None:
+                raise ValueError("conditioning_image is required by this model")
+            if conditioning_image.shape[1] != self.conditioning_image_channels:
+                raise ValueError(
+                    "conditioning_image channel count does not match model config: "
+                    f"{conditioning_image.shape[1]} != {self.conditioning_image_channels}"
+                )
+            inputs.append(conditioning_image)
+        elif conditioning_image is not None:
+            raise ValueError("conditioning_image was provided to a model that does not use it")
+        h = self.input_conv(torch.cat(inputs, dim=1))
         skips: list[Any] = [h]
 
         for level_index, level_blocks in enumerate(self.down_blocks):

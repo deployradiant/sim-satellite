@@ -230,6 +230,7 @@ def test_modal_inference_enters_app_run_with_valid_data(
     result = modal_app.run_inference_target(
         InferenceConfig(
             checkpoint_path="artifacts/checkpoints/model.pt",
+            refiner_checkpoint_path="artifacts/checkpoints/refiner.pt",
             output_path="artifacts/generated/sample.pt",
             manifest_path=str(manifest_path),
             mask_path="data/openearthmap/extracted/train/labels/tile.png",
@@ -244,6 +245,7 @@ def test_modal_inference_enters_app_run_with_valid_data(
         **asdict(
             InferenceConfig(
                 checkpoint_path="artifacts/checkpoints/model.pt",
+                refiner_checkpoint_path="artifacts/checkpoints/refiner.pt",
                 output_path="artifacts/generated/sample.pt",
                 manifest_path=str(manifest_path),
                 mask_path="data/openearthmap/extracted/train/labels/tile.png",
@@ -251,6 +253,7 @@ def test_modal_inference_enters_app_run_with_valid_data(
         ),
         "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
+        "refiner_checkpoint_path": "/artifacts/checkpoints/refiner.pt",
         "output_path": "/artifacts/generated/sample.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "mask_path": "/data/openearthmap/extracted/train/labels/tile.png",

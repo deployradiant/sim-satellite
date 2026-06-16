@@ -15,12 +15,14 @@ from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
+    TRAINING_STAGE_REFINER,
     TrainingConfig,
     _autocast_context,
     _load_training_samples,
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
+    _training_source_image,
 )
 from sim_satellite.training_data import preload_samples, random_square_crop_box
 
@@ -94,6 +96,19 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(device="mps")
     with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(training_stage="future")
+    with pytest.raises(ValueError):
+        TrainingConfig(refiner_condition_downsample=0)
+    with pytest.raises(ValueError):
+        TrainingConfig(refiner_condition_noise_scale=-0.1)
+
+
+def test_refiner_training_config_adds_conditioning_image_channels() -> None:
+    config = TrainingConfig(training_stage=TRAINING_STAGE_REFINER, image_channels=3)
+
+    assert config.model_config().conditioning_image_channels == 3
+    assert TrainingConfig().model_config().conditioning_image_channels == 0
 
 
 def test_training_device_requires_available_cuda() -> None:
@@ -151,9 +166,7 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
         device=torch.device("cpu"),
     )
     logits = torch.randn(16, generator=expected_generator, device="cpu")
-    logit_normal = torch.sigmoid(
-        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    )
+    logit_normal = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
     uniform = torch.rand(16, generator=expected_generator, device="cpu")
     use_uniform = (
         torch.rand(16, generator=expected_generator, device="cpu")
@@ -173,9 +186,7 @@ def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     mixed_generator = torch.Generator(device="cpu").manual_seed(456)
 
     logits = torch.randn(4096, generator=logit_generator, device="cpu")
-    logit_normal = torch.sigmoid(
-        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    )
+    logit_normal = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
     mixed = _sample_flow_timesteps(
         4096,
         torch=torch,
@@ -189,6 +200,25 @@ def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     assert logit_tail_mass < 0.05
     assert mixed_tail_mass > 0.08
     assert mixed_tail_mass > logit_tail_mass * 2.0
+
+
+def test_refiner_source_image_is_degraded_clean_image() -> None:
+    clean = torch.linspace(-1.0, 1.0, steps=3 * 8 * 8).view(1, 3, 8, 8)
+
+    source = _training_source_image(
+        clean,
+        torch=torch,
+        generator=torch.Generator(device="cpu").manual_seed(123),
+        device=torch.device("cpu"),
+        training_stage=TRAINING_STAGE_REFINER,
+        refiner_condition_downsample=4,
+        refiner_condition_noise_scale=0.0,
+    )
+
+    assert source.shape == clean.shape
+    assert torch.all(source <= 1.0)
+    assert torch.all(source >= -1.0)
+    assert not torch.allclose(source, clean)
 
 
 def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:

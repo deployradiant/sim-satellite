@@ -102,6 +102,20 @@ Broader semi-automated labeling with SAM, SAM 3, or a mask classifier.
 
 Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based implementation is likely faster for useful first results. The important boundary is that conditioning enters through semantic masks, so the architecture can evolve without changing the dataset format.
 
+Two-stage refiner experiments train a second flow model with
+`"training_stage": "refiner"`. The refiner conditions on a degraded draft image
+and learns the ordinary draft-to-clean flow target from OpenEarthMap pixels. It
+does not add a chroma or perceptual loss; the color signal still comes from data
+reconstruction. At inference, pass the base checkpoint and the refiner checkpoint:
+
+```json
+{
+  "checkpoint_path": "artifacts/base.pt",
+  "refiner_checkpoint_path": "artifacts/refiner.pt",
+  "refiner_steps": 16
+}
+```
+
 ### References
 
 - [OpenEarthMap: A Benchmark Dataset for Global High-Resolution Land Cover Mapping](https://open-earth-map.org/overview.html) (Xia et al., WACV 2023).

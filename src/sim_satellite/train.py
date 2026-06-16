@@ -30,6 +30,9 @@ TIMESTEP_SAMPLING = "logit_normal_uniform_mix"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
 TIMESTEP_UNIFORM_MIX_PROBABILITY = 0.5
+TRAINING_STAGE_BASE = "base"
+TRAINING_STAGE_REFINER = "refiner"
+TRAINING_STAGES = {TRAINING_STAGE_BASE, TRAINING_STAGE_REFINER}
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,9 @@ class TrainingConfig:
     precision: str = "float32"
     timing_sample_every: int = 0
     log_every: int = 10
+    training_stage: str = TRAINING_STAGE_BASE
+    refiner_condition_downsample: int = 4
+    refiner_condition_noise_scale: float = 0.05
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -85,6 +91,12 @@ class TrainingConfig:
             raise ValueError("device must be a CUDA device")
         if self.timing_sample_every < 0:
             raise ValueError("timing_sample_every must be non-negative")
+        if self.training_stage not in TRAINING_STAGES:
+            raise ValueError(f"training_stage must be one of: {', '.join(sorted(TRAINING_STAGES))}")
+        if self.refiner_condition_downsample < 1:
+            raise ValueError("refiner_condition_downsample must be positive")
+        if self.refiner_condition_noise_scale < 0.0:
+            raise ValueError("refiner_condition_noise_scale must be non-negative")
         if not self.manifest_path:
             raise ValueError("manifest_path is required")
         if not self.split:
@@ -103,6 +115,9 @@ class TrainingConfig:
             image_size=self.image_size,
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
+            conditioning_image_channels=(
+                self.image_channels if self.training_stage == TRAINING_STAGE_REFINER else 0
+            ),
             hidden_channels=self.hidden_channels,
             seed=self.seed,
         )
@@ -203,6 +218,7 @@ def run_training(
         timestep_logit_normal_mean=TIMESTEP_LOGIT_NORMAL_MEAN,
         timestep_logit_normal_std=TIMESTEP_LOGIT_NORMAL_STD,
         timestep_uniform_mix_probability=TIMESTEP_UNIFORM_MIX_PROBABILITY,
+        training_stage=config.training_stage,
         precision=config.precision,
         preload_sample_count=len(preloaded_samples),
         preload_seconds=preload_seconds,
@@ -229,6 +245,9 @@ def run_training(
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
             precision=config.precision,
+            training_stage=config.training_stage,
+            refiner_condition_downsample=config.refiner_condition_downsample,
+            refiner_condition_noise_scale=config.refiner_condition_noise_scale,
             profile_timing=_should_sample_step_timing(config, step_number),
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
@@ -442,6 +461,9 @@ def _train_step(
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
     precision: str,
+    training_stage: str,
+    refiner_condition_downsample: int,
+    refiner_condition_noise_scale: float,
     profile_timing: bool,
 ) -> tuple[Any, dict[str, float | int]]:
     timing: dict[str, float | int] = {}
@@ -476,15 +498,24 @@ def _train_step(
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
 
     random_started_at = time.monotonic()
-    noise = torch.randn(clean.shape, generator=random_generator, device=device)
+    source = _training_source_image(
+        clean,
+        torch=torch,
+        generator=random_generator,
+        device=device,
+        training_stage=training_stage,
+        refiner_condition_downsample=refiner_condition_downsample,
+        refiner_condition_noise_scale=refiner_condition_noise_scale,
+    )
+    conditioning_image = source if training_stage == TRAINING_STAGE_REFINER else None
     timestep = _sample_flow_timesteps(
         clean.shape[0],
         torch=torch,
         generator=random_generator,
         device=device,
     )
-    noisy = interpolate_flow_sample(clean, noise, timestep)
-    target = flow_velocity(clean, noise)
+    noisy = interpolate_flow_sample(clean, source, timestep)
+    target = flow_velocity(clean, source)
 
     if mask_drop_probability > 0.0:
         keep_mask = torch.rand(
@@ -501,7 +532,12 @@ def _train_step(
     compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, precision):
-        prediction = model(noisy, semantic_mask, timestep)
+        prediction = model(
+            noisy,
+            semantic_mask,
+            timestep,
+            conditioning_image=conditioning_image,
+        )
     loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
     loss.backward()
     optimizer.step()
@@ -510,6 +546,48 @@ def _train_step(
         timing["train_compute_seconds"] = max(0.0, time.monotonic() - compute_started_at)
         timing["timing_sampled"] = 1
     return loss.detach(), timing
+
+
+def _training_source_image(
+    clean: Any,
+    *,
+    torch: Any,
+    generator: Any,
+    device: Any,
+    training_stage: str,
+    refiner_condition_downsample: int,
+    refiner_condition_noise_scale: float,
+) -> Any:
+    if training_stage == TRAINING_STAGE_BASE:
+        return torch.randn(clean.shape, generator=generator, device=device)
+    if training_stage != TRAINING_STAGE_REFINER:
+        raise ValueError(f"Unsupported training_stage: {training_stage}")
+
+    source = clean
+    if refiner_condition_downsample > 1:
+        source = torch.nn.functional.avg_pool2d(
+            source,
+            kernel_size=refiner_condition_downsample,
+            stride=refiner_condition_downsample,
+            ceil_mode=True,
+        )
+        source = torch.nn.functional.interpolate(
+            source,
+            size=clean.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+    if refiner_condition_noise_scale > 0.0:
+        source = (
+            source
+            + torch.randn(
+                clean.shape,
+                generator=generator,
+                device=device,
+            )
+            * refiner_condition_noise_scale
+        )
+    return source.clamp(-1.0, 1.0)
 
 
 def _load_training_state(
@@ -640,17 +718,35 @@ def _evaluate_validation_loss(
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
-            noise = torch.randn(clean.shape, generator=generator, device=device)
+            if config.training_stage == TRAINING_STAGE_BASE:
+                source = torch.randn(clean.shape, generator=generator, device=device)
+                conditioning_image = None
+            else:
+                source = _training_source_image(
+                    clean,
+                    torch=torch,
+                    generator=generator,
+                    device=device,
+                    training_stage=config.training_stage,
+                    refiner_condition_downsample=config.refiner_condition_downsample,
+                    refiner_condition_noise_scale=config.refiner_condition_noise_scale,
+                )
+                conditioning_image = source
             timestep = _sample_flow_timesteps(
                 clean.shape[0],
                 torch=torch,
                 generator=generator,
                 device=device,
             )
-            noisy = interpolate_flow_sample(clean, noise, timestep)
-            target = flow_velocity(clean, noise)
+            noisy = interpolate_flow_sample(clean, source, timestep)
+            target = flow_velocity(clean, source)
             with _autocast_context(torch, config.precision):
-                prediction = model(noisy, semantic_mask, timestep)
+                prediction = model(
+                    noisy,
+                    semantic_mask,
+                    timestep,
+                    conditioning_image=conditioning_image,
+                )
             loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
             losses.append(loss.detach())
 

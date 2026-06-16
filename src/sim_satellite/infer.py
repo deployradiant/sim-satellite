@@ -28,6 +28,8 @@ class InferenceConfig:
     manifest_path: str = DEFAULT_MANIFEST_PATH
     split: str = "train"
     mask_path: str | None = None
+    refiner_checkpoint_path: str = ""
+    refiner_steps: int = DEFAULT_INFERENCE_STEPS
     device: str = "cpu"
     steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
@@ -35,6 +37,8 @@ class InferenceConfig:
     def __post_init__(self) -> None:
         if self.steps < 1:
             raise ValueError("steps must be positive")
+        if self.refiner_steps < 1:
+            raise ValueError("refiner_steps must be positive")
         if self.guidance_scale < 0.0:
             raise ValueError("guidance_scale must be non-negative")
         if not self.checkpoint_path:
@@ -68,11 +72,24 @@ class GenerationConfig:
 
 
 @dataclass(frozen=True)
+class RefinementConfig:
+    steps: int = DEFAULT_INFERENCE_STEPS
+    guidance_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError("steps must be positive")
+        if self.guidance_scale < 0.0:
+            raise ValueError("guidance_scale must be non-negative")
+
+
+@dataclass(frozen=True)
 class InferenceResult:
     output_path: str
     checkpoint_path: str
     mask_path: str
     device: str
+    refiner_checkpoint_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,24 +125,40 @@ def run_inference(
             guidance_scale=config.guidance_scale,
         ),
     )
+    base_generation = generation
+    if config.refiner_checkpoint_path:
+        loaded_refiner = load_generator(config.refiner_checkpoint_path, device=config.device)
+        generation = refine_image_with_model(
+            loaded_refiner,
+            base_generation,
+            RefinementConfig(
+                steps=config.refiner_steps,
+                guidance_scale=config.guidance_scale,
+            ),
+        )
 
     output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "image": generation.image.detach().cpu(),
-            "semantic_mask": generation.semantic_mask.detach().cpu(),
-            "model_config": asdict(generation.model_config),
-            "inference_config": asdict(config),
-        },
-        output_path,
-    )
+    payload = {
+        "image": generation.image.detach().cpu(),
+        "semantic_mask": generation.semantic_mask.detach().cpu(),
+        "model_config": asdict(generation.model_config),
+        "inference_config": asdict(config),
+    }
+    if config.refiner_checkpoint_path:
+        payload["base_image"] = base_generation.image.detach().cpu()
+        payload["base_model_config"] = asdict(base_generation.model_config)
+        payload["refiner_model_config"] = asdict(generation.model_config)
+    torch.save(payload, output_path)
 
     return InferenceResult(
         output_path=str(output_path),
-        checkpoint_path=str(generation.checkpoint_path),
+        checkpoint_path=str(base_generation.checkpoint_path),
         mask_path=str(generation.mask_path),
         device=str(generation.image.device),
+        refiner_checkpoint_path=(
+            str(generation.checkpoint_path) if config.refiner_checkpoint_path else ""
+        ),
     )
 
 
@@ -193,6 +226,7 @@ def generate_image_with_model(
                 timestep,
                 guidance_scale=config.guidance_scale,
                 torch=torch,
+                conditioning_image=None,
             )
             image = image - velocity * step_size
             if progress is not None:
@@ -208,12 +242,58 @@ def generate_image_with_model(
     )
 
 
+def refine_image_with_model(
+    loaded_refiner: LoadedGenerator,
+    base_generation: GenerationResult,
+    config: RefinementConfig,
+) -> GenerationResult:
+    torch = loaded_refiner.torch
+    model = loaded_refiner.model
+    model_config = loaded_refiner.model_config
+    device = loaded_refiner.device
+
+    if model_config.conditioning_image_channels != model_config.image_channels:
+        raise ValueError(
+            "refiner checkpoint must condition on one draft image with "
+            f"{model_config.image_channels} channels"
+        )
+
+    conditioning_image = _image_0_1_to_model_range(base_generation.image).to(device)
+    image = conditioning_image.clone()
+    semantic_mask = base_generation.semantic_mask.to(device)
+
+    with torch.no_grad():
+        for timestep_value, step_size in _flow_inference_schedule(config.steps):
+            timestep = torch.full(
+                (1,),
+                timestep_value,
+                dtype=torch.float32,
+                device=device,
+            )
+            velocity = _guided_prediction(
+                model,
+                image,
+                semantic_mask,
+                timestep,
+                guidance_scale=config.guidance_scale,
+                torch=torch,
+                conditioning_image=conditioning_image,
+            )
+            image = image - velocity * step_size
+        image = (image.clamp(-1.0, 1.0) + 1.0) / 2.0
+
+    return GenerationResult(
+        image=image,
+        semantic_mask=semantic_mask,
+        model_config=model_config,
+        checkpoint_path=loaded_refiner.checkpoint_path,
+        mask_path=base_generation.mask_path,
+    )
+
+
 def _flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
     step_size = 1.0 / float(steps)
-    return tuple(
-        ((step - 0.5) * step_size, step_size)
-        for step in reversed(range(1, steps + 1))
-    )
+    return tuple(((step - 0.5) * step_size, step_size) for step in reversed(range(1, steps + 1)))
 
 
 def _guided_prediction(
@@ -224,14 +304,29 @@ def _guided_prediction(
     *,
     guidance_scale: float,
     torch: Any,
+    conditioning_image: Any | None,
 ) -> Any:
-    conditional = model(image, semantic_mask, timestep)
+    conditional = model(
+        image,
+        semantic_mask,
+        timestep,
+        conditioning_image=conditioning_image,
+    )
     if guidance_scale == 1.0:
         return conditional
 
     empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep)
+    unconditional = model(
+        image,
+        empty_mask,
+        timestep,
+        conditioning_image=conditioning_image,
+    )
     return unconditional + guidance_scale * (conditional - unconditional)
+
+
+def _image_0_1_to_model_range(image: Any) -> Any:
+    return image.detach().clamp(0.0, 1.0) * 2.0 - 1.0
 
 
 def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
@@ -335,6 +430,8 @@ def _build_click_command() -> click.Command:
         default=None,
         help="Mask to condition on. Defaults to first manifest mask.",
     )
+    @click.option("--refiner-checkpoint-path", default=InferenceConfig.refiner_checkpoint_path)
+    @click.option("--refiner-steps", default=InferenceConfig.refiner_steps, show_default=True)
     @click.option("--device", default=InferenceConfig.device, show_default=True)
     @click.option("--steps", default=InferenceConfig.steps, show_default=True)
     @click.option("--seed", default=InferenceConfig.seed, show_default=True)
@@ -346,6 +443,8 @@ def _build_click_command() -> click.Command:
         manifest_path: str,
         split: str,
         mask_path: str | None,
+        refiner_checkpoint_path: str,
+        refiner_steps: int,
         device: str,
         steps: int,
         seed: int,
@@ -358,6 +457,8 @@ def _build_click_command() -> click.Command:
             manifest_path=manifest_path,
             split=split,
             mask_path=mask_path,
+            refiner_checkpoint_path=refiner_checkpoint_path,
+            refiner_steps=refiner_steps,
             device=device,
             steps=steps,
             guidance_scale=guidance_scale,

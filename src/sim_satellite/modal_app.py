@@ -149,6 +149,8 @@ def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["output_path"] = _modal_artifact_path(config.output_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    if config.refiner_checkpoint_path:
+        values["refiner_checkpoint_path"] = _modal_artifact_path(config.refiner_checkpoint_path)
     if config.mask_path is None:
         raise ValueError("Modal mask_path is required for inference")
     values["mask_path"] = _modal_data_path(config.mask_path, field_name="mask_path")

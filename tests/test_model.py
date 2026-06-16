@@ -20,6 +20,11 @@ def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:
         build_model(ModelConfig(image_size=512))
 
 
+def test_model_rejects_negative_conditioning_channels() -> None:
+    with pytest.raises(ValueError, match="conditioning_image_channels"):
+        ModelConfig(conditioning_image_channels=-1)
+
+
 def test_conditional_unet_forward_shape_is_deterministic() -> None:
     torch.manual_seed(123)
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
@@ -33,6 +38,36 @@ def test_conditional_unet_forward_shape_is_deterministic() -> None:
 
     with torch.no_grad():
         output = model(image, semantic_mask, timestep)
+
+    assert output.shape == image.shape
+    assert torch.isfinite(output).all()
+
+
+def test_conditional_unet_can_condition_on_draft_image() -> None:
+    torch.manual_seed(123)
+    config = ModelConfig(
+        image_size=32,
+        mask_channels=4,
+        conditioning_image_channels=3,
+        hidden_channels=8,
+    )
+    model = build_model(config)
+    model.eval()
+
+    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
+    conditioning_image = torch.randn_like(image)
+    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
+    timestep = torch.tensor([0.25, 0.75])
+
+    with pytest.raises(ValueError, match="conditioning_image is required"):
+        model(image, semantic_mask, timestep)
+    with torch.no_grad():
+        output = model(
+            image,
+            semantic_mask,
+            timestep,
+            conditioning_image=conditioning_image,
+        )
 
     assert output.shape == image.shape
     assert torch.isfinite(output).all()
