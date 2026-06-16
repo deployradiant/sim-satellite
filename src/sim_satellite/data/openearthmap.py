@@ -40,6 +40,7 @@ OPENEARTHMAP_RGB = {
 }
 EXTRACT_COMPLETE_MARKER = ".openearthmap-extract-complete.json"
 EXTRACT_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
+OPENEARTHMAP_DOWNLOAD_ATTEMPTS = 3
 ProgressReporter = Callable[[str], None]
 
 
@@ -280,12 +281,57 @@ def _download(
     force: bool,
     progress: ProgressReporter | None,
 ) -> None:
-    if archive_path.exists() and not force:
+    if archive_path.exists():
+        if force:
+            _report(progress, f"Replacing cached archive {archive_path}")
+            archive_path.unlink()
+        elif not _valid_zip_archive(archive_path):
+            _report(progress, f"Cached archive is invalid; replacing {archive_path}")
+            archive_path.unlink(missing_ok=True)
+        else:
+            _report(progress, f"Using cached archive {archive_path}")
+            return
+
+    _download_with_retries(archive_path, progress=progress)
+
+
+def _download_with_retries(
+    archive_path: Path,
+    *,
+    progress: ProgressReporter | None,
+) -> None:
+    for attempt in range(1, OPENEARTHMAP_DOWNLOAD_ATTEMPTS + 1):
+        _download_once(archive_path, progress=progress)
+        if _valid_zip_archive(archive_path):
+            _report(progress, f"Download complete: {archive_path}")
+            return
+
+        archive_path.unlink(missing_ok=True)
+        if attempt < OPENEARTHMAP_DOWNLOAD_ATTEMPTS:
+            _report(
+                progress,
+                "Downloaded archive is not a valid zip; "
+                f"retrying ({attempt + 1}/{OPENEARTHMAP_DOWNLOAD_ATTEMPTS})",
+            )
+
+    raise RuntimeError(
+        "Downloaded OpenEarthMap archive is not a valid zip after "
+        f"{OPENEARTHMAP_DOWNLOAD_ATTEMPTS} attempts: {archive_path}"
+    )
+
+
+def _download_once(
+    archive_path: Path,
+    *,
+    progress: ProgressReporter | None,
+) -> None:
+    if archive_path.exists():
         _report(progress, f"Using cached archive {archive_path}")
         return
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = archive_path.with_suffix(f"{archive_path.suffix}.part")
+    partial_path.unlink(missing_ok=True)
     _report(progress, f"Downloading OpenEarthMap archive to {archive_path}")
 
     with urllib.request.urlopen(OPENEARTHMAP_URL) as response:
@@ -315,7 +361,15 @@ def _download(
                     _report(progress, f"Downloaded {_format_bytes(downloaded_bytes)}")
                     last_reported_bytes = downloaded_bytes
     partial_path.replace(archive_path)
-    _report(progress, f"Download complete: {archive_path}")
+
+
+def _valid_zip_archive(archive_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.infolist()
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return True
 
 
 def _extract(

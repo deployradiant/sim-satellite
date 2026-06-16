@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from sim_satellite.data import openearthmap
 from sim_satellite.data.loader import read_manifest
 from sim_satellite.data.openearthmap import (
     download_and_prepare_openearthmap,
@@ -139,6 +140,50 @@ def test_prepare_openearthmap_replaces_partial_extraction_cache(tmp_path: Path) 
     assert result.scanned_images == 1
     assert [sample.image_path.name for sample in samples] == ["tile.png"]
     assert (data_dir / "extracted" / ".openearthmap-extract-complete.json").exists()
+
+
+def test_download_retries_invalid_zip_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "openearthmap"
+    valid_archive = BytesIO()
+    with zipfile.ZipFile(valid_archive, "w") as archive:
+        archive.writestr("OpenEarthMap/train/images/tile.png", _png_bytes("RGB", (1, 2, 3)))
+        archive.writestr("OpenEarthMap/train/labels/tile.png", _png_bytes("L", 0))
+    responses = [
+        _FakeDownloadResponse(b"not a zip"),
+        _FakeDownloadResponse(valid_archive.getvalue()),
+    ]
+    messages: list[str] = []
+
+    def fake_urlopen(_: str) -> _FakeDownloadResponse:
+        return responses.pop(0)
+
+    monkeypatch.setattr(openearthmap.urllib.request, "urlopen", fake_urlopen)
+
+    result = download_and_prepare_openearthmap(data_dir, progress=messages.append)
+    samples = read_manifest(result.manifest_path)
+
+    assert result.samples == 1
+    assert [sample.image_path.name for sample in samples] == ["tile.png"]
+    assert not (data_dir / "raw" / "OpenEarthMap.zip.part").exists()
+    assert any("not a valid zip; retrying" in message for message in messages)
+
+
+class _FakeDownloadResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._buffer = BytesIO(payload)
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def __enter__(self) -> _FakeDownloadResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def read(self, size: int) -> bytes:
+        return self._buffer.read(size)
 
 
 def _touch(path: Path) -> None:
