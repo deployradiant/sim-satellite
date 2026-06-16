@@ -55,6 +55,7 @@ class TrainingConfig:
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
     mask_drop_probability: float = 0.0
+    chroma_loss_weight: float = 0.05
     precision: str = "float32"
     timing_sample_every: int = 0
     log_every: int = 10
@@ -78,6 +79,8 @@ class TrainingConfig:
             raise ValueError("learning_rate must be positive")
         if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
             raise ValueError("mask_drop_probability must be between 0 and 1")
+        if self.chroma_loss_weight < 0.0:
+            raise ValueError("chroma_loss_weight must be non-negative")
         if self.precision not in {"float32", "bf16"}:
             raise ValueError("precision must be 'float32' or 'bf16'")
         if self.device != "cuda" and not self.device.startswith("cuda:"):
@@ -226,6 +229,7 @@ def run_training(
             random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            chroma_loss_weight=config.chroma_loss_weight,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
         )
@@ -420,6 +424,34 @@ def _sample_flow_timesteps(
     return torch.sigmoid(logits)
 
 
+def _flow_training_loss(
+    prediction: Any,
+    target: Any,
+    noisy: Any,
+    clean: Any,
+    timestep: Any,
+    *,
+    chroma_loss_weight: float,
+    torch: Any,
+) -> Any:
+    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+    if chroma_loss_weight <= 0.0:
+        return loss
+
+    predicted_clean = noisy.float() - timestep.float().view(-1, 1, 1, 1) * prediction.float()
+    return loss + chroma_loss_weight * _chroma_reconstruction_loss(
+        predicted_clean,
+        clean.float(),
+        torch=torch,
+    )
+
+
+def _chroma_reconstruction_loss(predicted_clean: Any, clean: Any, *, torch: Any) -> Any:
+    predicted_chroma = predicted_clean - predicted_clean.mean(dim=1, keepdim=True)
+    clean_chroma = clean - clean.mean(dim=1, keepdim=True)
+    return torch.nn.functional.mse_loss(predicted_chroma, clean_chroma)
+
+
 def _train_step(
     samples: tuple[SatelliteSample, ...],
     *,
@@ -432,6 +464,7 @@ def _train_step(
     random_generator: Any,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
+    chroma_loss_weight: float,
     precision: str,
     profile_timing: bool,
 ) -> tuple[Any, dict[str, float | int]]:
@@ -493,7 +526,15 @@ def _train_step(
     optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, precision):
         prediction = model(noisy, semantic_mask, timestep)
-    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+    loss = _flow_training_loss(
+        prediction,
+        target,
+        noisy,
+        clean,
+        timestep,
+        chroma_loss_weight=chroma_loss_weight,
+        torch=torch,
+    )
     loss.backward()
     optimizer.step()
     _synchronize_device(torch, device, profile_timing)
@@ -642,7 +683,15 @@ def _evaluate_validation_loss(
             target = flow_velocity(clean, noise)
             with _autocast_context(torch, config.precision):
                 prediction = model(noisy, semantic_mask, timestep)
-            loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+            loss = _flow_training_loss(
+                prediction,
+                target,
+                noisy,
+                clean,
+                timestep,
+                chroma_loss_weight=config.chroma_loss_weight,
+                torch=torch,
+            )
             losses.append(loss.detach())
 
     if was_training:

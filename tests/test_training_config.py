@@ -16,6 +16,8 @@ from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_STD,
     TrainingConfig,
     _autocast_context,
+    _chroma_reconstruction_loss,
+    _flow_training_loss,
     _load_training_samples,
     _load_validation_batches,
     _sample_flow_timesteps,
@@ -79,6 +81,8 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(batch_size=0)
     with pytest.raises(ValueError):
         TrainingConfig(learning_rate=0.0)
+    with pytest.raises(ValueError):
+        TrainingConfig(chroma_loss_weight=-0.01)
     with pytest.raises(ValueError):
         TrainingConfig(save_every=-1)
     with pytest.raises(ValueError):
@@ -155,6 +159,85 @@ def test_flow_timesteps_use_logit_normal_sampling() -> None:
     assert torch.allclose(actual, expected)
     assert torch.all(actual > 0.0)
     assert torch.all(actual < 1.0)
+
+
+def test_chroma_reconstruction_loss_ignores_luminance_shift() -> None:
+    clean = torch.tensor(
+        [
+            [
+                [[-0.8, 0.4], [0.2, 0.6]],
+                [[0.1, -0.2], [0.4, -0.5]],
+                [[0.6, 0.3], [-0.7, 0.1]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    luminance_shift = torch.tensor([[[[0.25, -0.1], [0.4, -0.2]]]], dtype=torch.float32)
+
+    loss = _chroma_reconstruction_loss(clean + luminance_shift, clean, torch=torch)
+
+    assert torch.allclose(loss, torch.tensor(0.0))
+
+
+def test_chroma_reconstruction_loss_penalizes_grey_collapse() -> None:
+    clean = torch.tensor(
+        [
+            [
+                [[-0.8, 0.4], [0.2, 0.6]],
+                [[0.1, -0.2], [0.4, -0.5]],
+                [[0.6, 0.3], [-0.7, 0.1]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    grey = clean.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+
+    loss = _chroma_reconstruction_loss(grey, clean, torch=torch)
+
+    assert loss.item() > 0.0
+
+
+def test_flow_training_loss_adds_weighted_chroma_loss() -> None:
+    clean = torch.tensor(
+        [
+            [
+                [[-0.8, 0.4], [0.2, 0.6]],
+                [[0.1, -0.2], [0.4, -0.5]],
+                [[0.6, 0.3], [-0.7, 0.1]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    grey = clean.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+    noisy = torch.zeros_like(clean)
+    timestep = torch.ones(1)
+    prediction = -grey
+    target = torch.zeros_like(clean)
+    base_loss = torch.nn.functional.mse_loss(prediction, target)
+    chroma_loss = _chroma_reconstruction_loss(grey, clean, torch=torch)
+
+    pure_mse = _flow_training_loss(
+        prediction,
+        target,
+        noisy,
+        clean,
+        timestep,
+        chroma_loss_weight=0.0,
+        torch=torch,
+    )
+    total = _flow_training_loss(
+        prediction,
+        target,
+        noisy,
+        clean,
+        timestep,
+        chroma_loss_weight=0.05,
+        torch=torch,
+    )
+
+    assert torch.allclose(pure_mse, base_loss)
+    assert torch.allclose(total, base_loss + 0.05 * chroma_loss)
+    assert total.item() > pure_mse.item()
 
 
 def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:
