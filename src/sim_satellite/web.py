@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
+from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator
 from sim_satellite.model import ModelConfig
@@ -134,7 +135,7 @@ def create_app(
     def mask(index: int = Query(default=0, ge=0)) -> Response:
         sample = _sample_at(samples, index)
         return Response(
-            content=_mask_preview_png(sample.mask_path, config),
+            content=_mask_preview_png(sample, config),
             media_type="image/png",
         )
 
@@ -142,7 +143,7 @@ def create_app(
     def image(index: int = Query(default=0, ge=0)) -> Response:
         sample = _sample_at(samples, index)
         return Response(
-            content=_image_preview_png(sample.image_path, config),
+            content=_image_preview_png(sample, config),
             media_type="image/png",
         )
 
@@ -193,12 +194,14 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
     if not samples:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
     samples = samples[: config.max_samples]
-    missing_masks = [sample.mask_path for sample in samples if not sample.mask_path.exists()]
-    if missing_masks:
-        raise FileNotFoundError(f"Web app mask not found: {missing_masks[0]}")
-    missing_images = [sample.image_path for sample in samples if not sample.image_path.exists()]
-    if missing_images:
-        raise FileNotFoundError(f"Web app image not found: {missing_images[0]}")
+    missing_prepared = [
+        sample.prepared_path
+        for sample in samples
+        if not sample.prepared_path.exists()
+        and (not sample.image_path.exists() or not sample.mask_path.exists())
+    ]
+    if missing_prepared:
+        raise FileNotFoundError(f"Web app sample data not found: {missing_prepared[0]}")
     return samples
 
 
@@ -301,6 +304,9 @@ def _prepare_generation(
     if payload.mask_image is not None:
         temporary_mask_path = _write_request_mask(payload.mask_image, config)
         mask_path = temporary_mask_path
+    elif not mask_path.exists():
+        temporary_mask_path = _write_prepared_mask(sample)
+        mask_path = temporary_mask_path
 
     return PreparedGeneration(
         index=payload.index,
@@ -401,9 +407,9 @@ def _json_event(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":")) + "\n"
 
 
-def _mask_preview_png(mask_path: Path, config: WebConfig) -> bytes:
+def _mask_preview_png(sample: SatelliteSample, config: WebConfig) -> bytes:
     model_config = ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES))
-    with Image.open(mask_path) as mask:
+    with _sample_mask_image(sample) as mask:
         resized = mask.resize(
             (config.display_size, config.display_size),
             Image.Resampling.NEAREST,
@@ -415,13 +421,66 @@ def _mask_preview_png(mask_path: Path, config: WebConfig) -> bytes:
     return _pil_png(image)
 
 
-def _image_preview_png(image_path: Path, config: WebConfig) -> bytes:
-    with Image.open(image_path) as image:
+def _image_preview_png(sample: SatelliteSample, config: WebConfig) -> bytes:
+    with _sample_image(sample) as image:
         preview = image.convert("RGB").resize(
             (config.display_size, config.display_size),
             Image.Resampling.BILINEAR,
         )
     return _pil_png(preview)
+
+
+def _sample_mask_image(sample: SatelliteSample) -> Image.Image:
+    if sample.mask_path.exists():
+        return Image.open(sample.mask_path)
+    return _prepared_mask_image(_load_sample_prepared_data(sample))
+
+
+def _sample_image(sample: SatelliteSample) -> Image.Image:
+    if sample.image_path.exists():
+        return Image.open(sample.image_path)
+    return _prepared_image(_load_sample_prepared_data(sample))
+
+
+def _write_prepared_mask(sample: SatelliteSample) -> Path:
+    mask = _prepared_mask_image(_load_sample_prepared_data(sample))
+    with NamedTemporaryFile(
+        prefix="sim-satellite-prepared-mask-",
+        suffix=".png",
+        delete=False,
+    ) as handle:
+        path = Path(handle.name)
+    try:
+        mask.save(path)
+    finally:
+        mask.close()
+    return path
+
+
+def _load_sample_prepared_data(sample: SatelliteSample) -> PreparedSample:
+    import torch
+
+    return load_prepared_sample(sample.prepared_path, torch=torch)
+
+
+def _prepared_mask_image(prepared: PreparedSample) -> Image.Image:
+    width, height = prepared.size
+    values = prepared.mask.byte().contiguous().view(-1).tolist()
+    image = Image.new("L", (width, height))
+    image.putdata(values)
+    return image
+
+
+def _prepared_image(prepared: PreparedSample) -> Image.Image:
+    width, height = prepared.size
+    pixels = [
+        tuple(int(channel) for channel in pixel)
+        for row in prepared.image.contiguous().tolist()
+        for pixel in row
+    ]
+    image = Image.new("RGB", (width, height))
+    image.putdata(pixels)
+    return image
 
 
 def _write_request_mask(mask_image: str, config: WebConfig) -> Path:

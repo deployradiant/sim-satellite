@@ -13,23 +13,23 @@ from typing import Any
 import click
 import torch
 
-from sim_satellite import training_data
+from sim_satellite import training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
+from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.model import (
     ModelConfig,
     build_model,
     flow_velocity,
     interpolate_flow_sample,
 )
-from sim_satellite.training_data import PreloadedSample
 
 DEFAULT_TARGET = "modal"
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
-TIMESTEP_SAMPLING = "logit_normal"
-TIMESTEP_MIXED_SAMPLING = "logit_normal_uniform_mix"
+TIMESTEP_SAMPLING = "logit_normal_uniform_mix"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
+TIMESTEP_UNIFORM_MIX_PROBABILITY = 0.5
 
 
 @dataclass(frozen=True)
@@ -50,18 +50,15 @@ class TrainingConfig:
     validation_holdout_patterns: str = ""
     validation_every: int = 0
     validation_batches: int = 8
-    device: str = "cpu"
+    device: str = "cuda"
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
     mask_drop_probability: float = 0.0
     precision: str = "float32"
-    device_random: bool = False
-    preload_samples: bool = False
     timing_sample_every: int = 0
     log_every: int = 10
-    timestep_uniform_mix_probability: float = 0.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -82,16 +79,10 @@ class TrainingConfig:
             raise ValueError("learning_rate must be positive")
         if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
             raise ValueError("mask_drop_probability must be between 0 and 1")
-        if (
-            self.timestep_uniform_mix_probability < 0.0
-            or self.timestep_uniform_mix_probability > 1.0
-        ):
-            raise ValueError("timestep_uniform_mix_probability must be between 0 and 1")
         if self.precision not in {"float32", "bf16"}:
             raise ValueError("precision must be 'float32' or 'bf16'")
-        for field_name in ("device_random", "preload_samples"):
-            if not isinstance(getattr(self, field_name), bool):
-                raise ValueError(f"{field_name} must be a boolean")
+        if self.device != "cuda" and not self.device.startswith("cuda:"):
+            raise ValueError("device must be a CUDA device")
         if self.timing_sample_every < 0:
             raise ValueError("timing_sample_every must be non-negative")
         if not self.manifest_path:
@@ -138,21 +129,38 @@ def run_training(
     started_at_monotonic = time.monotonic()
 
     torch.manual_seed(config.seed)
-    device = torch.device(config.device)
+    device = _training_device(config, torch=torch)
     model_config = config.model_config()
     model = build_model(model_config).to(device)
     model_parameters = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    device_generator = _make_device_random_generator(config, torch=torch, device=device)
+    crop_generator = torch.Generator(device="cpu").manual_seed(config.seed)
+    random_generator = torch.Generator(device=device).manual_seed(config.seed)
     training_samples = _load_training_samples(config)
     batches = tuple(iter_batches(training_samples, config.batch_size))
     validation_batches = _load_validation_batches(config)
     preload_started_at = time.monotonic()
-    preloaded_samples = {}
-    if config.preload_samples:
-        samples_to_preload = training_data.unique_samples(training_samples, validation_batches)
-        preloaded_samples = training_data.preload_samples(samples_to_preload)
+    samples_to_preload = training_data.unique_samples(training_samples, validation_batches)
+    train_sample_count = sum(len(batch) for batch in batches)
+    training_log.print_preload_start(
+        manifest_path=config.manifest_path,
+        split=config.split,
+        sample_count=len(samples_to_preload),
+        train_samples=train_sample_count,
+        validation_batches=len(validation_batches),
+    )
+
+    def report_preload_progress(completed: int, total: int) -> None:
+        training_log.print_preload_progress(
+            started_at_monotonic=preload_started_at,
+            completed=completed,
+            total=total,
+        )
+
+    preloaded_samples = training_data.preload_samples(
+        samples_to_preload,
+        progress=report_preload_progress,
+    )
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
     final_loss = 0.0
@@ -164,8 +172,8 @@ def run_training(
             Path(config.resume_from),
             model=model,
             optimizer=optimizer,
-            generator=generator,
-            device_generator=device_generator,
+            generator=crop_generator,
+            device_generator=random_generator,
             torch=torch,
             model_config=model_config,
             device=device,
@@ -184,67 +192,63 @@ def run_training(
         else checkpoint_path.with_suffix(".loss.png")
     )
 
-    print(
-        json.dumps(
-            {
-                "event": "train_start",
-                "started_at_epoch_utc": started_at_epoch_utc,
-                "start_step": start_step,
-                "steps": config.steps,
-                "remaining_steps": max(config.steps - start_step, 0),
-                "train_samples": sum(len(batch) for batch in batches),
-                "train_batches": len(batches),
-                "batch_size": config.batch_size,
-                "total_images_target": config.steps * config.batch_size,
-                "timestep_sampling": _timestep_sampling_name(config),
-                "timestep_logit_normal_mean": TIMESTEP_LOGIT_NORMAL_MEAN,
-                "timestep_logit_normal_std": TIMESTEP_LOGIT_NORMAL_STD,
-                "precision": config.precision,
-                "device_random": config.device_random,
-                "preload_samples": config.preload_samples,
-                "preload_sample_count": len(preloaded_samples),
-                "preload_seconds": preload_seconds,
-                "timing_sample_every": config.timing_sample_every,
-                "model_parameters": model_parameters,
-                "image_size": config.image_size,
-                "device": str(device),
-                **_torch_device_payload(torch, device),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    training_log.print_train_start(
+        started_at_epoch_utc=started_at_epoch_utc,
+        start_step=start_step,
+        steps=config.steps,
+        train_samples=train_sample_count,
+        train_batches=len(batches),
+        batch_size=config.batch_size,
+        timestep_sampling=TIMESTEP_SAMPLING,
+        timestep_logit_normal_mean=TIMESTEP_LOGIT_NORMAL_MEAN,
+        timestep_logit_normal_std=TIMESTEP_LOGIT_NORMAL_STD,
+        timestep_uniform_mix_probability=TIMESTEP_UNIFORM_MIX_PROBABILITY,
+        precision=config.precision,
+        preload_sample_count=len(preloaded_samples),
+        preload_seconds=preload_seconds,
+        timing_sample_every=config.timing_sample_every,
+        model_parameters=model_parameters,
+        image_size=config.image_size,
+        device=device,
+        torch_device_payload=training_log.torch_device_payload(torch, device),
     )
 
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
         step_started_at = time.monotonic()
-        final_loss, step_timing = _train_step(
+        loss, step_timing = _train_step(
             batches[step % len(batches)],
             model=model,
             optimizer=optimizer,
             torch=torch,
             model_config=model_config,
             device=device,
-            generator=generator,
-            device_generator=device_generator,
+            crop_generator=crop_generator,
+            random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
-            timestep_uniform_mix_probability=config.timestep_uniform_mix_probability,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
-        loss_record = {
-            "step": step_number,
-            "loss": final_loss,
-            "step_seconds": step_seconds,
-            "step_images_per_second": (
-                config.batch_size / step_seconds if step_seconds > 0.0 else 0.0
-            ),
-        }
-        loss_record.update(step_timing)
-        losses.append(loss_record)
+        should_log = (
+            step_number == 1 or step_number == config.steps or step_number % config.log_every == 0
+        )
+        should_write_artifacts = (
+            config.save_every > 0 and step_number % config.save_every == 0
+        ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
+        loss_record = None
+        if should_log or should_write_artifacts or step_timing:
+            final_loss = training_log.loss_scalar(loss)
+            loss_record = training_log.loss_record(
+                step=step_number,
+                loss=final_loss,
+                step_seconds=step_seconds,
+                batch_size=config.batch_size,
+                step_timing=step_timing,
+            )
+            losses.append(loss_record)
 
         if (
             validation_batches
@@ -261,56 +265,51 @@ def run_training(
                 preloaded_samples=preloaded_samples,
             )
             validation_losses.append({"step": step_number, "loss": validation_loss})
-            print(
-                json.dumps(
-                    {
-                        "event": "validation_progress",
-                        "step": step_number,
-                        "steps": config.steps,
-                        "loss": validation_loss,
-                        **_run_timing_payload(
-                            started_at_epoch_utc=started_at_epoch_utc,
-                            started_at_monotonic=started_at_monotonic,
-                            start_step=start_step,
-                            step=step_number,
-                            steps=config.steps,
-                            batch_size=config.batch_size,
-                        ),
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
+            training_log.print_validation_progress(
+                started_at_epoch_utc=started_at_epoch_utc,
+                started_at_monotonic=started_at_monotonic,
+                start_step=start_step,
+                step=step_number,
+                steps=config.steps,
+                batch_size=config.batch_size,
+                loss=validation_loss,
             )
 
-        if step_number == 1 or step_number == config.steps or step_number % config.log_every == 0:
-            print(
-                json.dumps(
-                    {
-                        "event": "train_progress",
-                        "step": step_number,
-                        "steps": config.steps,
-                        "loss": final_loss,
-                        "step_seconds": loss_record["step_seconds"],
-                        "step_images_per_second": loss_record["step_images_per_second"],
-                        **step_timing,
-                        **_run_timing_payload(
-                            started_at_epoch_utc=started_at_epoch_utc,
-                            started_at_monotonic=started_at_monotonic,
-                            start_step=start_step,
-                            step=step_number,
-                            steps=config.steps,
-                            batch_size=config.batch_size,
-                        ),
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
+        if should_log:
+            if loss_record is None:
+                final_loss = training_log.loss_scalar(loss)
+                loss_record = training_log.loss_record(
+                    step=step_number,
+                    loss=final_loss,
+                    step_seconds=step_seconds,
+                    batch_size=config.batch_size,
+                    step_timing=step_timing,
+                )
+                losses.append(loss_record)
+            training_log.print_train_progress(
+                started_at_epoch_utc=started_at_epoch_utc,
+                started_at_monotonic=started_at_monotonic,
+                start_step=start_step,
+                step=step_number,
+                steps=config.steps,
+                batch_size=config.batch_size,
+                loss=final_loss,
+                loss_record=loss_record,
+                step_timing=step_timing,
             )
 
-        if (config.save_every > 0 and step_number % config.save_every == 0) or (
-            config.plot_every > 0 and step_number % config.plot_every == 0
-        ):
-            _write_training_artifacts(
+        if should_write_artifacts:
+            if loss_record is None:
+                final_loss = training_log.loss_scalar(loss)
+                loss_record = training_log.loss_record(
+                    step=step_number,
+                    loss=final_loss,
+                    step_seconds=step_seconds,
+                    batch_size=config.batch_size,
+                    step_timing=step_timing,
+                )
+                losses.append(loss_record)
+            training_log.write_training_artifacts(
                 checkpoint_path.with_name(
                     f"{checkpoint_path.stem}-step-{step_number}{checkpoint_path.suffix}"
                 ),
@@ -318,8 +317,8 @@ def run_training(
                 loss_plot_path,
                 model=model,
                 optimizer=optimizer,
-                generator=generator,
-                device_generator=device_generator,
+                generator=crop_generator,
+                device_generator=random_generator,
                 model_config=model_config,
                 config=config,
                 model_parameters=model_parameters,
@@ -327,7 +326,7 @@ def run_training(
                 validation_losses=validation_losses,
                 final_loss=final_loss,
                 step=step_number,
-                run_timing=_run_timing_payload(
+                run_timing=training_log.run_timing_payload(
                     started_at_epoch_utc=started_at_epoch_utc,
                     started_at_monotonic=started_at_monotonic,
                     start_step=start_step,
@@ -343,14 +342,14 @@ def run_training(
     final_step = max(start_step, config.steps)
     if not losses and config.resume_from:
         losses.append({"step": final_step, "loss": final_loss})
-    _write_training_artifacts(
+    training_log.write_training_artifacts(
         checkpoint_path,
         metrics_path,
         loss_plot_path,
         model=model,
         optimizer=optimizer,
-        generator=generator,
-        device_generator=device_generator,
+        generator=crop_generator,
+        device_generator=random_generator,
         model_config=model_config,
         config=config,
         model_parameters=model_parameters,
@@ -358,7 +357,7 @@ def run_training(
         validation_losses=validation_losses,
         final_loss=final_loss,
         step=final_step,
-        run_timing=_run_timing_payload(
+        run_timing=training_log.run_timing_payload(
             started_at_epoch_utc=started_at_epoch_utc,
             started_at_monotonic=started_at_monotonic,
             start_step=start_step,
@@ -382,89 +381,13 @@ def run_training(
     )
 
 
-def _run_timing_payload(
-    *,
-    started_at_epoch_utc: float,
-    started_at_monotonic: float,
-    start_step: int,
-    step: int,
-    steps: int,
-    batch_size: int,
-    now_epoch_utc: float | None = None,
-    now_monotonic: float | None = None,
-) -> dict[str, float | int | None]:
-    now_epoch_utc = time.time() if now_epoch_utc is None else now_epoch_utc
-    now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
-    elapsed_seconds = max(0.0, now_monotonic - started_at_monotonic)
-    completed_steps_this_run = max(0, step - start_step)
-    remaining_steps = max(0, steps - step)
-    completed_images_this_run = completed_steps_this_run * batch_size
-    remaining_images = remaining_steps * batch_size
-    steps_per_second = (
-        completed_steps_this_run / elapsed_seconds
-        if elapsed_seconds > 0.0 and completed_steps_this_run > 0
-        else 0.0
-    )
-    estimated_remaining_seconds = (
-        remaining_steps / steps_per_second if steps_per_second > 0.0 else None
-    )
-    return {
-        "started_at_epoch_utc": started_at_epoch_utc,
-        "logged_at_epoch_utc": now_epoch_utc,
-        "elapsed_seconds": elapsed_seconds,
-        "completed_steps_this_run": completed_steps_this_run,
-        "completed_images_this_run": completed_images_this_run,
-        "remaining_steps": remaining_steps,
-        "remaining_images": remaining_images,
-        "progress_fraction": step / steps if steps > 0 else 0.0,
-        "steps_per_second": steps_per_second,
-        "images_per_second": steps_per_second * batch_size,
-        "estimated_remaining_seconds": estimated_remaining_seconds,
-        "estimated_total_seconds": (
-            elapsed_seconds + estimated_remaining_seconds
-            if estimated_remaining_seconds is not None
-            else None
-        ),
-        "estimated_finish_epoch_utc": (
-            now_epoch_utc + estimated_remaining_seconds
-            if estimated_remaining_seconds is not None
-            else None
-        ),
-    }
-
-
-def _torch_device_payload(torch: Any, device: Any) -> dict[str, int | str | None]:
-    if getattr(device, "type", str(device)) != "cuda":
-        return {
-            "torch_cuda_device_count": 0,
-            "torch_device_name": None,
-        }
-    cuda = getattr(torch, "cuda", None)
-    if cuda is None or not cuda.is_available():
-        return {
-            "torch_cuda_device_count": 0,
-            "torch_device_name": None,
-        }
-    return {
-        "torch_cuda_device_count": int(cuda.device_count()),
-        "torch_device_name": str(cuda.get_device_name(device)),
-    }
-
-
-def _make_device_random_generator(
-    config: TrainingConfig,
-    *,
-    torch: Any,
-    device: Any,
-) -> Any | None:
-    if not config.device_random:
-        return None
-    device_type = getattr(device, "type", str(device))
-    if device_type == "cpu":
-        return None
-    if device_type != "cuda":
-        raise ValueError("device_random supports cpu and cuda devices")
-    return torch.Generator(device=device).manual_seed(config.seed)
+def _training_device(config: TrainingConfig, *, torch: Any) -> Any:
+    device = torch.device(config.device)
+    if device.type != "cuda":
+        raise ValueError("training requires a CUDA device")
+    if not torch.cuda.is_available():
+        raise RuntimeError("training requires a CUDA-capable GPU")
+    return device
 
 
 def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool:
@@ -475,27 +398,16 @@ def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool
     )
 
 
-def _timestep_sampling_name(config: TrainingConfig) -> str:
-    if config.timestep_uniform_mix_probability > 0.0:
-        return TIMESTEP_MIXED_SAMPLING
-    return TIMESTEP_SAMPLING
-
-
-def _autocast_context(torch: Any, device: Any, precision: str) -> Any:
+def _autocast_context(torch: Any, precision: str) -> Any:
     if precision == "float32":
         return nullcontext()
-    device_type = getattr(device, "type", str(device))
-    if device_type not in {"cuda", "cpu"}:
-        raise ValueError("bf16 precision supports cpu and cuda devices")
-    return torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 
 
 def _synchronize_device(torch: Any, device: Any, enabled: bool) -> None:
-    if not enabled or getattr(device, "type", str(device)) != "cuda":
+    if not enabled:
         return
-    cuda = getattr(torch, "cuda", None)
-    if cuda is not None and cuda.is_available():
-        cuda.synchronize(device)
+    torch.cuda.synchronize(device)
 
 
 def _sample_flow_timesteps(
@@ -504,22 +416,16 @@ def _sample_flow_timesteps(
     torch: Any,
     generator: Any,
     device: Any,
-    random_device: Any = "cpu",
-    uniform_mix_probability: float = 0.0,
 ) -> Any:
-    if uniform_mix_probability >= 1.0:
-        return torch.rand(batch_size, generator=generator, device=random_device).to(device)
-
-    logits = torch.randn(batch_size, generator=generator, device=random_device)
+    logits = torch.randn(batch_size, generator=generator, device=device)
     logits = logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    timestep = torch.sigmoid(logits)
-    if uniform_mix_probability <= 0.0:
-        return timestep.to(device)
-
-    uniform_timestep = torch.rand(batch_size, generator=generator, device=random_device)
-    use_uniform = torch.rand(batch_size, generator=generator, device=random_device)
-    return torch.where(use_uniform < uniform_mix_probability, uniform_timestep, timestep).to(
-        device
+    logit_normal = torch.sigmoid(logits)
+    uniform_timestep = torch.rand(batch_size, generator=generator, device=device)
+    use_uniform = torch.rand(batch_size, generator=generator, device=device)
+    return torch.where(
+        use_uniform < TIMESTEP_UNIFORM_MIX_PROBABILITY,
+        uniform_timestep,
+        logit_normal,
     )
 
 
@@ -531,14 +437,13 @@ def _train_step(
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-    generator: Any,
-    device_generator: Any | None,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
+    crop_generator: Any,
+    random_generator: Any,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
-    timestep_uniform_mix_probability: float,
     precision: str,
     profile_timing: bool,
-) -> tuple[float, dict[str, float | int]]:
+) -> tuple[Any, dict[str, float | int]]:
     timing: dict[str, float | int] = {}
 
     _synchronize_device(torch, device, profile_timing)
@@ -548,7 +453,7 @@ def _train_step(
             sample,
             crop_size=model_config.image_size,
             torch=torch,
-            generator=generator,
+            generator=crop_generator,
             preloaded_samples=preloaded_samples,
         )
         for sample in samples
@@ -570,18 +475,13 @@ def _train_step(
     if profile_timing:
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
 
-    random_generator = device_generator if device_generator is not None else generator
-    random_device = device if device_generator is not None else "cpu"
-
     random_started_at = time.monotonic()
-    noise = torch.randn(clean.shape, generator=random_generator, device=random_device).to(device)
+    noise = torch.randn(clean.shape, generator=random_generator, device=device)
     timestep = _sample_flow_timesteps(
         clean.shape[0],
         torch=torch,
         generator=random_generator,
         device=device,
-        random_device=random_device,
-        uniform_mix_probability=timestep_uniform_mix_probability,
     )
     noisy = interpolate_flow_sample(clean, noise, timestep)
     target = flow_velocity(clean, noise)
@@ -590,8 +490,8 @@ def _train_step(
         keep_mask = torch.rand(
             (semantic_mask.shape[0],),
             generator=random_generator,
-            device=random_device,
-        ).to(device)
+            device=device,
+        )
         keep_mask = (keep_mask >= mask_drop_probability).float().view(-1, 1, 1, 1)
         semantic_mask = semantic_mask * keep_mask
     _synchronize_device(torch, device, profile_timing)
@@ -600,7 +500,7 @@ def _train_step(
 
     compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
-    with _autocast_context(torch, device, precision):
+    with _autocast_context(torch, precision):
         prediction = model(noisy, semantic_mask, timestep)
     loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
     loss.backward()
@@ -609,179 +509,7 @@ def _train_step(
     if profile_timing:
         timing["train_compute_seconds"] = max(0.0, time.monotonic() - compute_started_at)
         timing["timing_sampled"] = 1
-    return float(loss.detach().cpu().item()), timing
-
-
-def _write_training_metrics(
-    path: Path,
-    *,
-    model_config: ModelConfig,
-    config: TrainingConfig,
-    model_parameters: int,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
-    final_loss: float,
-    step: int,
-    run_timing: Mapping[str, float | int | None],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "model_config": asdict(model_config),
-                "training_config": asdict(config),
-                "model_parameters": model_parameters,
-                "step": step,
-                "final_loss": final_loss,
-                "run_timing": dict(run_timing),
-                "losses": losses,
-                "validation_losses": validation_losses,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def _write_loss_plot(
-    path: Path,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    import matplotlib
-
-    matplotlib.use("Agg")
-    from matplotlib import pyplot
-
-    steps = [int(item["step"]) for item in losses]
-    values = [float(item["loss"]) for item in losses]
-    smoothed = _exponential_moving_average(values, decay=0.95)
-
-    figure, axis = pyplot.subplots(figsize=(8, 4.5), dpi=140)
-    if steps:
-        axis.plot(steps, values, color="#94a3b8", linewidth=1.0, alpha=0.55, label="train step")
-        axis.plot(steps, smoothed, color="#0f766e", linewidth=2.0, label="train EMA 0.95")
-    if validation_losses:
-        validation_steps = [int(item["step"]) for item in validation_losses]
-        validation_values = [float(item["loss"]) for item in validation_losses]
-        axis.plot(
-            validation_steps,
-            validation_values,
-            color="#dc2626",
-            marker="o",
-            markersize=3,
-            linewidth=1.5,
-            label="validation",
-        )
-    axis.set_title("Training Loss")
-    axis.set_xlabel("Step")
-    axis.set_ylabel("MSE")
-    axis.grid(True, alpha=0.25)
-    axis.legend()
-    figure.tight_layout()
-    figure.savefig(path)
-    pyplot.close(figure)
-
-
-def _exponential_moving_average(values: list[float], *, decay: float) -> list[float]:
-    if not values:
-        return []
-    average = values[0]
-    smoothed = []
-    for value in values:
-        average = decay * average + (1.0 - decay) * value
-        smoothed.append(average)
-    return smoothed
-
-
-def _write_training_artifacts(
-    checkpoint_path: Path,
-    metrics_path: Path,
-    loss_plot_path: Path,
-    *,
-    model: Any,
-    optimizer: Any,
-    generator: Any,
-    device_generator: Any | None,
-    model_config: ModelConfig,
-    config: TrainingConfig,
-    model_parameters: int,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
-    final_loss: float,
-    step: int,
-    run_timing: Mapping[str, float | int | None],
-    torch: Any,
-) -> None:
-    _write_training_metrics(
-        metrics_path,
-        model_config=model_config,
-        config=config,
-        model_parameters=model_parameters,
-        losses=losses,
-        validation_losses=validation_losses,
-        final_loss=final_loss,
-        step=step,
-        run_timing=run_timing,
-    )
-    _write_loss_plot(loss_plot_path, losses, validation_losses)
-    _write_training_checkpoint(
-        checkpoint_path,
-        model=model,
-        optimizer=optimizer,
-        generator=generator,
-        device_generator=device_generator,
-        model_config=model_config,
-        config=config,
-        losses=losses,
-        validation_losses=validation_losses,
-        final_loss=final_loss,
-        step=step,
-        metrics_path=metrics_path,
-        loss_plot_path=loss_plot_path,
-        torch=torch,
-    )
-
-
-def _write_training_checkpoint(
-    path: Path,
-    *,
-    model: Any,
-    optimizer: Any,
-    generator: Any,
-    device_generator: Any | None,
-    model_config: ModelConfig,
-    config: TrainingConfig,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
-    final_loss: float,
-    step: int,
-    metrics_path: Path,
-    loss_plot_path: Path,
-    torch: Any,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "generator_state": generator.get_state(),
-            "device_generator_state": (
-                device_generator.get_state() if device_generator is not None else None
-            ),
-            "model_config": asdict(model_config),
-            "training_config": asdict(config),
-            "step": step,
-            "losses": losses,
-            "validation_losses": validation_losses,
-            "final_loss": final_loss,
-            "metrics_path": str(metrics_path),
-            "loss_plot_path": str(loss_plot_path),
-        },
-        path,
-    )
+    return loss.detach(), timing
 
 
 def _load_training_state(
@@ -888,15 +616,12 @@ def _evaluate_validation_loss(
     model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreloadedSample],
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> float:
     was_training = model.training
     model.eval()
-    random_device = (
-        device if config.device_random and getattr(device, "type", str(device)) == "cuda" else "cpu"
-    )
-    generator = torch.Generator(device=random_device).manual_seed(config.seed + 10_000)
-    losses: list[float] = []
+    generator = torch.Generator(device=device).manual_seed(config.seed + 10_000)
+    losses: list[Any] = []
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
             crop_boxes = [
@@ -915,25 +640,23 @@ def _evaluate_validation_loss(
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
-            noise = torch.randn(clean.shape, generator=generator, device=random_device).to(device)
+            noise = torch.randn(clean.shape, generator=generator, device=device)
             timestep = _sample_flow_timesteps(
                 clean.shape[0],
                 torch=torch,
                 generator=generator,
                 device=device,
-                random_device=random_device,
-                uniform_mix_probability=config.timestep_uniform_mix_probability,
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
-            with _autocast_context(torch, device, config.precision):
+            with _autocast_context(torch, config.precision):
                 prediction = model(noisy, semantic_mask, timestep)
             loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
-            losses.append(float(loss.cpu().item()))
+            losses.append(loss.detach())
 
     if was_training:
         model.train()
-    return sum(losses) / len(losses)
+    return training_log.loss_scalar(torch.stack(losses).mean())
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

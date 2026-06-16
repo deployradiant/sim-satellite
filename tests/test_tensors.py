@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
+import torch
 from PIL import Image
 
-from sim_satellite.data.tensors import mask_to_class_ids
+from sim_satellite.data.tensors import image_to_uint8_tensor, mask_to_class_ids, mask_to_tensor
 from sim_satellite.model import ModelConfig
 
 OPENEARTHMAP_CLASSES = (
@@ -74,6 +75,31 @@ def test_grayscale_mask_decodes_class_ids_without_clamping() -> None:
     class_ids = mask_to_class_ids(mask, ModelConfig(mask_channels=9))
 
     assert class_ids == [0, 8]
+
+
+def test_image_to_uint8_tensor_uses_rgb_byte_values() -> None:
+    image = Image.new("RGB", (8, 8), (0, 0, 0))
+    image.putpixel((0, 0), (0, 127, 255))
+    image.putpixel((1, 0), (255, 0, 127))
+
+    tensor = image_to_uint8_tensor(image, torch=torch)
+
+    assert tensor.shape == (8, 8, 3)
+    assert torch.allclose(
+        tensor[0, 0],
+        torch.tensor([0, 127, 255], dtype=torch.uint8),
+    )
+    assert torch.allclose(
+        tensor[0, 1],
+        torch.tensor([255, 0, 127], dtype=torch.uint8),
+    )
+
+
+def test_grayscale_mask_to_tensor_rejects_class_id_outside_mask_channels() -> None:
+    mask = Image.new("L", (1, 1), 9)
+
+    with pytest.raises(ValueError, match="class id 9"):
+        mask_to_tensor(mask, torch=torch, config=ModelConfig(mask_channels=9))
 
 
 def test_grayscale_mask_rejects_class_id_outside_mask_channels() -> None:

@@ -17,6 +17,7 @@ from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
+DEFAULT_INFERENCE_STEPS = 16
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class InferenceConfig:
     split: str = "train"
     mask_path: str | None = None
     device: str = "cpu"
-    steps: int = 8
+    steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
 
     def __post_init__(self) -> None:
@@ -54,7 +55,7 @@ class InferenceConfig:
 class GenerationConfig:
     seed: int = 2026
     mask_path: str = ""
-    steps: int = 8
+    steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
 
     def __post_init__(self) -> None:
@@ -175,10 +176,13 @@ def generate_image_with_model(
     )
 
     with torch.no_grad():
-        for completed_steps, step in enumerate(reversed(range(1, config.steps + 1)), start=1):
+        for completed_steps, (timestep_value, step_size) in enumerate(
+            _flow_inference_schedule(config.steps),
+            start=1,
+        ):
             timestep = torch.full(
                 (1,),
-                step / float(config.steps),
+                timestep_value,
                 dtype=torch.float32,
                 device=device,
             )
@@ -190,10 +194,10 @@ def generate_image_with_model(
                 guidance_scale=config.guidance_scale,
                 torch=torch,
             )
-            image = image - velocity / float(config.steps)
+            image = image - velocity * step_size
             if progress is not None:
                 progress(completed_steps, config.steps)
-        image = image.clamp(0.0, 1.0)
+        image = (image.clamp(-1.0, 1.0) + 1.0) / 2.0
 
     return GenerationResult(
         image=image,
@@ -201,6 +205,14 @@ def generate_image_with_model(
         model_config=model_config,
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
+    )
+
+
+def _flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
+    step_size = 1.0 / float(steps)
+    return tuple(
+        ((step - 0.5) * step_size, step_size)
+        for step in reversed(range(1, steps + 1))
     )
 
 

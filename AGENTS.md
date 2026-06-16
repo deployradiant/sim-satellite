@@ -12,6 +12,33 @@ See README.md for architecture.
 - Track source, symbol, interval, and fetch time for market data.
 - Never commit API keys, exchange secrets, wallet keys, or credentials.
 
+## Subagent Workflow
+
+- Subagents must always work in their own git worktree, not in the main local
+  checkout.
+- Use subagents for isolated investigation, experiments, and code changes only
+  when their worktree can absorb the mess. Merge or copy back only the specific
+  changes that have been reviewed.
+- Do not let subagents write into the shared checkout unless the user explicitly
+  requests that exception for a read-only or non-mutating task.
+
+## Dataset Workflow
+
+- Keep the full OpenEarthMap download, extraction, and prepared tensor data under
+  `data/openearthmap/` locally when disk space allows. This directory is
+  generated state and must not be committed.
+- Modal training should download, extract, and prepare OpenEarthMap on the remote
+  box's local `/data/openearthmap` scratch disk. Do not upload the full dataset
+  or prepared tensor tree into a shared Modal data volume for standard runs.
+- Keep local preparation useful for inspection and local debugging with
+  `uv run sim-satellite openearthmap`, but do not require the local checkout to
+  contain the full dataset before starting Modal training.
+- Reuse prepared tensors between runs when the preparation code, class mapping,
+  image size assumptions, and tensor format have not changed. Use
+  `--force-prepared` after changing those assumptions.
+- Training should require prepared data manifests and fail clearly when prepared
+  data is unavailable, instead of falling back to raw local PIL/image paths.
+
 ## Code Quality Review
 
 Use the `thermo-nuclear-code-quality-review` skill as the guide for strict maintainability review.
@@ -31,6 +58,8 @@ Use the `thermo-nuclear-code-quality-review` skill as the guide for strict maint
   is online and what remains to update.
 - If Modal cannot be updated from the current environment, report the blocker
   and provide the next command to run.
+- Future parallel Modal experiments should set a unique
+  `SIM_SATELLITE_MODAL_APP_NAME` to avoid web endpoint label collisions.
 
 ## Git Workflow
 

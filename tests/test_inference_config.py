@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.infer import InferenceConfig, InferenceResult
+from sim_satellite.infer import GenerationConfig, InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
 
@@ -30,7 +30,8 @@ def test_cli_target_resolves_default_manifest_mask(
     mask_path = tmp_path / "mask.png"
     mask_path.write_bytes(b"mask")
     manifest_path.write_text(
-        '{"image": "image.png", "mask": "mask.png", "split": "train"}\n',
+        '{"image": "image.png", "mask": "mask.png", '
+        '"prepared": "prepared/sample.pt", "split": "train"}\n',
         encoding="utf-8",
     )
     received: dict[str, InferenceConfig] = {}

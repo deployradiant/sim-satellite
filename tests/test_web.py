@@ -8,11 +8,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import torch
 from PIL import Image
 
 from sim_satellite import web
+from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
+from sim_satellite.data.prepared import write_prepared_sample
 from sim_satellite.infer import GenerationConfig
+from sim_satellite.model import ModelConfig
 
 
 def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,8 +401,35 @@ def test_web_create_app_rejects_missing_mask(tmp_path: Path) -> None:
     config, mask_path = _write_web_fixture(tmp_path)
     mask_path.unlink()
 
-    with pytest.raises(FileNotFoundError, match="mask not found"):
+    with pytest.raises(FileNotFoundError, match="sample data not found"):
         web.create_app(config)
+
+
+def test_web_uses_prepared_data_when_raw_files_are_not_mounted(tmp_path: Path) -> None:
+    config, mask_path = _write_web_fixture(tmp_path)
+    data_dir = Path(config.manifest_path).parent
+    image_path = data_dir / "images" / "tile.png"
+    prepared_path = data_dir / "prepared" / "tile.pt"
+    write_prepared_sample(
+        SatelliteSample(
+            image_path=image_path,
+            mask_path=mask_path,
+            prepared_path=prepared_path,
+            split="train",
+        ),
+        torch=torch,
+        config=ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),
+    )
+    image_path.unlink()
+    mask_path.unlink()
+
+    app = web.create_app(config)
+
+    mask = _request(app, "GET", "/api/mask", query_string="index=0")
+    image = _request(app, "GET", "/api/image", query_string="index=0")
+
+    assert mask.status_code == 200
+    assert image.status_code == 200
 
 
 def _write_web_fixture(tmp_path: Path) -> tuple[web.WebConfig, Path]:
@@ -417,6 +448,7 @@ def _write_web_fixture(tmp_path: Path) -> tuple[web.WebConfig, Path]:
             {
                 "image": "images/tile.png",
                 "mask": "labels/tile.png",
+                "prepared": "prepared/tile.pt",
                 "split": "train",
                 "source": "openearthmap",
             }

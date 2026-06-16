@@ -11,6 +11,8 @@ from torch import nn
 
 CHANNEL_MULTIPLIERS = (1, 2, 4, 4)
 BLOCKS_PER_LEVEL = 2
+DEEP_ATTENTION_DOWNSAMPLE_FACTOR = 4
+MAX_FULL_ATTENTION_TOKENS = 4096
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,12 @@ def build_model(config: ModelConfig | None = None) -> Any:
         raise ValueError("unet architecture requires image_size of at least 32")
     if config.image_size % 8 != 0:
         raise ValueError("unet architecture requires image_size divisible by 8")
+    deep_attention_size = config.image_size // DEEP_ATTENTION_DOWNSAMPLE_FACTOR
+    if deep_attention_size * deep_attention_size > MAX_FULL_ATTENTION_TOKENS:
+        raise ValueError(
+            f"unet architecture limits deep full attention to {MAX_FULL_ATTENTION_TOKENS} "
+            "tokens to avoid attention OOM"
+        )
     return ConditionalUNet(config)
 
 
@@ -94,12 +102,7 @@ class ConditionedResBlock(nn.Module):
 
     def forward(self, x: Any, time_embedding: Any, semantic_mask: Any) -> Any:
         h = self.conv1(self.activation(self.norm1(x)))
-        resized_mask = torch.nn.functional.interpolate(
-            semantic_mask,
-            size=h.shape[-2:],
-            mode="nearest",
-        )
-        h = h + self.mask_projection(resized_mask)
+        h = h + self.mask_projection(semantic_mask)
         time_scale, time_shift = self.time_projection(time_embedding)[:, :, None, None].chunk(
             2,
             dim=1,
@@ -227,12 +230,17 @@ class ConditionalUNet(nn.Module):
 
     def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
         time_embedding = self.time_embedding(timestep)
+        mask_pyramid = {(semantic_mask.shape[-2], semantic_mask.shape[-1]): semantic_mask}
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
         skips: list[Any] = [h]
 
         for level_index, level_blocks in enumerate(self.down_blocks):
             for block in level_blocks:
-                h = block(h, time_embedding, semantic_mask)
+                h = block(
+                    h,
+                    time_embedding,
+                    _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+                )
                 skips.append(h)
             if level_index == self.deep_attention_level_index:
                 h = self.deep_down_attention(h)
@@ -241,14 +249,26 @@ class ConditionalUNet(nn.Module):
                 h = self.downsamples[level_index](h)
                 skips.append(h)
 
-        h = self.mid_block1(h, time_embedding, semantic_mask)
+        h = self.mid_block1(
+            h,
+            time_embedding,
+            _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+        )
         h = self.mid_attention(h)
-        h = self.mid_block2(h, time_embedding, semantic_mask)
+        h = self.mid_block2(
+            h,
+            time_embedding,
+            _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+        )
 
         for level_index, level_blocks in enumerate(self.up_blocks):
             for block in level_blocks:
                 h = torch.cat([h, skips.pop()], dim=1)
-                h = block(h, time_embedding, semantic_mask)
+                h = block(
+                    h,
+                    time_embedding,
+                    _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+                )
             if level_index < len(self.upsamples):
                 h = torch.nn.functional.interpolate(h, scale_factor=2, mode="nearest")
                 h = self.upsamples[level_index](h)
@@ -270,6 +290,20 @@ def _attention_head_count(channels: int) -> int:
         if channels % heads == 0:
             return heads
     return 1
+
+
+def _semantic_mask_at(
+    semantic_mask: Any,
+    size: tuple[int, int],
+    mask_pyramid: dict[tuple[int, int], Any],
+) -> Any:
+    if size not in mask_pyramid:
+        mask_pyramid[size] = torch.nn.functional.interpolate(
+            semantic_mask,
+            size=size,
+            mode="area",
+        )
+    return mask_pyramid[size]
 
 
 def interpolate_flow_sample(clean_image: Any, noise: Any, timestep: Any) -> Any:

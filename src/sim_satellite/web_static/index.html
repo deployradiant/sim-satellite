@@ -64,7 +64,7 @@
     }
     .controls {
       display: grid;
-      grid-template-columns: minmax(180px, 300px) repeat(2, minmax(74px, 88px)) auto auto;
+      grid-template-columns: minmax(180px, 300px) repeat(2, minmax(74px, 88px)) auto;
       gap: 10px;
       align-items: end;
       justify-content: end;
@@ -150,6 +150,16 @@
     }
     button.icon-button:hover {
       border-color: var(--accent);
+      background: var(--panel-strong);
+      color: var(--ink);
+    }
+    button.legend-toggle {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+    button.legend-toggle:hover {
+      border-color: transparent;
       background: var(--panel-strong);
       color: var(--ink);
     }
@@ -241,6 +251,14 @@
       min-width: 0;
       display: grid;
       gap: 10px;
+    }
+    .viewer-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+      min-height: 38px;
     }
     .ground-truth {
       display: grid;
@@ -540,10 +558,6 @@
           <input id="steps" type="number" min="1" step="1">
         </label>
         <button id="generate" type="button">Generate</button>
-        <button id="draw-mode" class="switch-toggle" type="button" aria-pressed="false">
-          <span class="switch-track" aria-hidden="true"></span>
-          <span>Draw</span>
-        </button>
       </div>
     </header>
     <div class="progress" id="progress" hidden>
@@ -578,7 +592,13 @@
         <div id="classes" class="class-list"></div>
       </aside>
       <section class="viewer">
-        <h2>Condition mask</h2>
+        <div class="viewer-heading">
+          <h2>Condition mask</h2>
+          <button id="draw-mode" class="switch-toggle" type="button" aria-pressed="false">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span>Draw</span>
+          </button>
+        </div>
         <div class="frame"><canvas id="mask" aria-label="Condition mask"></canvas></div>
         <div class="ground-truth" id="ground-truth-panel">
           <h2>Ground truth image</h2>

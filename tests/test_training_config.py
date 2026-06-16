@@ -9,17 +9,20 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
+from sim_satellite import training_log
 from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
+    TIMESTEP_UNIFORM_MIX_PROBABILITY,
     TrainingConfig,
+    _autocast_context,
     _load_training_samples,
     _load_validation_batches,
-    _run_timing_payload,
     _sample_flow_timesteps,
+    _training_device,
 )
-from sim_satellite.training_data import random_square_crop_box
+from sim_satellite.training_data import preload_samples, random_square_crop_box
 
 
 def test_training_cli_loads_json_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -66,6 +69,10 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
+def test_training_config_defaults_to_cuda() -> None:
+    assert TrainingConfig().device == "cuda"
+
+
 def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(steps=0)
@@ -84,19 +91,33 @@ def test_training_config_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         TrainingConfig(precision="fp16")
     with pytest.raises(ValueError):
-        TrainingConfig(device_random="yes")  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        TrainingConfig(preload_samples="yes")  # type: ignore[arg-type]
+        TrainingConfig(device="mps")
     with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(timestep_uniform_mix_probability=-0.1)
-    with pytest.raises(ValueError):
-        TrainingConfig(timestep_uniform_mix_probability=1.1)
+
+
+def test_training_device_requires_available_cuda() -> None:
+    with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
+        _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
+
+
+def test_training_device_accepts_available_cuda() -> None:
+    device = _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=True))
+
+    assert str(device) == "cuda"
+
+
+def test_bf16_autocast_is_cuda_only() -> None:
+    fake_torch = _FakeTorch(cuda_available=True)
+
+    context = _autocast_context(fake_torch, "bf16")
+
+    assert context == "autocast-context"
+    assert fake_torch.autocast_calls == [("cuda", fake_torch.bfloat16)]
 
 
 def test_run_timing_payload_estimates_remaining_runtime() -> None:
-    payload = _run_timing_payload(
+    payload = training_log.run_timing_payload(
         started_at_epoch_utc=1_000.0,
         started_at_monotonic=10.0,
         start_step=100,
@@ -119,26 +140,7 @@ def test_run_timing_payload_estimates_remaining_runtime() -> None:
     assert payload["estimated_finish_epoch_utc"] == 1_100.0
 
 
-def test_flow_timesteps_use_logit_normal_sampling_by_default() -> None:
-    actual_generator = torch.Generator(device="cpu").manual_seed(123)
-    expected_generator = torch.Generator(device="cpu").manual_seed(123)
-
-    actual = _sample_flow_timesteps(
-        8,
-        torch=torch,
-        generator=actual_generator,
-        device=torch.device("cpu"),
-        uniform_mix_probability=0.0,
-    )
-    logits = torch.randn(8, generator=expected_generator, device="cpu")
-    expected = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
-
-    assert torch.allclose(actual, expected)
-    assert torch.all(actual > 0.0)
-    assert torch.all(actual < 1.0)
-
-
-def test_flow_timesteps_use_seeded_uniform_logit_mixture() -> None:
+def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     actual_generator = torch.Generator(device="cpu").manual_seed(321)
     expected_generator = torch.Generator(device="cpu").manual_seed(321)
 
@@ -147,14 +149,16 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture() -> None:
         torch=torch,
         generator=actual_generator,
         device=torch.device("cpu"),
-        uniform_mix_probability=0.5,
     )
     logits = torch.randn(16, generator=expected_generator, device="cpu")
     logit_normal = torch.sigmoid(
         logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
     )
     uniform = torch.rand(16, generator=expected_generator, device="cpu")
-    use_uniform = torch.rand(16, generator=expected_generator, device="cpu") < 0.5
+    use_uniform = (
+        torch.rand(16, generator=expected_generator, device="cpu")
+        < TIMESTEP_UNIFORM_MIX_PROBABILITY
+    )
     expected = torch.where(use_uniform, uniform, logit_normal)
 
     assert torch.allclose(actual, expected)
@@ -168,19 +172,15 @@ def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     logit_generator = torch.Generator(device="cpu").manual_seed(456)
     mixed_generator = torch.Generator(device="cpu").manual_seed(456)
 
-    logit_normal = _sample_flow_timesteps(
-        4096,
-        torch=torch,
-        generator=logit_generator,
-        device=torch.device("cpu"),
-        uniform_mix_probability=0.0,
+    logits = torch.randn(4096, generator=logit_generator, device="cpu")
+    logit_normal = torch.sigmoid(
+        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
     )
     mixed = _sample_flow_timesteps(
         4096,
         torch=torch,
         generator=mixed_generator,
         device=torch.device("cpu"),
-        uniform_mix_probability=0.5,
     )
 
     logit_tail_mass = ((logit_normal < 0.1) | (logit_normal > 0.9)).float().mean()
@@ -198,12 +198,15 @@ def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) 
             [
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
+                '"prepared": "prepared/maputo/c.pt", '
                 '"split": "train"}',
             ]
         )
@@ -228,9 +231,11 @@ def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
             [
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
                 '"split": "train"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
                 '"split": "train"}',
             ]
         )
@@ -254,7 +259,8 @@ def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
 def test_validation_requires_split_or_holdout_patterns(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     manifest_path.write_text(
-        '{"image": "images/a.tif", "mask": "labels/a.tif", "split": "train"}\n',
+        '{"image": "images/a.tif", "mask": "labels/a.tif", '
+        '"prepared": "prepared/a.pt", "split": "train"}\n',
         encoding="utf-8",
     )
 
@@ -269,23 +275,56 @@ def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> 
 
     image_path = tmp_path / "image.png"
     mask_path = tmp_path / "mask.png"
+    prepared_path = tmp_path / "prepared.pt"
     Image.new("RGB", (10, 8)).save(image_path)
     Image.new("L", (10, 8)).save(mask_path)
-    sample = SatelliteSample(image_path=image_path, mask_path=mask_path, split="train")
+    torch.save(
+        {
+            "version": 1,
+            "image": torch.zeros(8, 10, 3, dtype=torch.uint8),
+            "mask": torch.zeros(8, 10, dtype=torch.uint8),
+            "size": (10, 8),
+        },
+        prepared_path,
+    )
+    sample = SatelliteSample(
+        image_path=image_path,
+        mask_path=mask_path,
+        prepared_path=prepared_path,
+        split="train",
+    )
+    preloaded = preload_samples((sample,))
 
     crop_box = random_square_crop_box(
         sample,
         crop_size=4,
         torch=_FakeTorch([3, 2]),
         generator=object(),
+        preloaded_samples=preloaded,
     )
 
     assert crop_box == (3, 2, 7, 6)
 
 
 class _FakeTorch:
-    def __init__(self, values: list[int]) -> None:
-        self.values = values
+    bfloat16 = object()
+
+    def __init__(
+        self,
+        values: list[int] | None = None,
+        *,
+        cuda_available: bool = True,
+    ) -> None:
+        self.values = values or []
+        self.cuda = _FakeCuda(cuda_available)
+        self.autocast_calls: list[tuple[str, object]] = []
+
+    def device(self, value: str) -> torch.device:
+        return torch.device(value)
+
+    def autocast(self, *, device_type: str, dtype: object) -> str:
+        self.autocast_calls.append((device_type, dtype))
+        return "autocast-context"
 
     def randint(
         self,
@@ -302,6 +341,14 @@ class _FakeTorch:
         value = self.values.pop(0)
         assert value < high
         return _FakeTensor(value)
+
+
+class _FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self.available = available
+
+    def is_available(self) -> bool:
+        return self.available
 
 
 class _FakeTensor:

@@ -30,20 +30,34 @@ uv run sim-satellite infer --target modal
 Training reads run settings from a JSON file. Omitted fields use
 `TrainingConfig` defaults.
 
-The OpenEarthMap data command writes a local `manifest.jsonl` plus `classes.json` under
-`data/openearthmap/`. The command can also be called directly as a package script:
+The OpenEarthMap data command downloads, extracts, and prepares the dataset
+locally under `data/openearthmap/`. It writes `manifest.jsonl`, `classes.json`,
+and prepared tensor samples under `data/openearthmap/prepared/`. Modal training
+downloads, extracts, and prepares the same dataset on the remote box's local
+`/data/openearthmap` scratch disk before training starts, so the full local data
+tree does not need to be uploaded into a shared Modal data volume.
+The command can also be called directly as a package script:
 
 ```bash
 uv run python -m sim_satellite.data.openearthmap
 ```
 
-For local PyTorch debugging runs, put `"steps": 1` in the training JSON:
+Prepared tensors can be reused across training runs as long as the preparation
+code, OpenEarthMap class mapping, and tensor format are unchanged. After
+changing preparation behavior, rebuild them with:
+
+```bash
+uv run sim-satellite openearthmap --force-prepared
+```
+
+For local CUDA PyTorch debugging runs, put `"steps": 1` in the training JSON:
 
 ```bash
 uv sync
 cat > train.local.json <<'JSON'
 {
-  "steps": 1
+  "steps": 1,
+  "device": "cuda"
 }
 JSON
 uv run sim-satellite train --target local train.local.json
@@ -70,7 +84,12 @@ uv run modal deploy -m sim_satellite.modal_app
 
 ### Data
 
-Data is cached locally under `data/` by default. Prepared samples should track at least the source dataset, split, image path, optional mask path, semantic classes, and preparation metadata.
+Data is generated locally under `data/` by default and is not committed.
+OpenEarthMap should normally be fully downloaded, extracted, and prepared once
+under `data/openearthmap/` for local inspection and debugging. Modal runs prepare
+their own copy under `/data/openearthmap` on remote local scratch disk. Prepared
+samples track the source dataset, split, image path, mask path, semantic
+classes, and preparation metadata.
 
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.
@@ -122,3 +141,52 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   training toward perceptually useful intermediate noise levels while keeping the
   linear flow path and velocity target. The old uniform sampler was removed
   rather than kept as a compatibility mode.
+- 2026-06-14 PDT: AutoResearch pass for faster progress on OpenEarthMap used
+  fixed-seed 1000-step H100 runs with `batch_size=10`, `image_size=256`,
+  `precision=bf16`, CUDA random tensors, and default sample preloading.
+  Baseline current code (`logs/autoresearch-dualattn-current-1000.log`) ended at
+  loss `0.032427478581666946`, `705.3s`, `14.18 img/s`, with sampled
+  `load_seconds=0.433` at step 1000. Replacing Python tuple/list tensor
+  conversion with byte-buffer conversion for RGB images and grayscale class-id
+  masks (`logs/autoresearch-byte-tensors-1000.log`) produced the same final loss
+  in `298.5s`, `33.50 img/s`, with sampled `load_seconds=0.036` at step 1000.
+  Decision: keep the byte-buffer tensor path as a pure speed win. Next best
+  hypotheses: remove or move 64x64 deep attention, try channels-last tensors,
+  and separately test mask dropout `0.0` for mask-conditioned quality.
+- 2026-06-14 PDT: A wider AutoResearch batch tested the next hypotheses with
+  isolated worktrees after an initial shared-checkout batch was rejected as
+  confounded. Clean 1000-step results: no-deep-attention
+  (`logs/autoresearch-no-deep-clean-1000.log`) reached loss `0.031935956329107285`
+  in `252.1s`; fixed-width time MLP (`logs/autoresearch-time-mlp-clean-1000.log`)
+  reached loss `0.031136244535446167` in `311.3s`; channels-last
+  (`logs/autoresearch-channels-last-clean-1000.log`) reached loss
+  `0.03235258907079697` in `365.4s`; LR `2e-4`
+  (`logs/autoresearch-lr2e-4-clean-1000.log`) reached loss
+  `0.030154123902320862` in `313.8s`; mask dropout `0.0`
+  (`logs/autoresearch-maskdrop0-clean-1000.log`) reached loss
+  `0.04803936555981636`; hidden channels `96`
+  (`logs/autoresearch-hidden96-clean-1000.log`) reached loss
+  `0.03410714119672775` in `254.2s`. The merged direction removes the extra
+  64x64 down-path attention, keeps the byte-buffer tensor path, and updates the
+  main 20k config to LR `2e-4`. The combined validation
+  (`logs/autoresearch-nodeep-lr2e4-combined-1000.log`) reached loss
+  `0.029987284913659096` in `263.0s`, `38.02 img/s`, with `93,109,891`
+  parameters. Future parallel Modal experiments should set a unique
+  `SIM_SATELLITE_MODAL_APP_NAME` to avoid web endpoint label collisions.
+- 2026-06-14 PDT: AutoResearch follow-up focused on H100 wall-clock efficiency
+  without intentionally weakening the model. Batch-size probes showed that
+  `batch_size=13` reached `39.56 img/s` but worsened loss to
+  `0.04314757138490677`, `batch_size=20` reached `42.88 img/s` but worsened loss
+  to `0.05172574892640114`, and `batch_size=32/40/59` OOMed on H100 80GB.
+  Decision: do not update the production config from the batch-size sweep alone.
+  The data-loading boundary was changed instead: manifests now require prepared
+  sample data under a `prepared` field, and `sim-satellite openearthmap` writes
+  decoded RGB `uint8` plus compact class-id mask `uint8` tensors so training
+  crops from prepared data rather than re-decoding PIL images. Local validation:
+  `uv run pytest -q` and `uv run ruff check` passed. Local data prep is blocked
+  from reproducing the old 767-sample benchmark manifest because this checkout
+  has only a partial extracted tree and no raw archive; full archive prep found
+  2,687 pairs, which should be treated as a new dataset baseline if used.
+  Next best hypotheses: benchmark prepared-data loading on Modal with the same
+  767-sample manifest, add `torch.compile`/fused Adam/SDPA experiments, and only
+  then retune batch size or LR.
