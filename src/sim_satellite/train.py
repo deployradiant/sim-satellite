@@ -13,7 +13,7 @@ from typing import Any
 import click
 import torch
 
-from sim_satellite import training_data, training_log
+from sim_satellite import diagnostics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.prepared import PreparedSample
@@ -57,6 +57,7 @@ class TrainingConfig:
     mask_drop_probability: float = 0.0
     precision: str = "float32"
     timing_sample_every: int = 0
+    color_stats_every: int = 0
     log_every: int = 10
 
     def __post_init__(self) -> None:
@@ -84,6 +85,8 @@ class TrainingConfig:
             raise ValueError("device must be a CUDA device")
         if self.timing_sample_every < 0:
             raise ValueError("timing_sample_every must be non-negative")
+        if self.color_stats_every < 0:
+            raise ValueError("color_stats_every must be non-negative")
         if not self.manifest_path:
             raise ValueError("manifest_path is required")
         if not self.split:
@@ -205,6 +208,7 @@ def run_training(
         preload_sample_count=len(preloaded_samples),
         preload_seconds=preload_seconds,
         timing_sample_every=config.timing_sample_every,
+        color_stats_every=config.color_stats_every,
         model_parameters=model_parameters,
         image_size=config.image_size,
         device=device,
@@ -215,6 +219,7 @@ def run_training(
     for step in range(start_step, config.steps):
         step_number = step + 1
         step_started_at = time.monotonic()
+        should_log_color_stats = _should_log_color_stats(config, step_number)
         loss, step_timing = _train_step(
             batches[step % len(batches)],
             model=model,
@@ -228,10 +233,14 @@ def run_training(
             mask_drop_probability=config.mask_drop_probability,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
+            log_color_stats=should_log_color_stats,
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
         should_log = (
-            step_number == 1 or step_number == config.steps or step_number % config.log_every == 0
+            should_log_color_stats
+            or step_number == 1
+            or step_number == config.steps
+            or step_number % config.log_every == 0
         )
         should_write_artifacts = (
             config.save_every > 0 and step_number % config.save_every == 0
@@ -253,7 +262,7 @@ def run_training(
             and config.validation_every > 0
             and step_number % config.validation_every == 0
         ):
-            validation_loss = _evaluate_validation_loss(
+            validation_loss, validation_color_stats = _evaluate_validation_loss(
                 model,
                 validation_batches,
                 torch=torch,
@@ -261,8 +270,14 @@ def run_training(
                 device=device,
                 config=config,
                 preloaded_samples=preloaded_samples,
+                log_color_stats=should_log_color_stats,
             )
-            validation_losses.append({"step": step_number, "loss": validation_loss})
+            validation_record: dict[str, float | int] = {
+                "step": step_number,
+                "loss": validation_loss,
+            }
+            validation_record.update(validation_color_stats)
+            validation_losses.append(validation_record)
             training_log.print_validation_progress(
                 started_at_epoch_utc=started_at_epoch_utc,
                 started_at_monotonic=started_at_monotonic,
@@ -271,6 +286,7 @@ def run_training(
                 steps=config.steps,
                 batch_size=config.batch_size,
                 loss=validation_loss,
+                color_stats=validation_color_stats,
             )
 
         if should_log:
@@ -396,6 +412,14 @@ def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool
     )
 
 
+def _should_log_color_stats(config: TrainingConfig, step_number: int) -> bool:
+    return config.color_stats_every > 0 and (
+        step_number == 1
+        or step_number == config.steps
+        or step_number % config.color_stats_every == 0
+    )
+
+
 def _autocast_context(torch: Any, precision: str) -> Any:
     if precision == "float32":
         return nullcontext()
@@ -434,6 +458,7 @@ def _train_step(
     mask_drop_probability: float,
     precision: str,
     profile_timing: bool,
+    log_color_stats: bool,
 ) -> tuple[Any, dict[str, float | int]]:
     timing: dict[str, float | int] = {}
 
@@ -465,6 +490,8 @@ def _train_step(
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
+    if log_color_stats:
+        timing.update(diagnostics.color_stats_payload(diagnostics.image_batch_color_stats(clean)))
 
     random_started_at = time.monotonic()
     noise = torch.randn(clean.shape, generator=random_generator, device=device)
@@ -608,11 +635,13 @@ def _evaluate_validation_loss(
     device: Any,
     config: TrainingConfig,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> float:
+    log_color_stats: bool,
+) -> tuple[float, dict[str, float | int]]:
     was_training = model.training
     model.eval()
     generator = torch.Generator(device=device).manual_seed(config.seed + 10_000)
     losses: list[Any] = []
+    color_batches: list[Any] = []
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
             crop_boxes = [
@@ -631,6 +660,8 @@ def _evaluate_validation_loss(
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
+            if log_color_stats:
+                color_batches.append(clean.detach().cpu())
             noise = torch.randn(clean.shape, generator=generator, device=device)
             timestep = _sample_flow_timesteps(
                 clean.shape[0],
@@ -647,7 +678,12 @@ def _evaluate_validation_loss(
 
     if was_training:
         model.train()
-    return training_log.loss_scalar(torch.stack(losses).mean())
+    color_stats = {}
+    if color_batches:
+        color_stats = diagnostics.color_stats_payload(
+            diagnostics.image_batch_color_stats(torch.cat(color_batches, dim=0))
+        )
+    return training_log.loss_scalar(torch.stack(losses).mean()), color_stats
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

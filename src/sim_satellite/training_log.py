@@ -27,6 +27,7 @@ def print_train_start(
     preload_sample_count: int,
     preload_seconds: float,
     timing_sample_every: int,
+    color_stats_every: int,
     model_parameters: int,
     image_size: int,
     device: Any,
@@ -50,6 +51,7 @@ def print_train_start(
             "preload_sample_count": preload_sample_count,
             "preload_seconds": preload_seconds,
             "timing_sample_every": timing_sample_every,
+            "color_stats_every": color_stats_every,
             "model_parameters": model_parameters,
             "image_size": image_size,
             "device": str(device),
@@ -116,6 +118,7 @@ def print_validation_progress(
     steps: int,
     batch_size: int,
     loss: float,
+    color_stats: Mapping[str, float | int],
 ) -> None:
     _print_event(
         {
@@ -123,6 +126,7 @@ def print_validation_progress(
             "step": step,
             "steps": steps,
             "loss": loss,
+            **color_stats,
             **run_timing_payload(
                 started_at_epoch_utc=started_at_epoch_utc,
                 started_at_monotonic=started_at_monotonic,
