@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.prepared import (
-    DEFAULT_COORDINATES,
     PreparedSample,
     load_prepared_sample,
     prepared_coordinates_tuple,
@@ -91,7 +90,7 @@ class PreparedGeneration:
     seed: int
     steps: int
     mask_path: Path
-    coordinates: tuple[float, float]
+    coordinates: tuple[float, float] | None
     temporary_mask_path: Path | None
     mask_edited: bool
 
@@ -473,9 +472,9 @@ def _write_prepared_mask(sample: SatelliteSample) -> Path:
     return path
 
 
-def _sample_coordinates(sample: SatelliteSample) -> tuple[float, float]:
+def _sample_coordinates(sample: SatelliteSample) -> tuple[float, float] | None:
     if not sample.prepared_path.exists():
-        return DEFAULT_COORDINATES
+        return None
     return prepared_coordinates_tuple(_load_sample_prepared_data(sample))
 
 

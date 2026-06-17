@@ -40,7 +40,7 @@ def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
         generator=object(),
         preloaded_samples=preloaded,
     )
-    images, masks, coordinates = load_batch(
+    images, masks, coordinates, coordinate_mask = load_batch(
         (sample,),
         [crop_box],
         torch=torch,
@@ -52,10 +52,10 @@ def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
     assert crop_box == (3, 2, 11, 10)
     assert images.shape == (1, 3, 8, 8)
     assert masks.shape == (1, 2, 8, 8)
-    assert coordinates.shape == (1, 2)
+    assert coordinates is None
+    assert coordinate_mask is None
     assert torch.allclose(images[0, :, 0, 0], torch.tensor([1.0, -1.0, -1.0]))
     assert torch.all(masks[:, 1] == 1.0)
-    assert torch.allclose(coordinates, torch.tensor([[0.0, 0.0]]))
 
 
 def test_training_data_requires_preloaded_sample(tmp_path: Path) -> None:

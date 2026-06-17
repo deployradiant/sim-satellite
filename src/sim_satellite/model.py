@@ -246,16 +246,30 @@ class ConditionalUNet(nn.Module):
         image: torch.Tensor,
         semantic_mask: torch.Tensor,
         timestep: torch.Tensor,
-        coordinates: torch.Tensor,
+        coordinates: torch.Tensor | None = None,
+        coordinate_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        coordinate_features = _coordinate_features(coordinates)
-        if coordinate_features.shape[0] != image.shape[0]:
-            raise ValueError(
-                "Coordinate batch size must match image batch size: "
-                f"{coordinate_features.shape[0]} != {image.shape[0]}"
-            )
         time_embedding = self.time_embedding(timestep)
-        coordinate_embedding = self.coordinate_projection(coordinate_features)
+        coordinate_embedding = time_embedding.new_zeros(time_embedding.shape)
+        if coordinates is not None:
+            coordinate_features = _coordinate_features(coordinates)
+            if coordinate_features.shape[0] != image.shape[0]:
+                raise ValueError(
+                    "Coordinate batch size must match image batch size: "
+                    f"{coordinate_features.shape[0]} != {image.shape[0]}"
+                )
+            coordinate_embedding = self.coordinate_projection(coordinate_features)
+            if coordinate_mask is not None:
+                coordinate_mask = coordinate_mask.to(
+                    device=coordinate_embedding.device,
+                    dtype=coordinate_embedding.dtype,
+                ).view(-1, 1)
+                if coordinate_mask.shape[0] != image.shape[0]:
+                    raise ValueError(
+                        "Coordinate mask batch size must match image batch size: "
+                        f"{coordinate_mask.shape[0]} != {image.shape[0]}"
+                    )
+                coordinate_embedding = coordinate_embedding * coordinate_mask
         condition_embedding = torch.cat([time_embedding, coordinate_embedding], dim=1)
         mask_pyramid = {_spatial_size(semantic_mask): semantic_mask}
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))

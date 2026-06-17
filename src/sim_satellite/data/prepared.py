@@ -22,7 +22,6 @@ else:
     Tensor = Any
 
 PREPARED_DATA_VERSION = 2
-DEFAULT_COORDINATES = (0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -30,24 +29,26 @@ class PreparedSample:
     image: Tensor
     mask: Tensor
     size: tuple[int, int]
-    coordinates: Tensor
+    coordinates: Tensor | None
 
 
-def prepared_coordinates_tuple(prepared: PreparedSample) -> tuple[float, float]:
+def prepared_coordinates_tuple(prepared: PreparedSample) -> tuple[float, float] | None:
+    if prepared.coordinates is None:
+        return None
     values = prepared.coordinates.float().view(-1).tolist()
     if len(values) != 2:
         raise RuntimeError(f"Prepared coordinates must have two values, got: {values}")
     return float(values[0]), float(values[1])
 
 
-def read_geo_data(image_path: Path) -> tuple[float, float]:
+def read_geo_data(image_path: Path) -> tuple[float, float] | None:
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
             image = rasterio.open(image_path)
         with image:
             if image.crs is None:
-                return DEFAULT_COORDINATES
+                return None
             bounds = image.bounds
             center_x = (bounds.left + bounds.right) / 2
             center_y = (bounds.top + bounds.bottom) / 2
@@ -61,7 +62,7 @@ def read_geo_data(image_path: Path) -> tuple[float, float]:
                 ),
             )
     except RasterioIOError:
-        return DEFAULT_COORDINATES
+        return None
 
     return float(longitude[0]), float(latitude[0])
 
@@ -113,9 +114,10 @@ def write_prepared_data(
 
     prepared_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = prepared_path.with_suffix(f"{prepared_path.suffix}.tmp")
-    coords_tensor = torch.tensor(
-        list(DEFAULT_COORDINATES if source_coordinates is None else source_coordinates),
-        dtype=torch.float32,
+    coords_tensor = (
+        None
+        if source_coordinates is None
+        else torch.tensor(list(source_coordinates), dtype=torch.float32)
     )
 
     torch.save(
@@ -149,13 +151,13 @@ def load_prepared_sample(path: Path, *, torch: Any) -> PreparedSample:
         not isinstance(image, torch.Tensor)
         or not isinstance(mask, torch.Tensor)
         or not isinstance(size, tuple)
-        or not isinstance(coordinates, torch.Tensor)
+        or (coordinates is not None and not isinstance(coordinates, torch.Tensor))
     ):
         raise RuntimeError(
             f"Prepared sample data is missing image, mask, size, or coordinates: {path}"
         )
-    coordinates_tensor = cast(Tensor, coordinates)
-    if tuple(coordinates_tensor.shape) != (2,):
+    coordinates_tensor = cast(Tensor, coordinates) if coordinates is not None else None
+    if coordinates_tensor is not None and tuple(coordinates_tensor.shape) != (2,):
         raise RuntimeError(f"Prepared sample coordinates must have shape (2,): {path}")
     return PreparedSample(
         image=cast(Tensor, image),

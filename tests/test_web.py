@@ -105,7 +105,7 @@ def test_web_generate_uses_generation_only_config(
     assert generation_config.seed == 42
     assert generation_config.steps == 2
     assert generation_config.mask_path == str(mask_path)
-    assert generation_config.coordinates == (0.0, 0.0)
+    assert generation_config.coordinates is None
     assert load_calls == [(Path(config.checkpoint_path), config.device)]
 
 

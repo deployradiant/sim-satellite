@@ -13,7 +13,6 @@ import torch
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.prepared import (
-    DEFAULT_COORDINATES,
     load_prepared_sample,
     prepared_coordinates_tuple,
 )
@@ -60,7 +59,7 @@ class InferenceConfig:
 class GenerationConfig:
     seed: int = 2026
     mask_path: str = ""
-    coordinates: tuple[float, float] = DEFAULT_COORDINATES
+    coordinates: tuple[float, float] | None = None
     steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
 
@@ -85,7 +84,7 @@ class InferenceResult:
 class GenerationResult:
     image: Any
     semantic_mask: Any
-    coordinates: tuple[float, float]
+    coordinates: tuple[float, float] | None
     model_config: ModelConfig
     checkpoint_path: Path
     mask_path: Path
@@ -183,10 +182,10 @@ def generate_image_with_model(
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
-    coordinates = torch.tensor(
-        [config.coordinates],
-        dtype=torch.float32,
-        device=device,
+    coordinates = (
+        None
+        if config.coordinates is None
+        else torch.tensor([config.coordinates], dtype=torch.float32, device=device)
     )
 
     timesteps, step_size = _flow_inference_tensors(config.steps, torch=torch, device=device)
@@ -312,10 +311,13 @@ def _default_mask_path(config: InferenceConfig) -> Path:
     return dataset[0].mask_path
 
 
-def _coordinates_for_mask_path(mask_path: Path, config: InferenceConfig) -> tuple[float, float]:
+def _coordinates_for_mask_path(
+    mask_path: Path,
+    config: InferenceConfig,
+) -> tuple[float, float] | None:
     sample = _manifest_sample_for_mask_path(mask_path, config)
     if sample is None or not sample.prepared_path.exists():
-        return DEFAULT_COORDINATES
+        return None
     return prepared_coordinates_tuple(load_prepared_sample(sample.prepared_path, torch=torch))
 
 

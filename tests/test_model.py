@@ -77,6 +77,21 @@ def test_model_output_changes_with_coordinates() -> None:
     assert not torch.allclose(origin_output, located_output)
 
 
+def test_model_forward_accepts_missing_coordinates() -> None:
+    config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
+    model = build_model(config)
+    model.eval()
+
+    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
+    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
+
+    with torch.no_grad():
+        output = model(image, semantic_mask, torch.full((2,), 0.5))
+
+    assert output.shape == image.shape
+    assert torch.isfinite(output).all()
+
+
 def test_model_rejects_coordinate_batch_mismatch() -> None:
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
     model = build_model(config)

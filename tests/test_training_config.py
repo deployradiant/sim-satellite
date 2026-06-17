@@ -287,7 +287,7 @@ def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> 
             "image": torch.zeros(8, 10, 3, dtype=torch.uint8),
             "mask": torch.zeros(8, 10, dtype=torch.uint8),
             "size": (10, 8),
-            "coordinates": torch.tensor([0.0, 0.0]),
+            "coordinates": None,
         },
         prepared_path,
     )
