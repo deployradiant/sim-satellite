@@ -473,13 +473,10 @@ def _prepared_mask_image(prepared: PreparedSample) -> Image.Image:
 
 def _prepared_image(prepared: PreparedSample) -> Image.Image:
     width, height = prepared.size
-    pixels = [
-        tuple(int(channel) for channel in pixel)
-        for row in prepared.image.contiguous().tolist()
-        for pixel in row
-    ]
-    image = Image.new("RGB", (width, height))
-    image.putdata(pixels)
+    image_data = prepared.image.byte().contiguous().numpy()
+    image = Image.fromarray(image_data, mode="RGB")
+    if image.size != (width, height):
+        raise RuntimeError("Prepared image tensor shape does not match prepared image size")
     return image
 
 
@@ -545,12 +542,18 @@ def _max_mask_image_uri_length(config: WebConfig) -> int:
 
 
 def _image_tensor_png(image: Any, display_size: int) -> bytes:
-    tensor = image.detach().cpu()[0].clamp(0.0, 1.0).mul(255).byte().permute(1, 2, 0)
+    tensor = (
+        image.detach()
+        .cpu()[0]
+        .clamp(0.0, 1.0)
+        .mul(255)
+        .byte()
+        .permute(1, 2, 0)
+        .contiguous()
+    )
     height = int(tensor.shape[0])
     width = int(tensor.shape[1])
-    pixels = [tuple(int(channel) for channel in pixel) for row in tensor.tolist() for pixel in row]
-    pil_image = Image.new("RGB", (width, height))
-    pil_image.putdata(pixels)
+    pil_image = Image.fromarray(tensor.numpy(), mode="RGB")
     if width != display_size or height != display_size:
         pil_image = pil_image.resize((display_size, display_size), Image.Resampling.NEAREST)
     return _pil_png(pil_image)
