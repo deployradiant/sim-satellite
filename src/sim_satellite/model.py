@@ -136,11 +136,13 @@ class SelfAttention2d(nn.Module):
             height * width,
         )
         query, key, value = qkv.unbind(dim=1)
-        scale = head_channels**-0.5
-        attention = torch.einsum("bhcn,bhcm->bhnm", query * scale, key)
-        attention = torch.softmax(attention, dim=-1)
-        attended = torch.einsum("bhnm,bhcm->bhcn", attention, value)
-        attended = attended.reshape(batch_size, channels, height, width)
+        attended = torch.nn.functional.scaled_dot_product_attention(
+            query.transpose(-2, -1),
+            key.transpose(-2, -1),
+            value.transpose(-2, -1),
+            dropout_p=0.0,
+        )
+        attended = attended.transpose(-2, -1).reshape(batch_size, channels, height, width)
         return x + self.projection(attended)
 
 
