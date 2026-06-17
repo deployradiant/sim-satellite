@@ -16,6 +16,7 @@ from typing import Any
 import modal
 
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
@@ -48,7 +49,7 @@ MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
 app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("click", "fastapi", "matplotlib", "pillow", "torch")
+    .pip_install("click", "fastapi", "matplotlib", "pillow", "rasterio", "torch")
     .add_local_python_source("sim_satellite")
     .add_local_file(
         LOCAL_WEB_STATIC_ROOT / "index.html",
@@ -231,6 +232,7 @@ def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
     )
     result = download_and_prepare_openearthmap(
         data_dir,
+        force_prepared=True,
         progress=lambda message: _print_modal_data_event(
             "modal_data_setup_progress",
             data_dir=str(data_dir),
@@ -264,11 +266,18 @@ def _modal_data_dir_for_manifest(manifest_path: str) -> Path:
 
 def _modal_openearthmap_data_ready(data_dir: Path, manifest_path: Path) -> bool:
     prepared_dir = data_dir / "prepared"
-    return (
-        manifest_path.exists()
-        and prepared_dir.exists()
-        and any(prepared_dir.rglob("*.pt"))
-    )
+    if not manifest_path.exists() or not prepared_dir.exists():
+        return False
+    first_prepared = next(prepared_dir.rglob("*.pt"), None)
+    if first_prepared is None:
+        return False
+    try:
+        import torch
+
+        payload = torch.load(first_prepared, map_location="cpu")
+    except (EOFError, OSError, RuntimeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("version") == PREPARED_DATA_VERSION
 
 
 def _print_modal_data_event(event: str, **payload: Any) -> None:

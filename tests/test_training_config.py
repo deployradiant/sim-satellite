@@ -11,6 +11,7 @@ from click.testing import CliRunner
 import sim_satellite.train as train_module
 from sim_satellite import training_log
 from sim_satellite.data.loader import SatelliteSample
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
@@ -282,10 +283,11 @@ def test_random_square_crop_box_is_aligned_and_deterministic(tmp_path: Path) -> 
     Image.new("L", (10, 8)).save(mask_path)
     torch.save(
         {
-            "version": 1,
+            "version": PREPARED_DATA_VERSION,
             "image": torch.zeros(8, 10, 3, dtype=torch.uint8),
             "mask": torch.zeros(8, 10, dtype=torch.uint8),
             "size": (10, 8),
+            "coordinates": None,
         },
         prepared_path,
     )

@@ -122,7 +122,7 @@ def _write_label_mask(path: Path) -> None:
     Image.new("L", (1, 1), 0).save(path)
 
 
-def _png_bytes(mode: str, color: object) -> bytes:
+def _png_bytes(mode: str, color: float | tuple[float, ...] | str | None) -> bytes:
     buffer = BytesIO()
     Image.new(mode, (1, 1), color).save(buffer, format="PNG")
     return buffer.getvalue()

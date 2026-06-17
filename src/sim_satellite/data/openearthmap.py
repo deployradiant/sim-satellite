@@ -379,9 +379,12 @@ def _write_extraction_marker(extracted_dir: Path, archive: zipfile.ZipFile) -> N
 
 
 def _archive_marker_payload(archive: zipfile.ZipFile) -> dict[str, object]:
+    if archive.filename is None:
+        raise RuntimeError("Archive filename is unavailable")
+    archive_path = Path(archive.filename)
     return {
-        "archive": Path(archive.filename).name,
-        "archive_size": Path(archive.filename).stat().st_size,
+        "archive": archive_path.name,
+        "archive_size": archive_path.stat().st_size,
         "member_count": len(archive.infolist()),
     }
 

@@ -10,6 +10,7 @@ dependencies = [
     "matplotlib>=3.9",
     "modal>=1.0",
     "pillow>=10.0",
+    "rasterio>=1.5.0",
     "torch>=2.3",
     "uvicorn>=0.30",
 ]
@@ -19,6 +20,7 @@ sim-satellite = "sim_satellite.cli:cli"
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.410",
     "pytest>=8.0",
     "ruff>=0.9",
 ]
@@ -27,6 +29,19 @@ dev = [
 pythonpath = [
     "src",
 ]
+
+[tool.pyright]
+include = [
+    "src",
+    "tests",
+]
+exclude = [
+    "artifacts",
+    "data",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
 
 [tool.ruff]
 line-length = 100
