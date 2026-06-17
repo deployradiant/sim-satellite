@@ -39,8 +39,8 @@ def load_mask_tensor(
     config: ModelConfig,
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> Any:
-    mask = Image.open(path)
-    return mask_to_tensor(mask, torch=torch, config=config, crop_box=crop_box)
+    with Image.open(path) as mask:
+        return mask_to_tensor(mask, torch=torch, config=config, crop_box=crop_box)
 
 
 def mask_to_tensor(

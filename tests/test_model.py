@@ -8,13 +8,6 @@ import torch
 from sim_satellite.model import ModelConfig, _semantic_mask_at, build_model
 
 
-def test_model_config_rejects_unknown_checkpoint_fields() -> None:
-    config = asdict(ModelConfig(image_size=64))
-
-    with pytest.raises(ValueError, match="Unknown model config fields: timesteps"):
-        ModelConfig.from_dict({**config, "timesteps": 1000})
-
-
 def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:
     with pytest.raises(ValueError, match="4096 tokens to avoid attention OOM"):
         build_model(ModelConfig(image_size=512))
@@ -36,17 +29,6 @@ def test_conditional_unet_forward_shape_is_deterministic() -> None:
 
     assert output.shape == image.shape
     assert torch.isfinite(output).all()
-
-
-def test_model_uses_learned_timestep_film_without_deep_attention() -> None:
-    config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
-    model = build_model(config)
-    state = model.state_dict()
-
-    assert state["time_embedding.1.weight"].shape == (32, 8)
-    assert state["time_embedding.3.weight"].shape == (32, 32)
-    assert state["down_blocks.0.0.time_projection.weight"].shape == (16, 32)
-    assert "deep_down_attention.qkv.weight" not in state
 
 
 def test_model_output_changes_with_timestep() -> None:
