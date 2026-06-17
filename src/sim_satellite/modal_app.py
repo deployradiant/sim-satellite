@@ -48,7 +48,7 @@ MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
 app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("click", "fastapi", "matplotlib", "pillow", "torch")
+    .pip_install("click", "fastapi", "matplotlib", "pillow", "rasterio", "torch")
     .add_local_python_source("sim_satellite")
     .add_local_file(
         LOCAL_WEB_STATIC_ROOT / "index.html",

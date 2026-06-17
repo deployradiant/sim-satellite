@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
-from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
+from sim_satellite.data.prepared import (
+    DEFAULT_COORDINATES,
+    PreparedSample,
+    load_prepared_sample,
+    prepared_coordinates_tuple,
+)
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator
 from sim_satellite.model import ModelConfig
@@ -86,6 +91,7 @@ class PreparedGeneration:
     seed: int
     steps: int
     mask_path: Path
+    coordinates: tuple[float, float]
     temporary_mask_path: Path | None
     mask_edited: bool
 
@@ -320,6 +326,7 @@ def _prepare_generation(
         seed=seed,
         steps=steps,
         mask_path=mask_path,
+        coordinates=_sample_coordinates(sample),
         temporary_mask_path=temporary_mask_path,
         mask_edited=payload.mask_image is not None,
     )
@@ -336,6 +343,7 @@ def _run_generation(
         generation_config = GenerationConfig(
             seed=prepared.seed,
             mask_path=str(prepared.mask_path),
+            coordinates=prepared.coordinates,
             steps=prepared.steps,
             guidance_scale=config.guidance_scale,
         )
@@ -400,8 +408,10 @@ def _generate_stream(
             break
         if isinstance(event, Exception):
             yield _json_event(_stream_error_payload(event))
-        else:
+        elif isinstance(event, dict):
             yield _json_event(event)
+        else:
+            raise RuntimeError(f"Unexpected stream event: {event!r}")
 
 
 def _stream_error_payload(error: Exception) -> dict[str, Any]:
@@ -461,6 +471,12 @@ def _write_prepared_mask(sample: SatelliteSample) -> Path:
     finally:
         mask.close()
     return path
+
+
+def _sample_coordinates(sample: SatelliteSample) -> tuple[float, float]:
+    if not sample.prepared_path.exists():
+        return DEFAULT_COORDINATES
+    return prepared_coordinates_tuple(_load_sample_prepared_data(sample))
 
 
 def _load_sample_prepared_data(sample: SatelliteSample) -> PreparedSample:

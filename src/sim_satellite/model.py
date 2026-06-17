@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -43,7 +43,7 @@ class ModelConfig:
         return cls(**{name: values[name] for name in names if name in values})
 
 
-def build_model(config: ModelConfig | None = None) -> Any:
+def build_model(config: ModelConfig | None = None) -> ConditionalUNet:
     config = config or ModelConfig()
     if config.image_size < 32:
         raise ValueError("unet architecture requires image_size of at least 32")
@@ -70,9 +70,9 @@ class SinusoidalTimeEmbedding(nn.Module):
         )
         self.register_buffer("frequencies", frequencies, persistent=False)
 
-    def forward(self, timestep: Any) -> Any:
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         timestep = timestep.float().view(-1)
-        frequencies = self.frequencies.to(device=timestep.device)
+        frequencies = cast(torch.Tensor, self.frequencies).to(device=timestep.device)
         angles = timestep[:, None] * frequencies[None, :] * 1000.0
         embedding = torch.cat([torch.sin(angles), torch.cos(angles)], dim=1)
         if self.channels % 2:
@@ -86,13 +86,13 @@ class ConditionedResBlock(nn.Module):
         in_channels: int,
         out_channels: int,
         *,
-        time_channels: int,
+        condition_channels: int,
         mask_channels: int,
     ) -> None:
         super().__init__()
         self.norm1 = nn.GroupNorm(_group_count(in_channels), in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.time_projection = nn.Linear(time_channels, out_channels * 2)
+        self.condition_projection = nn.Linear(condition_channels, out_channels * 2)
         self.mask_projection = nn.Conv2d(mask_channels, out_channels, 3, padding=1)
         self.norm2 = nn.GroupNorm(_group_count(out_channels), out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
@@ -103,10 +103,15 @@ class ConditionedResBlock(nn.Module):
         )
         self.activation = nn.SiLU()
 
-    def forward(self, x: Any, time_embedding: Any, semantic_mask: Any) -> Any:
+    def forward(
+        self,
+        x: torch.Tensor,
+        time_embedding: torch.Tensor,
+        semantic_mask: torch.Tensor,
+    ) -> torch.Tensor:
         h = self.conv1(self.activation(self.norm1(x)))
         h = h + self.mask_projection(semantic_mask)
-        time_scale, time_shift = self.time_projection(time_embedding)[:, :, None, None].chunk(
+        time_scale, time_shift = self.condition_projection(time_embedding)[:, :, None, None].chunk(
             2,
             dim=1,
         )
@@ -124,7 +129,7 @@ class SelfAttention2d(nn.Module):
         self.qkv = nn.Conv2d(channels, channels * 3, 1)
         self.projection = nn.Conv2d(channels, channels, 1)
 
-    def forward(self, x: Any) -> Any:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, channels, height, width = x.shape
         head_channels = channels // self.heads
         normalized = self.norm(x)
@@ -159,6 +164,11 @@ class ConditionalUNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_channels, time_channels),
         )
+        self.coordinate_projection = nn.Sequential(
+            nn.Linear(3, time_channels),
+            nn.SiLU(),
+            nn.Linear(time_channels, time_channels),
+        )
         self.input_conv = nn.Conv2d(
             model_config.image_channels + model_config.mask_channels,
             base_channels,
@@ -177,7 +187,7 @@ class ConditionalUNet(nn.Module):
                     ConditionedResBlock(
                         current_channels,
                         level_channels,
-                        time_channels=time_channels,
+                        condition_channels=time_channels,
                         mask_channels=model_config.mask_channels,
                     )
                 )
@@ -191,14 +201,14 @@ class ConditionalUNet(nn.Module):
         self.mid_block1 = ConditionedResBlock(
             current_channels,
             current_channels,
-            time_channels=time_channels,
+            condition_channels=time_channels,
             mask_channels=model_config.mask_channels,
         )
         self.mid_attention = SelfAttention2d(current_channels)
         self.mid_block2 = ConditionedResBlock(
             current_channels,
             current_channels,
-            time_channels=time_channels,
+            condition_channels=time_channels,
             mask_channels=model_config.mask_channels,
         )
 
@@ -213,7 +223,7 @@ class ConditionalUNet(nn.Module):
                     ConditionedResBlock(
                         current_channels + skip_channel_count,
                         level_channels,
-                        time_channels=time_channels,
+                        condition_channels=time_channels,
                         mask_channels=model_config.mask_channels,
                     )
                 )
@@ -231,18 +241,34 @@ class ConditionalUNet(nn.Module):
             padding=1,
         )
 
-    def forward(self, image: Any, semantic_mask: Any, timestep: Any) -> Any:
-        time_embedding = self.time_embedding(timestep)
-        mask_pyramid = {(semantic_mask.shape[-2], semantic_mask.shape[-1]): semantic_mask}
+    def forward(
+        self,
+        image: torch.Tensor,
+        semantic_mask: torch.Tensor,
+        timestep: torch.Tensor,
+        coordinates: torch.Tensor,
+    ) -> torch.Tensor:
+        coordinate_features = _coordinate_features(coordinates)
+        if coordinate_features.shape[0] != image.shape[0]:
+            raise ValueError(
+                "Coordinate batch size must match image batch size: "
+                f"{coordinate_features.shape[0]} != {image.shape[0]}"
+            )
+        condition_embedding = self.time_embedding(timestep) + self.coordinate_projection(
+            coordinate_features
+        )
+        mask_pyramid = {_spatial_size(semantic_mask): semantic_mask}
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
-        skips: list[Any] = [h]
+        skips: list[torch.Tensor] = [h]
 
-        for level_index, level_blocks in enumerate(self.down_blocks):
-            for block in level_blocks:
+        for level_index, level_blocks_module in enumerate(self.down_blocks):
+            level_blocks = cast(nn.ModuleList, level_blocks_module)
+            for block_module in level_blocks:
+                block = cast(ConditionedResBlock, block_module)
                 h = block(
                     h,
-                    time_embedding,
-                    _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+                    condition_embedding,
+                    _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
                 )
                 skips.append(h)
             if level_index < len(self.downsamples):
@@ -251,23 +277,25 @@ class ConditionalUNet(nn.Module):
 
         h = self.mid_block1(
             h,
-            time_embedding,
-            _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+            condition_embedding,
+            _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
         )
         h = self.mid_attention(h)
         h = self.mid_block2(
             h,
-            time_embedding,
-            _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+            condition_embedding,
+            _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
         )
 
-        for level_index, level_blocks in enumerate(self.up_blocks):
-            for block in level_blocks:
+        for level_index, level_blocks_module in enumerate(self.up_blocks):
+            level_blocks = cast(nn.ModuleList, level_blocks_module)
+            for block_module in level_blocks:
+                block = cast(ConditionedResBlock, block_module)
                 h = torch.cat([h, skips.pop()], dim=1)
                 h = block(
                     h,
-                    time_embedding,
-                    _semantic_mask_at(semantic_mask, h.shape[-2:], mask_pyramid),
+                    condition_embedding,
+                    _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
                 )
             if level_index < len(self.upsamples):
                 h = torch.nn.functional.interpolate(h, scale_factor=2, mode="nearest")
@@ -292,11 +320,34 @@ def _attention_head_count(channels: int) -> int:
     return 1
 
 
+def _spatial_size(tensor: torch.Tensor) -> tuple[int, int]:
+    return int(tensor.shape[-2]), int(tensor.shape[-1])
+
+
+def _coordinate_features(coordinates: torch.Tensor) -> torch.Tensor:
+    coordinates = coordinates.float()
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(
+            f"Expected coordinates with shape (batch, 2), got {tuple(coordinates.shape)}"
+        )
+
+    longitude = coordinates[:, 0] * math.pi / 180.0
+    latitude = coordinates[:, 1] * math.pi / 180.0
+    return torch.stack(
+        [
+            torch.cos(latitude) * torch.cos(longitude),
+            torch.cos(latitude) * torch.sin(longitude),
+            torch.sin(latitude),
+        ],
+        dim=1,
+    )
+
+
 def _semantic_mask_at(
-    semantic_mask: Any,
+    semantic_mask: torch.Tensor,
     size: tuple[int, int],
-    mask_pyramid: dict[tuple[int, int], Any],
-) -> Any:
+    mask_pyramid: dict[tuple[int, int], torch.Tensor],
+) -> torch.Tensor:
     if size not in mask_pyramid:
         mask_pyramid[size] = torch.nn.functional.interpolate(
             semantic_mask,
@@ -306,10 +357,14 @@ def _semantic_mask_at(
     return mask_pyramid[size]
 
 
-def interpolate_flow_sample(clean_image: Any, noise: Any, timestep: Any) -> Any:
+def interpolate_flow_sample(
+    clean_image: torch.Tensor,
+    noise: torch.Tensor,
+    timestep: torch.Tensor,
+) -> torch.Tensor:
     scale = timestep.float().view(-1, 1, 1, 1)
     return clean_image * (1.0 - scale) + noise * scale
 
 
-def flow_velocity(clean_image: Any, noise: Any) -> Any:
+def flow_velocity(clean_image: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
     return noise - clean_image

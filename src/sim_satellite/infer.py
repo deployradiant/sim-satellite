@@ -11,7 +11,12 @@ from typing import Any
 import click
 import torch
 
-from sim_satellite.data.loader import SatelliteDataset
+from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
+from sim_satellite.data.prepared import (
+    DEFAULT_COORDINATES,
+    load_prepared_sample,
+    prepared_coordinates_tuple,
+)
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
@@ -55,6 +60,7 @@ class InferenceConfig:
 class GenerationConfig:
     seed: int = 2026
     mask_path: str = ""
+    coordinates: tuple[float, float] = DEFAULT_COORDINATES
     steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
 
@@ -79,6 +85,7 @@ class InferenceResult:
 class GenerationResult:
     image: Any
     semantic_mask: Any
+    coordinates: tuple[float, float]
     model_config: ModelConfig
     checkpoint_path: Path
     mask_path: Path
@@ -104,6 +111,7 @@ def run_inference(
         GenerationConfig(
             seed=config.seed,
             mask_path=mask_path,
+            coordinates=_coordinates_for_mask_path(Path(mask_path), config),
             steps=config.steps,
             guidance_scale=config.guidance_scale,
         ),
@@ -115,6 +123,7 @@ def run_inference(
         {
             "image": generation.image.detach().cpu(),
             "semantic_mask": generation.semantic_mask.detach().cpu(),
+            "coordinates": generation.coordinates,
             "model_config": asdict(generation.model_config),
             "inference_config": asdict(config),
         },
@@ -174,6 +183,11 @@ def generate_image_with_model(
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
+    coordinates = torch.tensor(
+        [config.coordinates],
+        dtype=torch.float32,
+        device=device,
+    )
 
     timesteps, step_size = _flow_inference_tensors(config.steps, torch=torch, device=device)
     with torch.inference_mode():
@@ -183,6 +197,7 @@ def generate_image_with_model(
                 image,
                 semantic_mask,
                 timestep,
+                coordinates,
                 guidance_scale=config.guidance_scale,
                 torch=torch,
             )
@@ -194,6 +209,7 @@ def generate_image_with_model(
     return GenerationResult(
         image=image,
         semantic_mask=semantic_mask,
+        coordinates=config.coordinates,
         model_config=model_config,
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
@@ -223,16 +239,17 @@ def _guided_prediction(
     image: Any,
     semantic_mask: Any,
     timestep: Any,
+    coordinates: Any,
     *,
     guidance_scale: float,
     torch: Any,
 ) -> Any:
-    conditional = model(image, semantic_mask, timestep)
+    conditional = model(image, semantic_mask, timestep, coordinates)
     if guidance_scale == 1.0:
         return conditional
 
     empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep)
+    unconditional = model(image, empty_mask, timestep, coordinates)
     return unconditional + guidance_scale * (conditional - unconditional)
 
 
@@ -293,6 +310,27 @@ def _default_mask_path(config: InferenceConfig) -> Path:
     if len(dataset) == 0:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
     return dataset[0].mask_path
+
+
+def _coordinates_for_mask_path(mask_path: Path, config: InferenceConfig) -> tuple[float, float]:
+    sample = _manifest_sample_for_mask_path(mask_path, config)
+    if sample is None or not sample.prepared_path.exists():
+        return DEFAULT_COORDINATES
+    return prepared_coordinates_tuple(load_prepared_sample(sample.prepared_path, torch=torch))
+
+
+def _manifest_sample_for_mask_path(
+    mask_path: Path,
+    config: InferenceConfig,
+) -> SatelliteSample | None:
+    manifest_path = Path(config.manifest_path)
+    if not manifest_path.exists():
+        return None
+    resolved_mask_path = mask_path.resolve()
+    for sample in SatelliteDataset(manifest_path, split=config.split):
+        if sample.mask_path.resolve() == resolved_mask_path:
+            return sample
+    return None
 
 
 def _with_cli_mask_path(config: InferenceConfig) -> InferenceConfig:

@@ -7,6 +7,7 @@ import random
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import overload
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,12 @@ class SatelliteDataset(Sequence[SatelliteSample]):
 
     def __len__(self) -> int:
         return len(self.samples)
+
+    @overload
+    def __getitem__(self, index: int) -> SatelliteSample: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[SatelliteSample, ...]: ...
 
     def __getitem__(self, index: int | slice) -> SatelliteSample | tuple[SatelliteSample, ...]:
         return self.samples[index]
