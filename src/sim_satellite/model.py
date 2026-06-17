@@ -106,17 +106,16 @@ class ConditionedResBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        time_embedding: torch.Tensor,
+        condition_embedding: torch.Tensor,
         semantic_mask: torch.Tensor,
     ) -> torch.Tensor:
         h = self.conv1(self.activation(self.norm1(x)))
         h = h + self.mask_projection(semantic_mask)
-        time_scale, time_shift = self.condition_projection(time_embedding)[:, :, None, None].chunk(
-            2,
-            dim=1,
-        )
+        condition_scale, condition_shift = self.condition_projection(condition_embedding)[
+            :, :, None, None
+        ].chunk(2, dim=1)
         h = self.norm2(h)
-        h = h * (1.0 + time_scale) + time_shift
+        h = h * (1.0 + condition_scale) + condition_shift
         h = self.conv2(self.activation(h))
         return h + self.skip(x)
 
@@ -156,6 +155,7 @@ class ConditionalUNet(nn.Module):
         super().__init__()
         base_channels = model_config.hidden_channels
         time_channels = base_channels * 4
+        condition_channels = time_channels * 2
         levels = [base_channels * multiplier for multiplier in CHANNEL_MULTIPLIERS]
 
         self.time_embedding = nn.Sequential(
@@ -187,7 +187,7 @@ class ConditionalUNet(nn.Module):
                     ConditionedResBlock(
                         current_channels,
                         level_channels,
-                        condition_channels=time_channels,
+                        condition_channels=condition_channels,
                         mask_channels=model_config.mask_channels,
                     )
                 )
@@ -201,14 +201,14 @@ class ConditionalUNet(nn.Module):
         self.mid_block1 = ConditionedResBlock(
             current_channels,
             current_channels,
-            condition_channels=time_channels,
+            condition_channels=condition_channels,
             mask_channels=model_config.mask_channels,
         )
         self.mid_attention = SelfAttention2d(current_channels)
         self.mid_block2 = ConditionedResBlock(
             current_channels,
             current_channels,
-            condition_channels=time_channels,
+            condition_channels=condition_channels,
             mask_channels=model_config.mask_channels,
         )
 
@@ -223,7 +223,7 @@ class ConditionalUNet(nn.Module):
                     ConditionedResBlock(
                         current_channels + skip_channel_count,
                         level_channels,
-                        condition_channels=time_channels,
+                        condition_channels=condition_channels,
                         mask_channels=model_config.mask_channels,
                     )
                 )
@@ -254,9 +254,9 @@ class ConditionalUNet(nn.Module):
                 "Coordinate batch size must match image batch size: "
                 f"{coordinate_features.shape[0]} != {image.shape[0]}"
             )
-        condition_embedding = self.time_embedding(timestep) + self.coordinate_projection(
-            coordinate_features
-        )
+        time_embedding = self.time_embedding(timestep)
+        coordinate_embedding = self.coordinate_projection(coordinate_features)
+        condition_embedding = torch.cat([time_embedding, coordinate_embedding], dim=1)
         mask_pyramid = {_spatial_size(semantic_mask): semantic_mask}
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
         skips: list[torch.Tensor] = [h]
