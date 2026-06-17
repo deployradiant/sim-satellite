@@ -50,7 +50,6 @@ class OpenEarthMapResult:
     extracted_dir: Path
     prepared_dir: Path
     manifest_path: Path
-    classes_path: Path
     samples: int
     prepared_samples: int
     scanned_images: int
@@ -122,8 +121,6 @@ def download_and_prepare_openearthmap(
     )
     _report(progress, f"Writing manifest to {paths.manifest_path}")
     write_manifest(prepared_samples, paths.manifest_path)
-    _report(progress, f"Writing class metadata to {paths.classes_path}")
-    write_classes(paths.classes_path)
     _report(
         progress,
         "Done: "
@@ -138,7 +135,6 @@ def download_and_prepare_openearthmap(
         extracted_dir=paths.extracted_dir,
         prepared_dir=paths.prepared_dir,
         manifest_path=paths.manifest_path,
-        classes_path=paths.classes_path,
         samples=len(prepared_samples),
         prepared_samples=len(prepared_samples),
         scanned_images=scan.scanned_images,
@@ -254,24 +250,6 @@ def _prepared_path_for_sample(
     except ValueError:
         relative_path = Path(sample.split) / sample.image_path.name
     return prepared_dir / relative_path.with_suffix(".pt")
-
-
-def write_classes(classes_path: str | Path) -> Path:
-    path = Path(classes_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "source": "openearthmap",
-        "classes": [
-            {
-                "id": OPENEARTHMAP_CLASS_IDS[name],
-                "name": name,
-                "rgb": list(OPENEARTHMAP_RGB[name]),
-            }
-            for name in OPENEARTHMAP_CLASSES
-        ],
-    }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return path
 
 
 def _download(
@@ -528,7 +506,6 @@ class _OpenEarthMapPaths:
     extracted_dir: Path
     prepared_dir: Path
     manifest_path: Path
-    classes_path: Path
 
 
 def _paths(data_dir: str | Path) -> _OpenEarthMapPaths:
@@ -539,7 +516,6 @@ def _paths(data_dir: str | Path) -> _OpenEarthMapPaths:
         extracted_dir=root / "extracted",
         prepared_dir=root / "prepared",
         manifest_path=root / "manifest.jsonl",
-        classes_path=root / "classes.json",
     )
 
 
@@ -574,7 +550,6 @@ def _build_click_command():
         except OSError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo(f"manifest={result.manifest_path}")
-        click.echo(f"classes={result.classes_path}")
         click.echo(f"prepared={result.prepared_dir}")
         click.echo(f"samples={result.samples}")
         click.echo(f"prepared_samples={result.prepared_samples}")

@@ -266,7 +266,6 @@ def _modal_openearthmap_data_ready(data_dir: Path, manifest_path: Path) -> bool:
     prepared_dir = data_dir / "prepared"
     return (
         manifest_path.exists()
-        and (data_dir / "classes.json").exists()
         and prepared_dir.exists()
         and any(prepared_dir.rglob("*.pt"))
     )

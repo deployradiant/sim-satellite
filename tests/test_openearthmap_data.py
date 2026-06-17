@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -9,35 +8,12 @@ import pytest
 from PIL import Image
 
 from sim_satellite.data.loader import read_manifest
-from sim_satellite.data.openearthmap import (
-    download_and_prepare_openearthmap,
-)
-
-EXPECTED_OPENEARTHMAP_CLASSES = (
-    "unlabeled",
-    "bareland",
-    "rangeland",
-    "developed space",
-    "road",
-    "tree",
-    "water",
-    "agriculture land",
-    "building",
-)
-EXPECTED_OPENEARTHMAP_RGB = {
-    "unlabeled": (0, 0, 0),
-    "bareland": (128, 0, 0),
-    "rangeland": (0, 255, 36),
-    "developed space": (148, 148, 148),
-    "road": (255, 255, 255),
-    "tree": (34, 97, 38),
-    "water": (0, 69, 255),
-    "agriculture land": (75, 181, 73),
-    "building": (222, 31, 7),
-}
+from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 
 
-def test_prepare_openearthmap_writes_manifest_and_classes(tmp_path: Path) -> None:
+def test_prepare_openearthmap_writes_manifest_without_classes_sidecar(
+    tmp_path: Path,
+) -> None:
     data_dir = tmp_path / "openearthmap"
     image_path = data_dir / "extracted" / "train" / "images" / "tile.png"
     mask_path = data_dir / "extracted" / "train" / "labels" / "tile.png"
@@ -60,17 +36,7 @@ def test_prepare_openearthmap_writes_manifest_and_classes(tmp_path: Path) -> Non
     assert samples[0].prepared_path.exists()
     assert result.prepared_dir == data_dir / "prepared"
     assert result.prepared_samples == 1
-
-    class_payload = json.loads(result.classes_path.read_text(encoding="utf-8"))
-    expected_classes = [
-        {
-            "id": class_id,
-            "name": name,
-            "rgb": list(EXPECTED_OPENEARTHMAP_RGB[name]),
-        }
-        for class_id, name in enumerate(EXPECTED_OPENEARTHMAP_CLASSES)
-    ]
-    assert class_payload == {"source": "openearthmap", "classes": expected_classes}
+    assert not (data_dir / "classes.json").exists()
 
 
 def test_prepare_openearthmap_reports_and_skips_missing_masks(tmp_path: Path) -> None:
