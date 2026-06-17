@@ -14,6 +14,7 @@ from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
+    TIMESTEP_UNIFORM_MIX_PROBABILITY,
     TrainingConfig,
     _autocast_context,
     _load_training_samples,
@@ -93,6 +94,8 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(device="mps")
     with pytest.raises(ValueError):
         TrainingConfig(timing_sample_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(color_stats_every=-1)
 
 
 def test_training_device_requires_available_cuda() -> None:
@@ -139,22 +142,55 @@ def test_run_timing_payload_estimates_remaining_runtime() -> None:
     assert payload["estimated_finish_epoch_utc"] == 1_100.0
 
 
-def test_flow_timesteps_use_logit_normal_sampling() -> None:
-    actual_generator = torch.Generator(device="cpu").manual_seed(123)
-    expected_generator = torch.Generator(device="cpu").manual_seed(123)
+def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
+    actual_generator = torch.Generator(device="cpu").manual_seed(321)
+    expected_generator = torch.Generator(device="cpu").manual_seed(321)
 
     actual = _sample_flow_timesteps(
-        8,
+        16,
         torch=torch,
         generator=actual_generator,
         device=torch.device("cpu"),
     )
-    logits = torch.randn(8, generator=expected_generator, device="cpu")
-    expected = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
+    logits = torch.randn(16, generator=expected_generator, device="cpu")
+    logit_normal = torch.sigmoid(
+        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
+    )
+    uniform = torch.rand(16, generator=expected_generator, device="cpu")
+    use_uniform = (
+        torch.rand(16, generator=expected_generator, device="cpu")
+        < TIMESTEP_UNIFORM_MIX_PROBABILITY
+    )
+    expected = torch.where(use_uniform, uniform, logit_normal)
 
     assert torch.allclose(actual, expected)
-    assert torch.all(actual > 0.0)
-    assert torch.all(actual < 1.0)
+    assert torch.any(use_uniform)
+    assert torch.any(~use_uniform)
+    assert torch.all(actual >= 0.0)
+    assert torch.all(actual <= 1.0)
+
+
+def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
+    logit_generator = torch.Generator(device="cpu").manual_seed(456)
+    mixed_generator = torch.Generator(device="cpu").manual_seed(456)
+
+    logits = torch.randn(4096, generator=logit_generator, device="cpu")
+    logit_normal = torch.sigmoid(
+        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
+    )
+    mixed = _sample_flow_timesteps(
+        4096,
+        torch=torch,
+        generator=mixed_generator,
+        device=torch.device("cpu"),
+    )
+
+    logit_tail_mass = ((logit_normal < 0.1) | (logit_normal > 0.9)).float().mean()
+    mixed_tail_mass = ((mixed < 0.1) | (mixed > 0.9)).float().mean()
+
+    assert logit_tail_mass < 0.05
+    assert mixed_tail_mass > 0.08
+    assert mixed_tail_mass > logit_tail_mass * 2.0
 
 
 def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:
