@@ -192,6 +192,35 @@ def test_web_generation_reloads_when_latest_checkpoint_changes(
     assert load_calls == [first_checkpoint, next_checkpoint]
 
 
+def test_web_generation_reloads_when_checkpoint_file_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    checkpoint_path = Path(config.checkpoint_path)
+    load_calls: list[Path] = []
+
+    def fake_load_generator(checkpoint_path: Path, *, device: str) -> SimpleNamespace:
+        load_calls.append(checkpoint_path)
+        return SimpleNamespace(checkpoint_path=checkpoint_path)
+
+    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+        return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
+
+    monkeypatch.setattr(web, "load_generator", fake_load_generator)
+    monkeypatch.setattr(web, "generate_image_with_model", fake_generate)
+    monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
+    app = web.create_app(config)
+
+    first_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    checkpoint_path.write_bytes(b"replacement checkpoint")
+    second_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert load_calls == [checkpoint_path, checkpoint_path]
+
+
 def test_web_generate_stream_reports_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

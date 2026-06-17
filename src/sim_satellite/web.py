@@ -99,7 +99,7 @@ def create_app(
     _validate_checkpoint_path(config)
     samples = _load_samples(config)
     loaded_generator: Any | None = None
-    loaded_checkpoint_path: Path | None = None
+    loaded_checkpoint_key: tuple[Path, int, int] | None = None
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
 
     def checkpoint_path() -> Path:
@@ -109,14 +109,15 @@ def create_app(
         )
 
     def generator() -> Any:
-        nonlocal loaded_generator, loaded_checkpoint_path
+        nonlocal loaded_generator, loaded_checkpoint_key
         try:
             resolved_checkpoint_path = checkpoint_path()
         except FileNotFoundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        if loaded_generator is None or loaded_checkpoint_path != resolved_checkpoint_path:
+        checkpoint_key = _checkpoint_cache_key(resolved_checkpoint_path)
+        if loaded_generator is None or loaded_checkpoint_key != checkpoint_key:
             loaded_generator = load_generator(resolved_checkpoint_path, device=config.device)
-            loaded_checkpoint_path = resolved_checkpoint_path
+            loaded_checkpoint_key = checkpoint_key
         return loaded_generator
 
     @app.get("/", include_in_schema=False)
@@ -286,6 +287,11 @@ def _checkpoint_sort_key(path: Path) -> tuple[int, float, str]:
     match = re.search(r"-step-(\d+)(?:\.[^.]+)?$", path.name)
     step = int(match.group(1)) if match else -1
     return (step, path.stat().st_mtime, path.name)
+
+
+def _checkpoint_cache_key(path: Path) -> tuple[Path, int, int]:
+    stat = path.stat()
+    return (path, stat.st_mtime_ns, stat.st_size)
 
 
 def _prepare_generation(
