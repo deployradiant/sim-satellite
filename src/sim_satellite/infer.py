@@ -175,17 +175,9 @@ def generate_image_with_model(
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
 
-    with torch.no_grad():
-        for completed_steps, (timestep_value, step_size) in enumerate(
-            _flow_inference_schedule(config.steps),
-            start=1,
-        ):
-            timestep = torch.full(
-                (1,),
-                timestep_value,
-                dtype=torch.float32,
-                device=device,
-            )
+    timesteps, step_size = _flow_inference_tensors(config.steps, torch=torch, device=device)
+    with torch.inference_mode():
+        for completed_steps, timestep in enumerate(timesteps, start=1):
             velocity = _guided_prediction(
                 model,
                 image,
@@ -214,6 +206,16 @@ def _flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
         ((step - 0.5) * step_size, step_size)
         for step in reversed(range(1, steps + 1))
     )
+
+
+def _flow_inference_tensors(steps: int, *, torch: Any, device: Any) -> tuple[Any, float]:
+    step_size = 1.0 / float(steps)
+    timesteps = torch.tensor(
+        [(step - 0.5) * step_size for step in reversed(range(1, steps + 1))],
+        dtype=torch.float32,
+        device=device,
+    ).view(steps, 1)
+    return timesteps, step_size
 
 
 def _guided_prediction(

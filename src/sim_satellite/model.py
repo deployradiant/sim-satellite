@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any
@@ -61,15 +62,17 @@ class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.channels = channels
+        half_channels = channels // 2
+        frequencies = torch.exp(
+            -math.log(10000.0)
+            * torch.arange(half_channels).float()
+            / max(1, half_channels - 1)
+        )
+        self.register_buffer("frequencies", frequencies, persistent=False)
 
     def forward(self, timestep: Any) -> Any:
         timestep = timestep.float().view(-1)
-        half_channels = self.channels // 2
-        frequencies = torch.exp(
-            -torch.log(torch.tensor(10000.0, device=timestep.device))
-            * torch.arange(half_channels, device=timestep.device).float()
-            / max(1, half_channels - 1)
-        )
+        frequencies = self.frequencies.to(device=timestep.device)
         angles = timestep[:, None] * frequencies[None, :] * 1000.0
         embedding = torch.cat([torch.sin(angles), torch.cos(angles)], dim=1)
         if self.channels % 2:

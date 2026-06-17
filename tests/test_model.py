@@ -44,6 +44,7 @@ def test_model_uses_direct_timestep_embedding_without_deep_attention() -> None:
     state = model.state_dict()
 
     assert "time_mlp.1.weight" not in state
+    assert "time_embedding.frequencies" not in state
     assert state["down_blocks.0.0.time_projection.weight"].shape == (8, 8)
     assert "deep_down_attention.qkv.weight" not in state
 

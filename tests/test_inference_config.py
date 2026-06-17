@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.infer import GenerationConfig, InferenceConfig, InferenceResult
+from sim_satellite.infer import InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
 
@@ -111,6 +111,23 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="incompatible with flow U-Net"):
         infer.load_generator(checkpoint_path, device="cpu")
+
+
+def test_flow_inference_tensors_match_schedule() -> None:
+    timesteps, step_size = infer._flow_inference_tensors(4, torch=torch, device="cpu")
+
+    assert timesteps.shape == (4, 1)
+    assert step_size == 0.25
+    assert torch.allclose(
+        timesteps.flatten(),
+        torch.tensor([0.875, 0.625, 0.375, 0.125]),
+    )
+    assert infer._flow_inference_schedule(4) == (
+        (0.875, 0.25),
+        (0.625, 0.25),
+        (0.375, 0.25),
+        (0.125, 0.25),
+    )
 
 
 def _write_flow_checkpoint(
