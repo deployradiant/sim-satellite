@@ -228,8 +228,16 @@ def run_training(
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
+        profile_timing = _should_sample_step_timing(config, step_number)
+        should_log = (
+            step_number == 1 or step_number == config.steps or step_number % config.log_every == 0
+        )
+        should_write_artifacts = (
+            config.save_every > 0 and step_number % config.save_every == 0
+        ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
+        profile_metrics = should_log or should_write_artifacts or profile_timing
         step_started_at = time.monotonic()
-        loss, step_timing = _train_step(
+        loss, step_timing, step_metrics = _train_step(
             batches[step % len(batches)],
             model=model,
             optimizer=optimizer,
@@ -243,15 +251,10 @@ def run_training(
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
             precision=config.precision,
-            profile_timing=_should_sample_step_timing(config, step_number),
+            profile_timing=profile_timing,
+            profile_metrics=profile_metrics,
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
-        should_log = (
-            step_number == 1 or step_number == config.steps or step_number % config.log_every == 0
-        )
-        should_write_artifacts = (
-            config.save_every > 0 and step_number % config.save_every == 0
-        ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
         loss_record = None
         if should_log or should_write_artifacts or step_timing:
             final_loss = training_log.loss_scalar(loss)
@@ -261,6 +264,7 @@ def run_training(
                 step_seconds=step_seconds,
                 batch_size=config.batch_size,
                 step_timing=step_timing,
+                step_metrics=step_metrics,
             )
             losses.append(loss_record)
 
@@ -299,6 +303,7 @@ def run_training(
                     step_seconds=step_seconds,
                     batch_size=config.batch_size,
                     step_timing=step_timing,
+                    step_metrics=step_metrics,
                 )
                 losses.append(loss_record)
             training_log.print_train_progress(
@@ -322,6 +327,7 @@ def run_training(
                     step_seconds=step_seconds,
                     batch_size=config.batch_size,
                     step_timing=step_timing,
+                    step_metrics=step_metrics,
                 )
                 losses.append(loss_record)
             training_log.write_training_artifacts(
@@ -463,8 +469,10 @@ def _train_step(
     mask_drop_probability: float,
     precision: str,
     profile_timing: bool,
-) -> tuple[Any, dict[str, float | int]]:
+    profile_metrics: bool,
+) -> tuple[Any, dict[str, float | int], dict[str, float | int]]:
     timing: dict[str, float | int] = {}
+    metrics: dict[str, float | int] = {}
 
     _synchronize_device(torch, device, profile_timing)
     crop_started_at = time.monotonic()
@@ -524,14 +532,51 @@ def _train_step(
     optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, precision):
         prediction = model(noisy, semantic_mask, timestep)
-    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+    prediction_float = prediction.float()
+    target_float = target.float()
+    loss = torch.nn.functional.mse_loss(prediction_float, target_float)
+    if profile_metrics:
+        target_rms = _tensor_rms(target_float, torch=torch)
+        prediction_rms = _tensor_rms(prediction_float, torch=torch)
+        metrics.update(
+            {
+                "prediction_rms": prediction_rms,
+                "target_rms": target_rms,
+                "prediction_target_rms_ratio": (
+                    prediction_rms / target_rms if target_rms > 0.0 else 0.0
+                ),
+                "zero_prediction_loss": _tensor_mean_square(target_float, torch=torch),
+            }
+        )
     loss.backward()
+    if profile_metrics:
+        metrics["grad_norm"] = _global_grad_norm(model, torch=torch)
     optimizer.step()
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["train_compute_seconds"] = max(0.0, time.monotonic() - compute_started_at)
         timing["timing_sampled"] = 1
-    return loss.detach(), timing
+    return loss.detach(), timing, metrics
+
+
+def _tensor_rms(value: Any, *, torch: Any) -> float:
+    return training_log.loss_scalar(torch.sqrt(torch.mean(value.detach().float().square())))
+
+
+def _tensor_mean_square(value: Any, *, torch: Any) -> float:
+    return training_log.loss_scalar(torch.mean(value.detach().float().square()))
+
+
+def _global_grad_norm(model: Any, *, torch: Any) -> float:
+    total = None
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        value = parameter.grad.detach().float().square().sum()
+        total = value if total is None else total + value
+    if total is None:
+        return 0.0
+    return training_log.loss_scalar(torch.sqrt(total))
 
 
 def _load_training_state(

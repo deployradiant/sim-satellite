@@ -128,6 +128,34 @@ def test_training_model_config_uses_latent_image_size() -> None:
     assert config.model_config().image_channels == 48
 
 
+def test_step_ema_uses_training_step_distance() -> None:
+    smoothed = training_log._step_exponential_moving_average(
+        [0, 100, 1000],
+        [1.0, 0.0, 0.0],
+        half_life_steps=100,
+    )
+
+    assert smoothed[0] == 1.0
+    assert smoothed[1] == pytest.approx(0.5)
+    assert smoothed[2] == pytest.approx(0.5 * (0.5**9))
+
+
+def test_loss_record_includes_step_metrics() -> None:
+    record = training_log.loss_record(
+        step=10,
+        loss=0.25,
+        step_seconds=0.5,
+        batch_size=4,
+        step_timing={"timing_sampled": 1},
+        step_metrics={"grad_norm": 12.0, "prediction_rms": 0.5},
+    )
+
+    assert record["step_images_per_second"] == 8.0
+    assert record["timing_sampled"] == 1
+    assert record["grad_norm"] == 12.0
+    assert record["prediction_rms"] == 0.5
+
+
 def test_run_timing_payload_estimates_remaining_runtime() -> None:
     payload = training_log.run_timing_payload(
         started_at_epoch_utc=1_000.0,

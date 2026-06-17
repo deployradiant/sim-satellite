@@ -11,6 +11,8 @@ from typing import Any
 
 from sim_satellite.model import ModelConfig
 
+LOSS_PLOT_EMA_HALF_LIFE_STEPS = 1000
+
 
 def print_train_start(
     *,
@@ -160,6 +162,7 @@ def print_train_progress(
             "loss": loss,
             "step_seconds": loss_record["step_seconds"],
             "step_images_per_second": loss_record["step_images_per_second"],
+            **_loss_record_extra_payload(loss_record),
             **step_timing,
             **run_timing_payload(
                 started_at_epoch_utc=started_at_epoch_utc,
@@ -171,6 +174,13 @@ def print_train_progress(
             ),
         }
     )
+
+
+def _loss_record_extra_payload(
+    loss_record: Mapping[str, float | int],
+) -> dict[str, float | int]:
+    base_keys = {"step", "loss", "step_seconds", "step_images_per_second"}
+    return {key: value for key, value in loss_record.items() if key not in base_keys}
 
 
 def run_timing_payload(
@@ -243,6 +253,7 @@ def loss_record(
     step_seconds: float,
     batch_size: int,
     step_timing: Mapping[str, float | int],
+    step_metrics: Mapping[str, float | int] | None = None,
 ) -> dict[str, float | int]:
     record: dict[str, float | int] = {
         "step": step,
@@ -251,6 +262,8 @@ def loss_record(
         "step_images_per_second": batch_size / step_seconds if step_seconds > 0.0 else 0.0,
     }
     record.update(step_timing)
+    if step_metrics:
+        record.update(step_metrics)
     return record
 
 
@@ -352,12 +365,22 @@ def _write_loss_plot(
 
     steps = [int(item["step"]) for item in losses]
     values = [float(item["loss"]) for item in losses]
-    smoothed = _exponential_moving_average(values, decay=0.95)
+    smoothed = _step_exponential_moving_average(
+        steps,
+        values,
+        half_life_steps=LOSS_PLOT_EMA_HALF_LIFE_STEPS,
+    )
 
     figure, axis = pyplot.subplots(figsize=(8, 4.5), dpi=140)
     if steps:
         axis.plot(steps, values, color="#94a3b8", linewidth=1.0, alpha=0.55, label="train step")
-        axis.plot(steps, smoothed, color="#0f766e", linewidth=2.0, label="train EMA 0.95")
+        axis.plot(
+            steps,
+            smoothed,
+            color="#0f766e",
+            linewidth=2.0,
+            label=f"train EMA h={LOSS_PLOT_EMA_HALF_LIFE_STEPS} steps",
+        )
     if validation_losses:
         validation_steps = [int(item["step"]) for item in validation_losses]
         validation_values = [float(item["loss"]) for item in validation_losses]
@@ -380,14 +403,28 @@ def _write_loss_plot(
     pyplot.close(figure)
 
 
-def _exponential_moving_average(values: list[float], *, decay: float) -> list[float]:
+def _step_exponential_moving_average(
+    steps: list[int],
+    values: list[float],
+    *,
+    half_life_steps: int,
+) -> list[float]:
     if not values:
         return []
+    if len(steps) != len(values):
+        raise ValueError("steps and values must have the same length")
+    if half_life_steps <= 0:
+        raise ValueError("half_life_steps must be positive")
+
     average = values[0]
-    smoothed = []
-    for value in values:
+    previous_step = steps[0]
+    smoothed = [average]
+    for step, value in zip(steps[1:], values[1:], strict=True):
+        step_delta = max(0, step - previous_step)
+        decay = 0.5 ** (step_delta / half_life_steps)
         average = decay * average + (1.0 - decay) * value
         smoothed.append(average)
+        previous_step = step
     return smoothed
 
 
