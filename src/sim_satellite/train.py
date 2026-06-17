@@ -489,7 +489,7 @@ def _train_step(
         timing["crop_seconds"] = max(0.0, time.monotonic() - crop_started_at)
 
     load_started_at = time.monotonic()
-    clean, semantic_mask, coordinates, coordinate_mask = training_data.load_batch(
+    clean, semantic_mask, coordinates = training_data.load_batch(
         samples,
         crop_boxes,
         torch=torch,
@@ -529,7 +529,7 @@ def _train_step(
     compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, precision):
-        prediction = model(noisy, semantic_mask, timestep, coordinates, coordinate_mask)
+        prediction = model(noisy, semantic_mask, timestep, coordinates)
     loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
     loss.backward()
     optimizer.step()
@@ -662,7 +662,7 @@ def _evaluate_validation_loss(
                 )
                 for sample in samples
             ]
-            clean, semantic_mask, coordinates, coordinate_mask = training_data.load_batch(
+            clean, semantic_mask, coordinates = training_data.load_batch(
                 samples,
                 crop_boxes,
                 torch=torch,
@@ -682,7 +682,7 @@ def _evaluate_validation_loss(
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
             with _autocast_context(torch, config.precision):
-                prediction = model(noisy, semantic_mask, timestep, coordinates, coordinate_mask)
+                prediction = model(noisy, semantic_mask, timestep, coordinates)
             loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
             losses.append(loss.detach())
 
