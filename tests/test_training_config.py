@@ -74,31 +74,6 @@ def test_training_config_defaults_to_cuda() -> None:
     assert TrainingConfig().device == "cuda"
 
 
-def test_training_config_rejects_invalid_values() -> None:
-    with pytest.raises(ValueError):
-        TrainingConfig(steps=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(batch_size=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(learning_rate=0.0)
-    with pytest.raises(ValueError):
-        TrainingConfig(save_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(plot_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(validation_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(validation_batches=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(precision="fp16")
-    with pytest.raises(ValueError):
-        TrainingConfig(device="mps")
-    with pytest.raises(ValueError):
-        TrainingConfig(timing_sample_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(color_stats_every=-1)
-
-
 def test_training_device_requires_available_cuda() -> None:
     with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))

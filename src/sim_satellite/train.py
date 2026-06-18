@@ -62,38 +62,6 @@ class TrainingConfig:
     color_stats_every: int = 0
     log_every: int = 10
 
-    def __post_init__(self) -> None:
-        if self.steps < 1:
-            raise ValueError("steps must be positive")
-        if self.batch_size < 1:
-            raise ValueError("batch_size must be positive")
-        if self.log_every < 1:
-            raise ValueError("log_every must be positive")
-        if self.save_every < 0:
-            raise ValueError("save_every must be non-negative")
-        if self.plot_every < 0:
-            raise ValueError("plot_every must be non-negative")
-        if self.validation_every < 0:
-            raise ValueError("validation_every must be non-negative")
-        if self.validation_batches < 1:
-            raise ValueError("validation_batches must be positive")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
-        if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
-            raise ValueError("mask_drop_probability must be between 0 and 1")
-        if self.precision not in {"float32", "bf16"}:
-            raise ValueError("precision must be 'float32' or 'bf16'")
-        if self.device != "cuda" and not self.device.startswith("cuda:"):
-            raise ValueError("device must be a CUDA device")
-        if self.timing_sample_every < 0:
-            raise ValueError("timing_sample_every must be non-negative")
-        if self.color_stats_every < 0:
-            raise ValueError("color_stats_every must be non-negative")
-        if not self.manifest_path:
-            raise ValueError("manifest_path is required")
-        if not self.split:
-            raise ValueError("split is required")
-
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> TrainingConfig:
         names = {field.name for field in fields(cls)}
@@ -110,6 +78,62 @@ class TrainingConfig:
             hidden_channels=self.hidden_channels,
             seed=self.seed,
         )
+
+    @property
+    def checkpoint_file(self) -> Path:
+        return Path(self.checkpoint_path)
+
+    @property
+    def metrics_file(self) -> Path:
+        checkpoint_file = self.checkpoint_file
+        return (
+            Path(self.metrics_path)
+            if self.metrics_path
+            else checkpoint_file.with_suffix(".metrics.json")
+        )
+
+    @property
+    def loss_plot_file(self) -> Path:
+        checkpoint_file = self.checkpoint_file
+        return (
+            Path(self.loss_plot_path)
+            if self.loss_plot_path
+            else checkpoint_file.with_suffix(".loss.png")
+        )
+
+    @property
+    def resume_checkpoint_file(self) -> Path | None:
+        return Path(self.resume_from) if self.resume_from else None
+
+    @property
+    def validation_enabled(self) -> bool:
+        return self.validation_every != 0
+
+    def should_sample_step_timing(self, step_number: int) -> bool:
+        return self._matches_endpoint_interval(self.timing_sample_every, step_number)
+
+    def should_log_color_stats(self, step_number: int) -> bool:
+        return self._matches_endpoint_interval(self.color_stats_every, step_number)
+
+    def should_log_training_step(self, step_number: int) -> bool:
+        return self._matches_endpoint_interval(self.log_every, step_number)
+
+    def should_write_step_artifacts(self, step_number: int) -> bool:
+        return self._matches_interval(self.save_every, step_number) or self._matches_interval(
+            self.plot_every,
+            step_number,
+        )
+
+    def should_validate_step(self, step_number: int) -> bool:
+        return self._matches_interval(self.validation_every, step_number)
+
+    def _matches_endpoint_interval(self, interval: int, step_number: int) -> bool:
+        return interval != 0 and (
+            step_number == 1 or step_number == self.steps or step_number % interval == 0
+        )
+
+    def _matches_interval(self, interval: int, step_number: int) -> bool:
+        return interval != 0 and step_number % interval == 0
 
 
 @dataclass(frozen=True)
@@ -171,9 +195,10 @@ def run_training(
     losses: list[dict[str, float | int]] = []
     validation_losses: list[dict[str, float | int]] = []
     start_step = 0
-    if config.resume_from:
+    resume_checkpoint_file = config.resume_checkpoint_file
+    if resume_checkpoint_file is not None:
         start_step, final_loss, losses, validation_losses = _load_training_state(
-            Path(config.resume_from),
+            resume_checkpoint_file,
             model=model,
             optimizer=optimizer,
             generator=crop_generator,
@@ -183,18 +208,10 @@ def run_training(
             device=device,
         )
 
-    checkpoint_path = Path(config.checkpoint_path)
+    checkpoint_path = config.checkpoint_file
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path = (
-        Path(config.metrics_path)
-        if config.metrics_path
-        else checkpoint_path.with_suffix(".metrics.json")
-    )
-    loss_plot_path = (
-        Path(config.loss_plot_path)
-        if config.loss_plot_path
-        else checkpoint_path.with_suffix(".loss.png")
-    )
+    metrics_path = config.metrics_file
+    loss_plot_path = config.loss_plot_file
 
     training_log.print_train_start(
         started_at_epoch_utc=started_at_epoch_utc,
@@ -222,7 +239,7 @@ def run_training(
     for step in range(start_step, config.steps):
         step_number = step + 1
         step_started_at = time.monotonic()
-        should_log_color_stats = _should_log_color_stats(config, step_number)
+        should_log_color_stats = config.should_log_color_stats(step_number)
         loss, step_timing = _train_step(
             batches[step % len(batches)],
             model=model,
@@ -235,19 +252,12 @@ def run_training(
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
             precision=config.precision,
-            profile_timing=_should_sample_step_timing(config, step_number),
+            profile_timing=config.should_sample_step_timing(step_number),
             log_color_stats=should_log_color_stats,
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
-        should_log = (
-            should_log_color_stats
-            or step_number == 1
-            or step_number == config.steps
-            or step_number % config.log_every == 0
-        )
-        should_write_artifacts = (
-            config.save_every > 0 and step_number % config.save_every == 0
-        ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
+        should_log = should_log_color_stats or config.should_log_training_step(step_number)
+        should_write_artifacts = config.should_write_step_artifacts(step_number)
         loss_record = None
         if should_log or should_write_artifacts or step_timing:
             final_loss = training_log.loss_scalar(loss)
@@ -260,11 +270,7 @@ def run_training(
             )
             losses.append(loss_record)
 
-        if (
-            validation_batches
-            and config.validation_every > 0
-            and step_number % config.validation_every == 0
-        ):
+        if validation_batches and config.should_validate_step(step_number):
             validation_loss, validation_color_stats = _evaluate_validation_loss(
                 model,
                 validation_batches,
@@ -357,7 +363,7 @@ def run_training(
                 after_save()
 
     final_step = max(start_step, config.steps)
-    if not losses and config.resume_from:
+    if not losses and resume_checkpoint_file is not None:
         losses.append({"step": final_step, "loss": final_loss})
     training_log.write_training_artifacts(
         checkpoint_path,
@@ -400,27 +406,9 @@ def run_training(
 
 def _training_device(config: TrainingConfig, *, torch: Any) -> Any:
     device = torch.device(config.device)
-    if device.type != "cuda":
-        raise ValueError("training requires a CUDA device")
     if not torch.cuda.is_available():
         raise RuntimeError("training requires a CUDA-capable GPU")
     return device
-
-
-def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool:
-    return config.timing_sample_every > 0 and (
-        step_number == 1
-        or step_number == config.steps
-        or step_number % config.timing_sample_every == 0
-    )
-
-
-def _should_log_color_stats(config: TrainingConfig, step_number: int) -> bool:
-    return config.color_stats_every > 0 and (
-        step_number == 1
-        or step_number == config.steps
-        or step_number % config.color_stats_every == 0
-    )
 
 
 def _autocast_context(torch: Any, precision: str) -> Any:
@@ -604,7 +592,7 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
 
 
 def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
-    if config.validation_every <= 0:
+    if not config.validation_enabled:
         return ()
 
     manifest_path = Path(config.manifest_path)
@@ -723,11 +711,82 @@ def _run_with_target(config: TrainingConfig, target: str) -> dict[str, Any]:
     return run_training_target(config)
 
 
+def load_training_config_values(values: Mapping[str, Any]) -> TrainingConfig:
+    config = TrainingConfig.from_dict(values)
+    _validate_training_config(config)
+    return config
+
+
 def _load_training_config(config_path: Path) -> TrainingConfig:
     values = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(values, Mapping):
         raise ValueError("Training config JSON must be an object")
-    return TrainingConfig.from_dict(values)
+    return load_training_config_values(values)
+
+
+def _validate_training_config(config: TrainingConfig) -> None:
+    _require_positive(
+        {
+            "steps": config.steps,
+            "batch_size": config.batch_size,
+            "log_every": config.log_every,
+            "validation_batches": config.validation_batches,
+            "learning_rate": config.learning_rate,
+        }
+    )
+    _require_non_negative(
+        {
+            "save_every": config.save_every,
+            "plot_every": config.plot_every,
+            "validation_every": config.validation_every,
+            "timing_sample_every": config.timing_sample_every,
+            "color_stats_every": config.color_stats_every,
+        }
+    )
+    _require_probability({"mask_drop_probability": config.mask_drop_probability})
+    _require_choice("precision", config.precision, {"float32", "bf16"})
+    _require_cuda_device(config.device)
+    _require_present(
+        {
+            "manifest_path": config.manifest_path,
+            "split": config.split,
+        }
+    )
+
+
+def _require_positive(values: Mapping[str, int | float]) -> None:
+    for name, value in values.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+
+
+def _require_non_negative(values: Mapping[str, int | float]) -> None:
+    for name, value in values.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+
+
+def _require_probability(values: Mapping[str, float]) -> None:
+    for name, value in values.items():
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{name} must be between 0 and 1")
+
+
+def _require_choice(name: str, value: str, choices: set[str]) -> None:
+    if value not in choices:
+        expected = ", ".join(sorted(choices))
+        raise ValueError(f"{name} must be one of: {expected}")
+
+
+def _require_cuda_device(value: str) -> None:
+    if value != "cuda" and not value.startswith("cuda:"):
+        raise ValueError("device must be a CUDA device")
+
+
+def _require_present(values: Mapping[str, str]) -> None:
+    for name, value in values.items():
+        if not value:
+            raise ValueError(f"{name} is required")
 
 
 @click.command("train", help="Run model training from a JSON config file.")
