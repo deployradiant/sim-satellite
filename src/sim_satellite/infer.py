@@ -18,7 +18,7 @@ from sim_satellite.data.prepared import (
 )
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.model import ModelConfig, build_model
-from sim_satellite.train import DEFAULT_MANIFEST_PATH
+from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
 DEFAULT_INFERENCE_STEPS = 16

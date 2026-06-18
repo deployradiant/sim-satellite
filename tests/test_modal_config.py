@@ -7,7 +7,7 @@ import pytest
 
 from sim_satellite import modal_app
 from sim_satellite.infer import InferenceConfig
-from sim_satellite.train import TrainingConfig
+from sim_satellite.training_config import TrainingConfig
 from sim_satellite.web import WebConfig
 
 

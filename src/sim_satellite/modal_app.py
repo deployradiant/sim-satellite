@@ -21,10 +21,10 @@ from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
 )
-from sim_satellite.train import (
+from sim_satellite.train import run_training
+from sim_satellite.training_config import (
     TrainingConfig,
     load_training_config_values,
-    run_training,
 )
 from sim_satellite.web import WebConfig, create_app
 
