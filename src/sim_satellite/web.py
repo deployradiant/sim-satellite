@@ -32,7 +32,7 @@ from sim_satellite.data.prepared import (
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator
 from sim_satellite.model import ModelConfig
-from sim_satellite.train import DEFAULT_MANIFEST_PATH
+from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765

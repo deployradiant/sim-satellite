@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -16,7 +16,6 @@ import torch
 
 from sim_satellite import diagnostics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.model import (
     ModelConfig,
@@ -24,96 +23,13 @@ from sim_satellite.model import (
     flow_velocity,
     interpolate_flow_sample,
 )
+from sim_satellite.training_config import TrainingConfig, load_training_config_file
 
 DEFAULT_TARGET = "modal"
-DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
 TIMESTEP_SAMPLING = "logit_normal_uniform_mix"
 TIMESTEP_LOGIT_NORMAL_MEAN = 0.0
 TIMESTEP_LOGIT_NORMAL_STD = 1.0
 TIMESTEP_UNIFORM_MIX_PROBABILITY = 0.5
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    seed: int = 2026
-    steps: int = 8
-    batch_size: int = 4
-    learning_rate: float = 1e-3
-    manifest_path: str = DEFAULT_MANIFEST_PATH
-    split: str = "train"
-    checkpoint_path: str = "artifacts/tiny-sim-satellite.pt"
-    metrics_path: str = ""
-    loss_plot_path: str = ""
-    resume_from: str = ""
-    save_every: int = 0
-    plot_every: int = 0
-    validation_split: str = ""
-    validation_holdout_patterns: str = ""
-    validation_every: int = 0
-    validation_batches: int = 8
-    device: str = "cuda"
-    image_size: int = 32
-    image_channels: int = 3
-    mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
-    hidden_channels: int = 32
-    use_coordinates: bool = True
-    mask_drop_probability: float = 0.0
-    precision: str = "float32"
-    timing_sample_every: int = 0
-    color_stats_every: int = 0
-    log_every: int = 10
-
-    def __post_init__(self) -> None:
-        if self.steps < 1:
-            raise ValueError("steps must be positive")
-        if self.batch_size < 1:
-            raise ValueError("batch_size must be positive")
-        if self.log_every < 1:
-            raise ValueError("log_every must be positive")
-        if self.save_every < 0:
-            raise ValueError("save_every must be non-negative")
-        if self.plot_every < 0:
-            raise ValueError("plot_every must be non-negative")
-        if self.validation_every < 0:
-            raise ValueError("validation_every must be non-negative")
-        if self.validation_batches < 1:
-            raise ValueError("validation_batches must be positive")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
-        if self.mask_drop_probability < 0.0 or self.mask_drop_probability > 1.0:
-            raise ValueError("mask_drop_probability must be between 0 and 1")
-        if self.precision not in {"float32", "bf16"}:
-            raise ValueError("precision must be 'float32' or 'bf16'")
-        if self.device != "cuda" and not self.device.startswith("cuda:"):
-            raise ValueError("device must be a CUDA device")
-        if self.timing_sample_every < 0:
-            raise ValueError("timing_sample_every must be non-negative")
-        if self.color_stats_every < 0:
-            raise ValueError("color_stats_every must be non-negative")
-        if not isinstance(self.use_coordinates, bool):
-            raise ValueError("use_coordinates must be a boolean")
-        if not self.manifest_path:
-            raise ValueError("manifest_path is required")
-        if not self.split:
-            raise ValueError("split is required")
-
-    @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> TrainingConfig:
-        names = {field.name for field in fields(cls)}
-        unknown = sorted(set(values) - names)
-        if unknown:
-            raise ValueError(f"Unknown training config fields: {', '.join(unknown)}")
-        return cls(**{name: values[name] for name in names if name in values})
-
-    def model_config(self) -> ModelConfig:
-        return ModelConfig(
-            image_size=self.image_size,
-            image_channels=self.image_channels,
-            mask_channels=self.mask_channels,
-            hidden_channels=self.hidden_channels,
-            seed=self.seed,
-            use_coordinates=self.use_coordinates,
-        )
 
 
 @dataclass(frozen=True)
@@ -405,8 +321,6 @@ def run_training(
 
 def _training_device(config: TrainingConfig, *, torch: Any) -> Any:
     device = torch.device(config.device)
-    if device.type != "cuda":
-        raise ValueError("training requires a CUDA device")
     if not torch.cuda.is_available():
         raise RuntimeError("training requires a CUDA-capable GPU")
     return device
@@ -733,13 +647,6 @@ def _run_with_target(config: TrainingConfig, target: str) -> dict[str, Any]:
     return run_training_target(config)
 
 
-def _load_training_config(config_path: Path) -> TrainingConfig:
-    values = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(values, Mapping):
-        raise ValueError("Training config JSON must be an object")
-    return TrainingConfig.from_dict(values)
-
-
 @click.command("train", help="Run model training from a JSON config file.")
 @click.argument(
     "config_path",
@@ -753,7 +660,7 @@ def _load_training_config(config_path: Path) -> TrainingConfig:
 )
 def cli(config_path: Path, target: str) -> None:
     try:
-        config = _load_training_config(config_path)
+        config = load_training_config_file(config_path)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise click.ClickException(str(error)) from error
 

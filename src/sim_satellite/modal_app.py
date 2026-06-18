@@ -21,9 +21,10 @@ from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
 )
-from sim_satellite.train import (
+from sim_satellite.train import run_training
+from sim_satellite.training_config import (
     TrainingConfig,
-    run_training,
+    load_training_config_values,
 )
 from sim_satellite.web import WebConfig, create_app
 
@@ -98,7 +99,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_openearthmap_data(config["manifest_path"])
     result = run_training(
-        TrainingConfig.from_dict(config),
+        load_training_config_values(config),
         after_save=artifact_volume.commit,
     )
     artifact_volume.commit()

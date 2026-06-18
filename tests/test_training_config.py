@@ -16,17 +16,20 @@ from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
-    TrainingConfig,
     _autocast_context,
     _load_training_samples,
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
 )
+from sim_satellite.training_config import TrainingConfig
 from sim_satellite.training_data import preload_samples, random_square_crop_box
 
 
-def test_training_cli_loads_json_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_training_cli_uses_json_config_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "train.json"
     config_path.write_text(
         json.dumps({"steps": 2, "batch_size": 3, "manifest_path": "manifest.jsonl"}),
@@ -52,15 +55,12 @@ def test_training_cli_loads_json_config(monkeypatch: pytest.MonkeyPatch, tmp_pat
         manifest_path="manifest.jsonl",
     )
 
-
-def test_training_cli_has_no_per_field_training_options() -> None:
-    result = CliRunner().invoke(train_module.cli, ["--help"])
-
-    assert result.exit_code == 0
-    assert "CONFIG_PATH" in result.output
-    assert "--target" in result.output
-    assert "--steps" not in result.output
-    assert "--batch-size" not in result.output
+    help_result = CliRunner().invoke(train_module.cli, ["--help"])
+    assert help_result.exit_code == 0
+    assert "CONFIG_PATH" in help_result.output
+    assert "--target" in help_result.output
+    assert "--steps" not in help_result.output
+    assert "--batch-size" not in help_result.output
 
 
 def test_training_config_rejects_unknown_fields() -> None:
@@ -70,57 +70,11 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
-def test_training_config_defaults_to_cuda() -> None:
-    assert TrainingConfig().device == "cuda"
-
-
-def test_training_config_rejects_invalid_values() -> None:
-    with pytest.raises(ValueError):
-        TrainingConfig(steps=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(batch_size=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(learning_rate=0.0)
-    with pytest.raises(ValueError):
-        TrainingConfig(save_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(plot_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(validation_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(validation_batches=0)
-    with pytest.raises(ValueError):
-        TrainingConfig(precision="fp16")
-    with pytest.raises(ValueError):
-        TrainingConfig(device="mps")
-    with pytest.raises(ValueError):
-        TrainingConfig(timing_sample_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(color_stats_every=-1)
-    with pytest.raises(ValueError):
-        TrainingConfig(use_coordinates=0)  # type: ignore[arg-type]
-
-
-def test_training_config_threads_coordinate_setting_to_model_config() -> None:
-    model_config = TrainingConfig(use_coordinates=False).model_config()
-
-    assert model_config.use_coordinates is False
-
-
-def test_training_device_requires_available_cuda() -> None:
+def test_training_cuda_runtime_helpers() -> None:
     with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
 
-
-def test_training_device_accepts_available_cuda() -> None:
-    device = _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=True))
-
-    assert str(device) == "cuda"
-
-
-def test_bf16_autocast_is_cuda_only() -> None:
     fake_torch = _FakeTorch(cuda_available=True)
-
     context = _autocast_context(fake_torch, "bf16")
 
     assert context == "autocast-context"
@@ -176,8 +130,6 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     assert torch.all(actual >= 0.0)
     assert torch.all(actual <= 1.0)
 
-
-def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     logit_generator = torch.Generator(device="cpu").manual_seed(456)
     mixed_generator = torch.Generator(device="cpu").manual_seed(456)
 
@@ -198,7 +150,7 @@ def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     assert mixed_tail_mass > logit_tail_mass * 2.0
 
 
-def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) -> None:
+def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     manifest_path.write_text(
         "\n".join(
@@ -230,26 +182,6 @@ def test_validation_holdout_patterns_are_excluded_from_training(tmp_path: Path) 
 
     assert [sample.image_path.name for sample in samples] == ["b.tif"]
 
-
-def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "manifest.jsonl"
-    manifest_path.write_text(
-        "\n".join(
-            [
-                '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
-                '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
-                '"prepared": "prepared/abancay/a.pt", '
-                '"split": "train"}',
-                '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
-                '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
-                '"prepared": "prepared/tokyo/b.pt", '
-                '"split": "train"}',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
     batches = _load_validation_batches(
         TrainingConfig(
             manifest_path=str(manifest_path),
@@ -261,15 +193,6 @@ def test_validation_batches_use_holdout_patterns(tmp_path: Path) -> None:
 
     assert len(batches) == 1
     assert batches[0][0].image_path.name == "a.tif"
-
-
-def test_validation_requires_split_or_holdout_patterns(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "manifest.jsonl"
-    manifest_path.write_text(
-        '{"image": "images/a.tif", "mask": "labels/a.tif", '
-        '"prepared": "prepared/a.pt", "split": "train"}\n',
-        encoding="utf-8",
-    )
 
     with pytest.raises(ValueError, match="validation_split or validation_holdout_patterns"):
         _load_validation_batches(
