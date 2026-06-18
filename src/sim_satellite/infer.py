@@ -286,9 +286,11 @@ def _build_model_for_checkpoint(
     if _uses_legacy_additive_time_conditioning(model_config, model_state):
         return build_legacy_additive_time_model(model_config), False, False
 
-    supports_coordinates = _has_coordinate_projection(model_state)
-    allow_missing_coordinate_projection = not supports_coordinates and _has_learned_time_embedding(
-        model_state
+    supports_coordinates = model_config.use_coordinates and _has_coordinate_projection(model_state)
+    allow_missing_coordinate_projection = (
+        model_config.use_coordinates
+        and not supports_coordinates
+        and _has_learned_time_embedding(model_state)
     )
     return build_model(model_config), supports_coordinates, allow_missing_coordinate_projection
 

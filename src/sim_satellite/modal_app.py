@@ -54,7 +54,7 @@ MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
 )
 MODAL_WEB_COMPARISON_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB",
-    "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
+    "artifacts/openearthmap-flow-unet-100m-256-no-coords-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
 MODAL_IMAGE_ENV = {
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,

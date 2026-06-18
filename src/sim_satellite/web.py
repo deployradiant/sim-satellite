@@ -57,7 +57,7 @@ class WebConfig:
     checkpoint_label: str = "Coordinate checkpoint"
     comparison_checkpoint_path: str = ""
     comparison_checkpoint_glob: str = ""
-    comparison_checkpoint_label: str = "Latest main checkpoint"
+    comparison_checkpoint_label: str = "No-coordinate checkpoint"
     manifest_path: str = DEFAULT_MANIFEST_PATH
     split: str = "train"
     device: str = "cpu"

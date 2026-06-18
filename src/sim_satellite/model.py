@@ -23,6 +23,7 @@ class ModelConfig:
     mask_channels: int = 9
     hidden_channels: int = 32
     seed: int = 2026
+    use_coordinates: bool = True
 
     def __post_init__(self) -> None:
         if self.image_size < 8:
@@ -33,6 +34,8 @@ class ModelConfig:
             raise ValueError("mask_channels must be positive")
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
+        if not isinstance(self.use_coordinates, bool):
+            raise ValueError("use_coordinates must be a boolean")
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> ModelConfig:
@@ -173,10 +176,14 @@ class ConditionalUNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_channels, time_channels),
         )
-        self.coordinate_projection = nn.Sequential(
-            nn.Linear(3, base_channels),
-            nn.SiLU(),
-            nn.Linear(base_channels, base_channels),
+        self.coordinate_projection = (
+            nn.Sequential(
+                nn.Linear(3, base_channels),
+                nn.SiLU(),
+                nn.Linear(base_channels, base_channels),
+            )
+            if model_config.use_coordinates
+            else None
         )
         self.input_conv = nn.Conv2d(
             model_config.image_channels + model_config.mask_channels,
@@ -259,7 +266,7 @@ class ConditionalUNet(nn.Module):
     ) -> torch.Tensor:
         time_embedding = self.time_embedding(timestep)
         coordinate_bias = None
-        if coordinates is not None:
+        if coordinates is not None and self.coordinate_projection is not None:
             coordinate_features = _coordinate_features(coordinates)
             if coordinate_features.shape[0] != image.shape[0]:
                 raise ValueError(

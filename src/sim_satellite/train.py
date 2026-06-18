@@ -56,6 +56,7 @@ class TrainingConfig:
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 32
+    use_coordinates: bool = True
     mask_drop_probability: float = 0.0
     precision: str = "float32"
     timing_sample_every: int = 0
@@ -89,6 +90,8 @@ class TrainingConfig:
             raise ValueError("timing_sample_every must be non-negative")
         if self.color_stats_every < 0:
             raise ValueError("color_stats_every must be non-negative")
+        if not isinstance(self.use_coordinates, bool):
+            raise ValueError("use_coordinates must be a boolean")
         if not self.manifest_path:
             raise ValueError("manifest_path is required")
         if not self.split:
@@ -109,6 +112,7 @@ class TrainingConfig:
             mask_channels=self.mask_channels,
             hidden_channels=self.hidden_channels,
             seed=self.seed,
+            use_coordinates=self.use_coordinates,
         )
 
 
@@ -234,6 +238,7 @@ def run_training(
             random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            use_coordinates=config.use_coordinates,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
             log_color_stats=should_log_color_stats,
@@ -466,6 +471,7 @@ def _train_step(
     random_generator: torch.Generator,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
+    use_coordinates: bool,
     precision: str,
     profile_timing: bool,
     log_color_stats: bool,
@@ -497,6 +503,8 @@ def _train_step(
         device=device,
         preloaded_samples=preloaded_samples,
     )
+    if not use_coordinates:
+        coordinates = None
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
@@ -670,6 +678,8 @@ def _evaluate_validation_loss(
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
+            if not config.use_coordinates:
+                coordinates = None
             if log_color_stats:
                 color_batches.append(clean.detach().cpu())
             noise = torch.randn(clean.shape, generator=generator, device=device)

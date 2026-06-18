@@ -97,6 +97,14 @@ def test_training_config_rejects_invalid_values() -> None:
         TrainingConfig(timing_sample_every=-1)
     with pytest.raises(ValueError):
         TrainingConfig(color_stats_every=-1)
+    with pytest.raises(ValueError):
+        TrainingConfig(use_coordinates=0)  # type: ignore[arg-type]
+
+
+def test_training_config_threads_coordinate_setting_to_model_config() -> None:
+    model_config = TrainingConfig(use_coordinates=False).model_config()
+
+    assert model_config.use_coordinates is False
 
 
 def test_training_device_requires_available_cuda() -> None:
@@ -154,9 +162,7 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
         device=torch.device("cpu"),
     )
     logits = torch.randn(16, generator=expected_generator, device="cpu")
-    logit_normal = torch.sigmoid(
-        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    )
+    logit_normal = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
     uniform = torch.rand(16, generator=expected_generator, device="cpu")
     use_uniform = (
         torch.rand(16, generator=expected_generator, device="cpu")
@@ -176,9 +182,7 @@ def test_uniform_timestep_mix_increases_endpoint_tail_mass() -> None:
     mixed_generator = torch.Generator(device="cpu").manual_seed(456)
 
     logits = torch.randn(4096, generator=logit_generator, device="cpu")
-    logit_normal = torch.sigmoid(
-        logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN
-    )
+    logit_normal = torch.sigmoid(logits * TIMESTEP_LOGIT_NORMAL_STD + TIMESTEP_LOGIT_NORMAL_MEAN)
     mixed = _sample_flow_timesteps(
         4096,
         torch=torch,
