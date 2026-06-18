@@ -16,84 +16,55 @@ def test_modal_training_maps_relative_manifest_to_remote_data_root(
     tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    fake_app = _FakeApp()
-    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
-
-    modal_app.run_training_target(
-        TrainingConfig(manifest_path="manifest.jsonl"),
+    cases = (
+        ("manifest.jsonl", "/data/manifest.jsonl"),
+        ("data/openearthmap/manifest.jsonl", "/data/openearthmap/manifest.jsonl"),
     )
 
-    assert fake_app.run_calls == 1
-    assert fake_train_remote.received is not None
-    assert fake_train_remote.received["manifest_path"] == "/data/manifest.jsonl"
+    for manifest_path, remote_manifest_path in cases:
+        fake_app = _FakeApp()
+        fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+        _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
+
+        modal_app.run_training_target(
+            TrainingConfig(manifest_path=manifest_path),
+        )
+
+        assert fake_app.run_calls == 1
+        assert fake_train_remote.received is not None
+        assert fake_train_remote.received["manifest_path"] == remote_manifest_path
 
 
-def test_modal_training_rejects_absolute_checkpoint_outside_artifacts_before_app_run(
+def test_modal_training_rejects_invalid_artifact_paths_before_app_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
-    fake_app = _FakeApp()
-    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
-
-    with pytest.raises(ValueError, match="artifact paths.*relative or under /artifacts"):
-        modal_app.run_training_target(
-            TrainingConfig(
-                manifest_path="data/openearthmap/manifest.jsonl",
-                checkpoint_path=str(tmp_path / "model.pt"),
-            ),
-        )
-
-    assert fake_app.run_calls == 0
-    assert fake_app.enter_calls == 0
-    assert fake_train_remote.received is None
-
-
-def test_modal_training_rejects_artifact_path_escape_before_app_run(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
-    fake_app = _FakeApp()
-    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
-
-    with pytest.raises(ValueError, match="artifact paths.*stay under /artifacts"):
-        modal_app.run_training_target(
-            TrainingConfig(
-                manifest_path="data/openearthmap/manifest.jsonl",
-                checkpoint_path="artifacts/../model.pt",
-            ),
-        )
-
-    assert fake_app.run_calls == 0
-    assert fake_app.enter_calls == 0
-    assert fake_train_remote.received is None
-
-
-def test_modal_training_does_not_require_local_manifest_before_app_run(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_app = _FakeApp()
-    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
-
-    modal_app.run_training_target(
-        TrainingConfig(manifest_path="data/openearthmap/manifest.jsonl"),
+    cases = (
+        (str(tmp_path / "model.pt"), "artifact paths.*relative or under /artifacts"),
+        ("artifacts/../model.pt", "artifact paths.*stay under /artifacts"),
     )
 
-    assert fake_app.run_calls == 1
-    assert fake_train_remote.received is not None
-    assert fake_train_remote.received["manifest_path"] == "/data/openearthmap/manifest.jsonl"
+    for checkpoint_path, message in cases:
+        fake_app = _FakeApp()
+        fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+        _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
+
+        with pytest.raises(ValueError, match=message):
+            modal_app.run_training_target(
+                TrainingConfig(
+                    manifest_path="data/openearthmap/manifest.jsonl",
+                    checkpoint_path=checkpoint_path,
+                ),
+            )
+
+        assert fake_app.run_calls == 0
+        assert fake_app.enter_calls == 0
+        assert fake_train_remote.received is None
 
 
-def test_modal_inference_rejects_absolute_mask_outside_data_before_app_run(
+def test_modal_inference_rejects_invalid_masks_before_app_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -101,63 +72,31 @@ def test_modal_inference_rejects_absolute_mask_outside_data_before_app_run(
     manifest_path = _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
     outside_mask_path = tmp_path / "mask.png"
     outside_mask_path.write_bytes(b"mask")
-    fake_app = _FakeApp()
-    fake_infer_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, infer_remote=fake_infer_remote)
-
-    with pytest.raises(ValueError, match="mask_path.*under local data/"):
-        modal_app.run_inference_target(
+    cases = (
+        (
             InferenceConfig(
                 manifest_path=str(manifest_path),
                 mask_path=str(outside_mask_path),
-            )
-        )
-
-    assert fake_app.run_calls == 0
-    assert fake_app.enter_calls == 0
-    assert fake_infer_remote.received is None
-
-
-def test_modal_inference_requires_mask_path_before_app_run(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    manifest_path = _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
-    fake_app = _FakeApp()
-    fake_infer_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, infer_remote=fake_infer_remote)
-
-    with pytest.raises(ValueError, match="mask_path is required"):
-        modal_app.run_inference_target(
+            ),
+            "mask_path.*under local data/",
+        ),
+        (
             InferenceConfig(manifest_path=str(manifest_path), mask_path=None),
-        )
-
-    assert fake_app.run_calls == 0
-    assert fake_app.enter_calls == 0
-    assert fake_infer_remote.received is None
-
-
-def test_modal_training_maps_resume_checkpoint_to_artifact_volume(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
-    fake_app = _FakeApp()
-    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
-    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
-
-    modal_app.run_training_target(
-        TrainingConfig(
-            manifest_path="data/openearthmap/manifest.jsonl",
-            checkpoint_path="artifacts/checkpoints/model.pt",
-            resume_from="artifacts/checkpoints/model-step-50000.pt",
-        )
+            "mask_path is required",
+        ),
     )
 
-    assert fake_train_remote.received is not None
-    assert fake_train_remote.received["resume_from"] == "/artifacts/checkpoints/model-step-50000.pt"
+    for config, message in cases:
+        fake_app = _FakeApp()
+        fake_infer_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+        _install_modal_fakes(monkeypatch, fake_app, infer_remote=fake_infer_remote)
+
+        with pytest.raises(ValueError, match=message):
+            modal_app.run_inference_target(config)
+
+        assert fake_app.run_calls == 0
+        assert fake_app.enter_calls == 0
+        assert fake_infer_remote.received is None
 
 
 def test_modal_training_enters_app_run_with_valid_data(
@@ -174,6 +113,7 @@ def test_modal_training_enters_app_run_with_valid_data(
         TrainingConfig(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="artifacts/checkpoints/model.pt",
+            resume_from="artifacts/checkpoints/model-step-50000.pt",
         )
     )
 
@@ -186,11 +126,13 @@ def test_modal_training_enters_app_run_with_valid_data(
             TrainingConfig(
                 manifest_path="data/openearthmap/manifest.jsonl",
                 checkpoint_path="artifacts/checkpoints/model.pt",
+                resume_from="artifacts/checkpoints/model-step-50000.pt",
             )
         ),
         "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
+        "resume_from": "/artifacts/checkpoints/model-step-50000.pt",
     }
 
 
