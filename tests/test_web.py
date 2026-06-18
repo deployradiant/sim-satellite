@@ -27,6 +27,15 @@ def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.Monkey
     assert state.status_code == 200
     payload = state.json()
     assert payload["checkpointPath"] == config.checkpoint_path
+    assert payload["checkpoints"] == [
+        {
+            "id": "primary",
+            "label": config.checkpoint_label,
+            "path": config.checkpoint_path,
+            "glob": "",
+            "available": True,
+        }
+    ]
     assert payload["samples"][0]["name"] == "tile"
     assert payload["classes"][0]["name"] == "unlabeled"
 
@@ -107,6 +116,47 @@ def test_web_generate_uses_generation_only_config(
     assert generation_config.mask_path == str(mask_path)
     assert generation_config.coordinates is None
     assert load_calls == [(Path(config.checkpoint_path), config.device)]
+
+
+def test_web_generate_uses_requested_comparison_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    comparison_checkpoint = tmp_path / "main-checkpoint.pt"
+    comparison_checkpoint.write_bytes(b"comparison")
+    config = web.WebConfig(
+        checkpoint_path=config.checkpoint_path,
+        comparison_checkpoint_path=str(comparison_checkpoint),
+        manifest_path=config.manifest_path,
+        display_size=4,
+    )
+    load_calls: list[Path] = []
+
+    def fake_load_generator(checkpoint_path: Path, *, device: str) -> SimpleNamespace:
+        load_calls.append(checkpoint_path)
+        return SimpleNamespace(checkpoint_path=checkpoint_path)
+
+    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+        return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
+
+    monkeypatch.setattr(web, "load_generator", fake_load_generator)
+    monkeypatch.setattr(web, "generate_image_with_model", fake_generate)
+    monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
+    app = web.create_app(config)
+
+    response = _request(
+        app,
+        "POST",
+        "/api/generate",
+        json_body={"index": 0, "checkpoint": "comparison"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["checkpointId"] == "comparison"
+    assert response.json()["checkpointLabel"] == config.comparison_checkpoint_label
+    assert response.json()["checkpointPath"] == str(comparison_checkpoint)
+    assert load_calls == [comparison_checkpoint]
 
 
 def test_web_state_uses_latest_checkpoint_glob(tmp_path: Path) -> None:

@@ -31,6 +31,9 @@ from sim_satellite.web import WebConfig, create_app
 APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
 LOCAL_DATA_ROOT = Path("data")
+LOCAL_MODAL_WEB_DATA_ROOT = Path(
+    os.environ.get("SIM_SATELLITE_LOCAL_MODAL_WEB_DATA_ROOT", "data/modal-web-preview")
+)
 LOCAL_WEB_STATIC_ROOT = Path(__file__).with_name("web_static")
 MODAL_ARTIFACT_ROOT = Path("/artifacts")
 MODAL_DATA_ROOT = Path("/data")
@@ -38,11 +41,30 @@ MODAL_EPHEMERAL_DISK_MIB = int(
     os.environ.get("SIM_SATELLITE_MODAL_EPHEMERAL_DISK_MIB", str(512 * 1024))
 )
 MODAL_PACKAGE_ROOT = Path("/root/sim_satellite")
+MODAL_WEB_DATA_ROOT = Path(
+    os.environ.get(
+        "SIM_SATELLITE_MODAL_WEB_DATA_ROOT",
+        str(MODAL_PACKAGE_ROOT / "modal_web_data"),
+    )
+)
+MODAL_WEB_MANIFEST_PATH = MODAL_WEB_DATA_ROOT / "manifest.jsonl"
 MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
 MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
-    "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
+    "artifacts/openearthmap-flow-unet-93m-256-coords-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
+MODAL_WEB_COMPARISON_CHECKPOINT_GLOB = os.environ.get(
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB",
+    "artifacts/openearthmap-flow-unet-100m-256-no-coords-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
+)
+MODAL_IMAGE_ENV = {
+    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+}
+MODAL_WEB_ENV: dict[str, str | None] = {
+    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+}
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
 
@@ -50,6 +72,7 @@ MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
 app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
+    .env(MODAL_IMAGE_ENV)
     .pip_install("click", "fastapi", "matplotlib", "pillow", "rasterio", "torch")
     .add_local_python_source("sim_satellite")
     .add_local_file(
@@ -57,6 +80,11 @@ image = (
         str(MODAL_PACKAGE_ROOT / "web_static" / "index.html"),
     )
 )
+if LOCAL_MODAL_WEB_DATA_ROOT.exists():
+    image = image.add_local_dir(
+        LOCAL_MODAL_WEB_DATA_ROOT,
+        str(MODAL_WEB_DATA_ROOT),
+    )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 
@@ -98,6 +126,7 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
+    env=MODAL_WEB_ENV,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
@@ -105,10 +134,20 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
 )
 @modal.asgi_app()
 def web_remote() -> Any:
-    _ensure_modal_openearthmap_data(WebConfig.manifest_path)
+    web_config = WebConfig(
+        checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB,
+        comparison_checkpoint_glob=MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+        manifest_path=str(MODAL_WEB_MANIFEST_PATH),
+    )
+    if not MODAL_WEB_MANIFEST_PATH.exists():
+        _ensure_modal_openearthmap_data(WebConfig.manifest_path)
+        web_config = WebConfig(
+            checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB,
+            comparison_checkpoint_glob=MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+        )
     artifact_volume.reload()
     return create_app(
-        _modal_web_config(WebConfig(checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB)),
+        _modal_web_config(web_config),
         before_checkpoint_resolve=artifact_volume.reload,
     )
 
@@ -158,12 +197,29 @@ def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:
 
 
 def _modal_web_config(config: WebConfig) -> WebConfig:
+    manifest_path = Path(config.manifest_path)
     return WebConfig(
         checkpoint_path=_modal_artifact_path(config.checkpoint_path),
         checkpoint_glob=(
             _modal_artifact_path(config.checkpoint_glob) if config.checkpoint_glob else ""
         ),
-        manifest_path=_modal_data_path(config.manifest_path, field_name="manifest_path"),
+        checkpoint_label=config.checkpoint_label,
+        comparison_checkpoint_path=(
+            _modal_artifact_path(config.comparison_checkpoint_path)
+            if config.comparison_checkpoint_path
+            else ""
+        ),
+        comparison_checkpoint_glob=(
+            _modal_artifact_path(config.comparison_checkpoint_glob)
+            if config.comparison_checkpoint_glob
+            else ""
+        ),
+        comparison_checkpoint_label=config.comparison_checkpoint_label,
+        manifest_path=(
+            str(manifest_path)
+            if _is_relative_to(manifest_path, MODAL_WEB_DATA_ROOT)
+            else _modal_data_path(config.manifest_path, field_name="manifest_path")
+        ),
         split=config.split,
         device="cuda",
         steps=config.steps,
@@ -195,6 +251,14 @@ def _modal_artifact_path(value: str) -> str:
     if ".." in path.parts:
         raise ValueError(f"Modal artifact paths must stay under {MODAL_ARTIFACT_ROOT}: {value!r}")
     return str(MODAL_ARTIFACT_ROOT / path)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _modal_data_path(value: str, *, field_name: str) -> str:

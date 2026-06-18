@@ -91,10 +91,9 @@ def run_training(
     losses: list[dict[str, float | int]] = []
     validation_losses: list[dict[str, float | int]] = []
     start_step = 0
-    resume_checkpoint_file = config.resume_checkpoint_file
-    if resume_checkpoint_file is not None:
+    if config.resume_from:
         start_step, final_loss, losses, validation_losses = _load_training_state(
-            resume_checkpoint_file,
+            Path(config.resume_from),
             model=model,
             optimizer=optimizer,
             generator=crop_generator,
@@ -104,10 +103,18 @@ def run_training(
             device=device,
         )
 
-    checkpoint_path = config.checkpoint_file
+    checkpoint_path = Path(config.checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path = config.metrics_file
-    loss_plot_path = config.loss_plot_file
+    metrics_path = (
+        Path(config.metrics_path)
+        if config.metrics_path
+        else checkpoint_path.with_suffix(".metrics.json")
+    )
+    loss_plot_path = (
+        Path(config.loss_plot_path)
+        if config.loss_plot_path
+        else checkpoint_path.with_suffix(".loss.png")
+    )
 
     training_log.print_train_start(
         started_at_epoch_utc=started_at_epoch_utc,
@@ -135,7 +142,7 @@ def run_training(
     for step in range(start_step, config.steps):
         step_number = step + 1
         step_started_at = time.monotonic()
-        should_log_color_stats = config.should_log_color_stats(step_number)
+        should_log_color_stats = _should_log_color_stats(config, step_number)
         loss, step_timing = _train_step(
             batches[step % len(batches)],
             model=model,
@@ -147,13 +154,21 @@ def run_training(
             random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            use_coordinates=config.use_coordinates,
             precision=config.precision,
-            profile_timing=config.should_sample_step_timing(step_number),
+            profile_timing=_should_sample_step_timing(config, step_number),
             log_color_stats=should_log_color_stats,
         )
         step_seconds = max(0.0, time.monotonic() - step_started_at)
-        should_log = should_log_color_stats or config.should_log_training_step(step_number)
-        should_write_artifacts = config.should_write_step_artifacts(step_number)
+        should_log = (
+            should_log_color_stats
+            or step_number == 1
+            or step_number == config.steps
+            or step_number % config.log_every == 0
+        )
+        should_write_artifacts = (
+            config.save_every > 0 and step_number % config.save_every == 0
+        ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
         loss_record = None
         if should_log or should_write_artifacts or step_timing:
             final_loss = training_log.loss_scalar(loss)
@@ -166,7 +181,11 @@ def run_training(
             )
             losses.append(loss_record)
 
-        if validation_batches and config.should_validate_step(step_number):
+        if (
+            validation_batches
+            and config.validation_every > 0
+            and step_number % config.validation_every == 0
+        ):
             validation_loss, validation_color_stats = _evaluate_validation_loss(
                 model,
                 validation_batches,
@@ -259,7 +278,7 @@ def run_training(
                 after_save()
 
     final_step = max(start_step, config.steps)
-    if not losses and resume_checkpoint_file is not None:
+    if not losses and config.resume_from:
         losses.append({"step": final_step, "loss": final_loss})
     training_log.write_training_artifacts(
         checkpoint_path,
@@ -307,6 +326,22 @@ def _training_device(config: TrainingConfig, *, torch: Any) -> Any:
     return device
 
 
+def _should_sample_step_timing(config: TrainingConfig, step_number: int) -> bool:
+    return config.timing_sample_every > 0 and (
+        step_number == 1
+        or step_number == config.steps
+        or step_number % config.timing_sample_every == 0
+    )
+
+
+def _should_log_color_stats(config: TrainingConfig, step_number: int) -> bool:
+    return config.color_stats_every > 0 and (
+        step_number == 1
+        or step_number == config.steps
+        or step_number % config.color_stats_every == 0
+    )
+
+
 def _autocast_context(torch: Any, precision: str) -> Any:
     if precision == "float32":
         return nullcontext()
@@ -350,6 +385,7 @@ def _train_step(
     random_generator: torch.Generator,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
+    use_coordinates: bool,
     precision: str,
     profile_timing: bool,
     log_color_stats: bool,
@@ -381,6 +417,8 @@ def _train_step(
         device=device,
         preloaded_samples=preloaded_samples,
     )
+    if not use_coordinates:
+        coordinates = None
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
@@ -488,7 +526,7 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
 
 
 def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
-    if not config.validation_enabled:
+    if config.validation_every <= 0:
         return ()
 
     manifest_path = Path(config.manifest_path)
@@ -554,6 +592,8 @@ def _evaluate_validation_loss(
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
+            if not config.use_coordinates:
+                coordinates = None
             if log_color_stats:
                 color_batches.append(clean.detach().cpu())
             noise = torch.randn(clean.shape, generator=generator, device=device)

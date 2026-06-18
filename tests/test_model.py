@@ -92,6 +92,34 @@ def test_model_forward_accepts_missing_coordinates() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_model_can_disable_coordinate_conditioning() -> None:
+    torch.manual_seed(123)
+    config = ModelConfig(
+        image_size=32,
+        mask_channels=4,
+        hidden_channels=8,
+        use_coordinates=False,
+    )
+    model = build_model(config)
+    model.eval()
+
+    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
+    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
+    timestep = torch.full((2,), 0.5)
+
+    with torch.no_grad():
+        missing_output = model(image, semantic_mask, timestep)
+        located_output = model(
+            image,
+            semantic_mask,
+            timestep,
+            torch.tensor([[6.0, 50.0], [7.0, 51.0]]),
+        )
+
+    assert model.coordinate_projection is None
+    assert torch.allclose(missing_output, located_output)
+
+
 def test_model_rejects_coordinate_batch_mismatch() -> None:
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
     model = build_model(config)

@@ -7,7 +7,7 @@ import binascii
 import glob
 import json
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -39,6 +39,8 @@ DEFAULT_PORT = 8765
 DEFAULT_DISPLAY_SIZE = 256
 DEFAULT_MAX_SAMPLES = 32
 DEFAULT_WEB_CHECKPOINT_PATH = "artifacts/tiny-sim-satellite-modal.pt"
+PRIMARY_CHECKPOINT_ID = "primary"
+COMPARISON_CHECKPOINT_ID = "comparison"
 STATIC_DIR = Path(__file__).with_name("web_static")
 INDEX_PATH = STATIC_DIR / "index.html"
 MASK_DATA_URI_PREFIX = "data:image/png;base64,"
@@ -52,6 +54,10 @@ ProgressCallback = Callable[[int, int], None]
 class WebConfig:
     checkpoint_path: str = DEFAULT_WEB_CHECKPOINT_PATH
     checkpoint_glob: str = ""
+    checkpoint_label: str = "Coordinate checkpoint"
+    comparison_checkpoint_path: str = ""
+    comparison_checkpoint_glob: str = ""
+    comparison_checkpoint_label: str = "No-coordinate checkpoint"
     manifest_path: str = DEFAULT_MANIFEST_PATH
     split: str = "train"
     device: str = "cpu"
@@ -80,7 +86,16 @@ class GenerateRequest(BaseModel):
     index: int = 0
     seed: int | None = None
     steps: int | None = None
+    checkpoint: str = PRIMARY_CHECKPOINT_ID
     mask_image: str | None = Field(default=None, alias="maskImage")
+
+
+@dataclass(frozen=True)
+class CheckpointSlot:
+    checkpoint_id: str
+    label: str
+    checkpoint_path: str
+    checkpoint_glob: str
 
 
 @dataclass(frozen=True)
@@ -103,27 +118,31 @@ def create_app(
     config = config or WebConfig()
     _validate_checkpoint_path(config)
     samples = _load_samples(config)
-    loaded_generator: Any | None = None
-    loaded_checkpoint_key: tuple[Path, int, int] | None = None
+    loaded_generators: dict[str, tuple[tuple[Path, int, int], Any]] = {}
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
 
-    def checkpoint_path() -> Path:
+    def checkpoint_slot(checkpoint_id: str) -> CheckpointSlot:
+        return _checkpoint_slot(config, checkpoint_id)
+
+    def checkpoint_path(checkpoint_id: str) -> Path:
         return _resolve_checkpoint_path(
-            config,
+            checkpoint_slot(checkpoint_id),
             before_checkpoint_resolve=before_checkpoint_resolve,
         )
 
-    def generator() -> Any:
-        nonlocal loaded_generator, loaded_checkpoint_key
+    def generator(checkpoint_id: str) -> Any:
         try:
-            resolved_checkpoint_path = checkpoint_path()
+            resolved_checkpoint_path = checkpoint_path(checkpoint_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         checkpoint_key = _checkpoint_cache_key(resolved_checkpoint_path)
-        if loaded_generator is None or loaded_checkpoint_key != checkpoint_key:
-            loaded_generator = load_generator(resolved_checkpoint_path, device=config.device)
-            loaded_checkpoint_key = checkpoint_key
-        return loaded_generator
+        cached = loaded_generators.get(checkpoint_id)
+        if cached is None or cached[0] != checkpoint_key:
+            loaded_generators[checkpoint_id] = (
+                checkpoint_key,
+                load_generator(resolved_checkpoint_path, device=config.device),
+            )
+        return loaded_generators[checkpoint_id][1]
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -131,11 +150,14 @@ def create_app(
 
     @app.get("/api/state")
     def state() -> dict[str, Any]:
-        try:
-            resolved_checkpoint_path: Path | None = checkpoint_path()
-        except FileNotFoundError:
-            resolved_checkpoint_path = None
-        return _state_payload(config, samples, checkpoint_path=resolved_checkpoint_path)
+        return _state_payload(
+            config,
+            samples,
+            checkpoint_paths=_resolved_checkpoint_paths(
+                config,
+                before_checkpoint_resolve=before_checkpoint_resolve,
+            ),
+        )
 
     @app.get("/api/mask")
     def mask(index: int = Query(default=0, ge=0)) -> Response:
@@ -155,14 +177,26 @@ def create_app(
 
     @app.post("/api/generate")
     def generate(payload: GenerateRequest) -> dict[str, Any]:
+        slot = checkpoint_slot(payload.checkpoint)
         prepared = _prepare_generation(payload, samples, config)
-        return _run_generation(prepared, config, generator())
+        return _run_generation(
+            prepared,
+            config,
+            generator(slot.checkpoint_id),
+            checkpoint_slot=slot,
+        )
 
     @app.post("/api/generate/stream")
     def generate_stream(payload: GenerateRequest) -> StreamingResponse:
+        slot = checkpoint_slot(payload.checkpoint)
         prepared = _prepare_generation(payload, samples, config)
         return StreamingResponse(
-            _generate_stream(prepared, config, generator),
+            _generate_stream(
+                prepared,
+                config,
+                lambda: generator(slot.checkpoint_id),
+                checkpoint_slot=slot,
+            ),
             media_type=STREAM_MEDIA_TYPE,
         )
 
@@ -177,14 +211,15 @@ def serve(config: WebConfig | None = None) -> None:
 
 
 def _validate_checkpoint_path(config: WebConfig) -> None:
-    if config.checkpoint_glob:
-        return
-    checkpoint_path = Path(config.checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Web app checkpoint not found: {checkpoint_path}. "
-            "Train a model or pass --checkpoint-path."
-        )
+    for slot in _checkpoint_slots(config):
+        if slot.checkpoint_glob:
+            continue
+        checkpoint_path = Path(slot.checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Web app checkpoint not found for {slot.label}: {checkpoint_path}. "
+                "Train a model or pass --checkpoint-path."
+            )
 
 
 def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
@@ -215,12 +250,20 @@ def _state_payload(
     config: WebConfig,
     samples: Sequence[SatelliteSample],
     *,
-    checkpoint_path: Path | None,
+    checkpoint_paths: Mapping[str, Path | None],
 ) -> dict[str, Any]:
+    checkpoints = [
+        _checkpoint_payload(slot, checkpoint_paths.get(slot.checkpoint_id))
+        for slot in _checkpoint_slots(config)
+    ]
+    primary_checkpoint_path = checkpoint_paths.get(PRIMARY_CHECKPOINT_ID)
     return {
-        "checkpointPath": str(checkpoint_path) if checkpoint_path is not None else "",
+        "checkpointPath": (
+            str(primary_checkpoint_path) if primary_checkpoint_path is not None else ""
+        ),
         "checkpointGlob": config.checkpoint_glob,
-        "checkpointAvailable": checkpoint_path is not None,
+        "checkpointAvailable": primary_checkpoint_path is not None,
+        "checkpoints": checkpoints,
         "manifestPath": config.manifest_path,
         "split": config.split,
         "device": config.device,
@@ -236,6 +279,16 @@ def _state_payload(
             }
             for index, name in enumerate(OPENEARTHMAP_CLASSES)
         ],
+    }
+
+
+def _checkpoint_payload(slot: CheckpointSlot, checkpoint_path: Path | None) -> dict[str, Any]:
+    return {
+        "id": slot.checkpoint_id,
+        "label": slot.label,
+        "path": str(checkpoint_path) if checkpoint_path is not None else "",
+        "glob": slot.checkpoint_glob,
+        "available": checkpoint_path is not None,
     }
 
 
@@ -256,26 +309,72 @@ def _sample_at(samples: Sequence[SatelliteSample], index: int) -> SatelliteSampl
     return samples[index]
 
 
-def _resolve_checkpoint_path(
+def _checkpoint_slots(config: WebConfig) -> tuple[CheckpointSlot, ...]:
+    slots = [
+        CheckpointSlot(
+            checkpoint_id=PRIMARY_CHECKPOINT_ID,
+            label=config.checkpoint_label,
+            checkpoint_path=config.checkpoint_path,
+            checkpoint_glob=config.checkpoint_glob,
+        )
+    ]
+    if config.comparison_checkpoint_path or config.comparison_checkpoint_glob:
+        slots.append(
+            CheckpointSlot(
+                checkpoint_id=COMPARISON_CHECKPOINT_ID,
+                label=config.comparison_checkpoint_label,
+                checkpoint_path=config.comparison_checkpoint_path,
+                checkpoint_glob=config.comparison_checkpoint_glob,
+            )
+        )
+    return tuple(slots)
+
+
+def _checkpoint_slot(config: WebConfig, checkpoint_id: str) -> CheckpointSlot:
+    for slot in _checkpoint_slots(config):
+        if slot.checkpoint_id == checkpoint_id:
+            return slot
+    raise HTTPException(status_code=400, detail=f"Unknown checkpoint: {checkpoint_id}")
+
+
+def _resolved_checkpoint_paths(
     config: WebConfig,
+    *,
+    before_checkpoint_resolve: Callable[[], None] | None = None,
+) -> dict[str, Path | None]:
+    checkpoint_paths: dict[str, Path | None] = {}
+    for slot in _checkpoint_slots(config):
+        try:
+            checkpoint_paths[slot.checkpoint_id] = _resolve_checkpoint_path(
+                slot,
+                before_checkpoint_resolve=before_checkpoint_resolve,
+            )
+        except FileNotFoundError:
+            checkpoint_paths[slot.checkpoint_id] = None
+    return checkpoint_paths
+
+
+def _resolve_checkpoint_path(
+    slot: CheckpointSlot,
     *,
     before_checkpoint_resolve: Callable[[], None] | None = None,
 ) -> Path:
     if before_checkpoint_resolve is not None:
         before_checkpoint_resolve()
 
-    if config.checkpoint_glob:
-        checkpoint_path = _latest_checkpoint_path(config.checkpoint_glob)
+    if slot.checkpoint_glob:
+        checkpoint_path = _latest_checkpoint_path(slot.checkpoint_glob)
         if checkpoint_path is None:
             raise FileNotFoundError(
-                f"No web app checkpoints match checkpoint_glob: {config.checkpoint_glob}"
+                f"No web app checkpoints match checkpoint_glob for "
+                f"{slot.label}: {slot.checkpoint_glob}"
             )
         return checkpoint_path
 
-    checkpoint_path = Path(config.checkpoint_path)
+    checkpoint_path = Path(slot.checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(
-            f"Web app checkpoint not found: {checkpoint_path}. "
+            f"Web app checkpoint not found for {slot.label}: {checkpoint_path}. "
             "Train a model or pass --checkpoint-path."
         )
     return checkpoint_path
@@ -337,6 +436,7 @@ def _run_generation(
     loaded_generator: Any,
     *,
     progress: ProgressCallback | None = None,
+    checkpoint_slot: CheckpointSlot | None = None,
 ) -> dict[str, Any]:
     try:
         generation_config = GenerationConfig(
@@ -367,6 +467,12 @@ def _run_generation(
     return {
         "image": _data_uri(png, "image/png"),
         "checkpointPath": str(checkpoint_path),
+        "checkpointId": (
+            checkpoint_slot.checkpoint_id if checkpoint_slot is not None else PRIMARY_CHECKPOINT_ID
+        ),
+        "checkpointLabel": (
+            checkpoint_slot.label if checkpoint_slot is not None else config.checkpoint_label
+        ),
         "sample": _sample_payload(prepared.index, prepared.sample),
         "seed": prepared.seed,
         "steps": prepared.steps,
@@ -378,11 +484,15 @@ def _generate_stream(
     prepared: PreparedGeneration,
     config: WebConfig,
     generator: Callable[[], Any],
+    *,
+    checkpoint_slot: CheckpointSlot | None = None,
 ) -> Iterator[str]:
     events: Queue[dict[str, Any] | Exception | object] = Queue()
 
     def report_progress(step: int, steps: int) -> None:
-        events.put({"event": "step", "step": step, "steps": steps})
+        events.put(
+            _checkpoint_event({"event": "step", "step": step, "steps": steps}, checkpoint_slot)
+        )
 
     def run() -> None:
         try:
@@ -391,14 +501,17 @@ def _generate_stream(
                 config,
                 generator(),
                 progress=report_progress,
+                checkpoint_slot=checkpoint_slot,
             )
-            events.put({"event": "complete", **result})
+            events.put(_checkpoint_event({"event": "complete", **result}, checkpoint_slot))
         except Exception as exc:
             events.put(exc)
         finally:
             events.put(_STREAM_DONE)
 
-    yield _json_event({"event": "start", "step": 0, "steps": prepared.steps})
+    yield _json_event(
+        _checkpoint_event({"event": "start", "step": 0, "steps": prepared.steps}, checkpoint_slot)
+    )
     Thread(target=run, daemon=True).start()
 
     while True:
@@ -416,6 +529,19 @@ def _generate_stream(
 def _stream_error_payload(error: Exception) -> dict[str, Any]:
     detail = error.detail if isinstance(error, HTTPException) else str(error)
     return {"event": "error", "detail": detail}
+
+
+def _checkpoint_event(
+    payload: dict[str, Any],
+    checkpoint_slot: CheckpointSlot | None,
+) -> dict[str, Any]:
+    if checkpoint_slot is None:
+        return payload
+    return {
+        **payload,
+        "checkpointId": checkpoint_slot.checkpoint_id,
+        "checkpointLabel": checkpoint_slot.label,
+    }
 
 
 def _json_event(payload: dict[str, Any]) -> str:
@@ -563,15 +689,7 @@ def _max_mask_image_uri_length(config: WebConfig) -> int:
 
 
 def _image_tensor_png(image: Any, display_size: int) -> bytes:
-    tensor = (
-        image.detach()
-        .cpu()[0]
-        .clamp(0.0, 1.0)
-        .mul(255)
-        .byte()
-        .permute(1, 2, 0)
-        .contiguous()
-    )
+    tensor = image.detach().cpu()[0].clamp(0.0, 1.0).mul(255).byte().permute(1, 2, 0).contiguous()
     height = int(tensor.shape[0])
     width = int(tensor.shape[1])
     pil_image = Image.fromarray(tensor.numpy(), mode="RGB")
@@ -595,6 +713,16 @@ def _build_click_command() -> click.Command:
     @click.command("app", help="Launch the local mask-conditioned generation app.")
     @click.option("--checkpoint-path", default=WebConfig.checkpoint_path, show_default=True)
     @click.option("--checkpoint-glob", default=WebConfig.checkpoint_glob, show_default=True)
+    @click.option(
+        "--comparison-checkpoint-path",
+        default=WebConfig.comparison_checkpoint_path,
+        show_default=True,
+    )
+    @click.option(
+        "--comparison-checkpoint-glob",
+        default=WebConfig.comparison_checkpoint_glob,
+        show_default=True,
+    )
     @click.option("--manifest-path", default=WebConfig.manifest_path, show_default=True)
     @click.option("--split", default=WebConfig.split, show_default=True)
     @click.option("--device", default=WebConfig.device, show_default=True)
@@ -607,6 +735,8 @@ def _build_click_command() -> click.Command:
     def command(
         checkpoint_path: str,
         checkpoint_glob: str,
+        comparison_checkpoint_path: str,
+        comparison_checkpoint_glob: str,
         manifest_path: str,
         split: str,
         device: str,
@@ -621,6 +751,8 @@ def _build_click_command() -> click.Command:
             WebConfig(
                 checkpoint_path=checkpoint_path,
                 checkpoint_glob=checkpoint_glob,
+                comparison_checkpoint_path=comparison_checkpoint_path,
+                comparison_checkpoint_glob=comparison_checkpoint_glob,
                 manifest_path=manifest_path,
                 split=split,
                 device=device,
