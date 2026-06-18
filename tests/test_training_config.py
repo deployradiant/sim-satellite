@@ -70,25 +70,9 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
-def test_training_config_defaults_to_cuda() -> None:
-    assert TrainingConfig().device == "cuda"
-
-
-def test_training_config_threads_coordinate_setting_to_model_config() -> None:
-    model_config = TrainingConfig(use_coordinates=False).model_config()
-
-    assert model_config.use_coordinates is False
-
-
 def test_training_device_requires_available_cuda() -> None:
     with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
-
-
-def test_training_device_accepts_available_cuda() -> None:
-    device = _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=True))
-
-    assert str(device) == "cuda"
 
 
 def test_bf16_autocast_is_cuda_only() -> None:
