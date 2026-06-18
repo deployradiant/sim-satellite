@@ -9,7 +9,7 @@ import torch
 
 from sim_satellite import infer
 from sim_satellite.infer import InferenceConfig, InferenceResult
-from sim_satellite.model import ModelConfig, build_model
+from sim_satellite.model import ModelConfig, build_legacy_additive_time_model, build_model
 
 
 def test_inference_config_rejects_old_model_shape_fields() -> None:
@@ -101,6 +101,22 @@ def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
         hidden_channels=4,
         seed=99,
     )
+    assert loaded.supports_coordinates is True
+
+
+def test_load_generator_accepts_legacy_additive_time_checkpoint(tmp_path: Path) -> None:
+    checkpoint_path = _write_legacy_additive_time_checkpoint(tmp_path, torch=torch)
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    assert loaded.model_config == ModelConfig(
+        image_size=32,
+        image_channels=3,
+        mask_channels=2,
+        hidden_channels=4,
+        seed=99,
+    )
+    assert loaded.supports_coordinates is False
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
@@ -144,6 +160,28 @@ def _write_flow_checkpoint(
         seed=99,
     )
     model = build_model(config)
+    checkpoint = {
+        "model_config": asdict(config),
+        "model_state": model.state_dict(),
+    }
+    torch.save(checkpoint, checkpoint_path)
+    return checkpoint_path
+
+
+def _write_legacy_additive_time_checkpoint(
+    tmp_path: Path,
+    *,
+    torch: Any,
+) -> Path:
+    checkpoint_path = tmp_path / "legacy-flow.pt"
+    config = ModelConfig(
+        image_size=32,
+        image_channels=3,
+        mask_channels=2,
+        hidden_channels=4,
+        seed=99,
+    )
+    model = build_legacy_additive_time_model(config)
     checkpoint = {
         "model_config": asdict(config),
         "model_state": model.state_dict(),

@@ -58,15 +58,27 @@ def build_model(config: ModelConfig | None = None) -> ConditionalUNet:
     return ConditionalUNet(config)
 
 
+def build_legacy_additive_time_model(config: ModelConfig) -> LegacyAdditiveTimeUNet:
+    if config.image_size < 32:
+        raise ValueError("unet architecture requires image_size of at least 32")
+    if config.image_size % 8 != 0:
+        raise ValueError("unet architecture requires image_size divisible by 8")
+    deep_attention_size = config.image_size // DEEP_ATTENTION_DOWNSAMPLE_FACTOR
+    if deep_attention_size * deep_attention_size > MAX_FULL_ATTENTION_TOKENS:
+        raise ValueError(
+            f"unet architecture limits deep full attention to {MAX_FULL_ATTENTION_TOKENS} "
+            "tokens to avoid attention OOM"
+        )
+    return LegacyAdditiveTimeUNet(config)
+
+
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.channels = channels
         half_channels = channels // 2
         frequencies = torch.exp(
-            -math.log(10000.0)
-            * torch.arange(half_channels).float()
-            / max(1, half_channels - 1)
+            -math.log(10000.0) * torch.arange(half_channels).float() / max(1, half_channels - 1)
         )
         self.register_buffer("frequencies", frequencies, persistent=False)
 
@@ -291,6 +303,179 @@ class ConditionalUNet(nn.Module):
             level_blocks = cast(nn.ModuleList, level_blocks_module)
             for block_module in level_blocks:
                 block = cast(ConditionedResBlock, block_module)
+                h = torch.cat([h, skips.pop()], dim=1)
+                h = block(
+                    h,
+                    time_embedding,
+                    _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
+                )
+            if level_index < len(self.upsamples):
+                h = torch.nn.functional.interpolate(h, scale_factor=2, mode="nearest")
+                h = self.upsamples[level_index](h)
+
+        h = self.output_activation(self.output_norm(h))
+        return self.output_conv(h)
+
+
+class LegacyAdditiveTimeResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        time_channels: int,
+        mask_channels: int,
+    ) -> None:
+        super().__init__()
+        self.norm1 = nn.GroupNorm(_group_count(in_channels), in_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.time_projection = nn.Linear(time_channels, out_channels)
+        self.mask_projection = nn.Conv2d(mask_channels, out_channels, 3, padding=1)
+        self.norm2 = nn.GroupNorm(_group_count(out_channels), out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.skip = (
+            nn.Identity()
+            if in_channels == out_channels
+            else nn.Conv2d(in_channels, out_channels, 1)
+        )
+        self.activation = nn.SiLU()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        time_embedding: torch.Tensor,
+        semantic_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        h = self.conv1(self.activation(self.norm1(x)))
+        h = h + self.time_projection(time_embedding)[:, :, None, None]
+        h = h + self.mask_projection(semantic_mask)
+        h = self.conv2(self.activation(self.norm2(h)))
+        return h + self.skip(x)
+
+
+class LegacyAdditiveTimeUNet(nn.Module):
+    def __init__(self, model_config: ModelConfig) -> None:
+        super().__init__()
+        base_channels = model_config.hidden_channels
+        time_channels = base_channels
+        levels = [base_channels * multiplier for multiplier in CHANNEL_MULTIPLIERS]
+
+        self.time_embedding = SinusoidalTimeEmbedding(time_channels)
+        self.input_conv = nn.Conv2d(
+            model_config.image_channels + model_config.mask_channels,
+            base_channels,
+            3,
+            padding=1,
+        )
+
+        current_channels = base_channels
+        skip_channels: list[int] = [current_channels]
+        self.down_blocks = nn.ModuleList()
+        self.downsamples = nn.ModuleList()
+        for level_index, level_channels in enumerate(levels):
+            level_blocks = nn.ModuleList()
+            for _ in range(BLOCKS_PER_LEVEL):
+                level_blocks.append(
+                    LegacyAdditiveTimeResBlock(
+                        current_channels,
+                        level_channels,
+                        time_channels=time_channels,
+                        mask_channels=model_config.mask_channels,
+                    )
+                )
+                current_channels = level_channels
+                skip_channels.append(current_channels)
+            self.down_blocks.append(level_blocks)
+            if level_index != len(levels) - 1:
+                self.downsamples.append(nn.Conv2d(current_channels, current_channels, 3, 2, 1))
+                skip_channels.append(current_channels)
+
+        self.mid_block1 = LegacyAdditiveTimeResBlock(
+            current_channels,
+            current_channels,
+            time_channels=time_channels,
+            mask_channels=model_config.mask_channels,
+        )
+        self.mid_attention = SelfAttention2d(current_channels)
+        self.mid_block2 = LegacyAdditiveTimeResBlock(
+            current_channels,
+            current_channels,
+            time_channels=time_channels,
+            mask_channels=model_config.mask_channels,
+        )
+
+        self.up_blocks = nn.ModuleList()
+        self.upsamples = nn.ModuleList()
+        skip_channels_stack = list(skip_channels)
+        for level_index, level_channels in reversed(list(enumerate(levels))):
+            level_blocks = nn.ModuleList()
+            for _ in range(BLOCKS_PER_LEVEL + 1):
+                skip_channel_count = skip_channels_stack.pop()
+                level_blocks.append(
+                    LegacyAdditiveTimeResBlock(
+                        current_channels + skip_channel_count,
+                        level_channels,
+                        time_channels=time_channels,
+                        mask_channels=model_config.mask_channels,
+                    )
+                )
+                current_channels = level_channels
+            self.up_blocks.append(level_blocks)
+            if level_index != 0:
+                self.upsamples.append(nn.Conv2d(current_channels, current_channels, 3, padding=1))
+
+        self.output_norm = nn.GroupNorm(_group_count(current_channels), current_channels)
+        self.output_activation = nn.SiLU()
+        self.output_conv = nn.Conv2d(
+            current_channels,
+            model_config.image_channels,
+            3,
+            padding=1,
+        )
+
+    def forward(
+        self,
+        image: torch.Tensor,
+        semantic_mask: torch.Tensor,
+        timestep: torch.Tensor,
+        coordinates: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del coordinates
+        time_embedding = self.time_embedding(timestep)
+        mask_pyramid = {_spatial_size(semantic_mask): semantic_mask}
+        h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
+        skips: list[torch.Tensor] = [h]
+
+        for level_index, level_blocks_module in enumerate(self.down_blocks):
+            level_blocks = cast(nn.ModuleList, level_blocks_module)
+            for block_module in level_blocks:
+                block = cast(LegacyAdditiveTimeResBlock, block_module)
+                h = block(
+                    h,
+                    time_embedding,
+                    _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
+                )
+                skips.append(h)
+            if level_index < len(self.downsamples):
+                h = self.downsamples[level_index](h)
+                skips.append(h)
+
+        h = self.mid_block1(
+            h,
+            time_embedding,
+            _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
+        )
+        h = self.mid_attention(h)
+        h = self.mid_block2(
+            h,
+            time_embedding,
+            _semantic_mask_at(semantic_mask, _spatial_size(h), mask_pyramid),
+        )
+
+        for level_index, level_blocks_module in enumerate(self.up_blocks):
+            level_blocks = cast(nn.ModuleList, level_blocks_module)
+            for block_module in level_blocks:
+                block = cast(LegacyAdditiveTimeResBlock, block_module)
                 h = torch.cat([h, skips.pop()], dim=1)
                 h = block(
                     h,

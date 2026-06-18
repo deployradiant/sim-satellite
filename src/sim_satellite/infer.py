@@ -17,7 +17,7 @@ from sim_satellite.data.prepared import (
     prepared_coordinates_tuple,
 )
 from sim_satellite.data.tensors import load_mask_tensor
-from sim_satellite.model import ModelConfig, build_model
+from sim_satellite.model import ModelConfig, build_legacy_additive_time_model, build_model
 from sim_satellite.train import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
@@ -97,6 +97,7 @@ class LoadedGenerator:
     model_config: ModelConfig
     checkpoint_path: Path
     device: Any
+    supports_coordinates: bool = True
 
 
 def run_inference(
@@ -146,8 +147,16 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
-    model = build_model(model_config).to(torch_device)
-    _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
+    model, supports_coordinates, allow_missing_coordinate_projection = _build_model_for_checkpoint(
+        model_config, model_state
+    )
+    model = model.to(torch_device)
+    _load_model_state(
+        model,
+        model_state,
+        checkpoint_path=checkpoint_path,
+        allow_missing_coordinate_projection=allow_missing_coordinate_projection,
+    )
     model.eval()
     return LoadedGenerator(
         torch=torch,
@@ -155,6 +164,7 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
         model_config=model_config,
         checkpoint_path=checkpoint_path,
         device=torch_device,
+        supports_coordinates=supports_coordinates,
     )
 
 
@@ -182,10 +192,11 @@ def generate_image_with_model(
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
+    generation_coordinates = config.coordinates if loaded_generator.supports_coordinates else None
     coordinates = (
         None
-        if config.coordinates is None
-        else torch.tensor([config.coordinates], dtype=torch.float32, device=device)
+        if generation_coordinates is None
+        else torch.tensor([generation_coordinates], dtype=torch.float32, device=device)
     )
 
     timesteps, step_size = _flow_inference_tensors(config.steps, torch=torch, device=device)
@@ -208,7 +219,7 @@ def generate_image_with_model(
     return GenerationResult(
         image=image,
         semantic_mask=semantic_mask,
-        coordinates=config.coordinates,
+        coordinates=generation_coordinates,
         model_config=model_config,
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
@@ -217,10 +228,7 @@ def generate_image_with_model(
 
 def _flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
     step_size = 1.0 / float(steps)
-    return tuple(
-        ((step - 0.5) * step_size, step_size)
-        for step in reversed(range(1, steps + 1))
-    )
+    return tuple(((step - 0.5) * step_size, step_size) for step in reversed(range(1, steps + 1)))
 
 
 def _flow_inference_tensors(steps: int, *, torch: Any, device: Any) -> tuple[Any, float]:
@@ -271,15 +279,65 @@ def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     return checkpoint
 
 
+def _build_model_for_checkpoint(
+    model_config: ModelConfig,
+    model_state: Mapping[str, Any],
+) -> tuple[Any, bool, bool]:
+    if _uses_legacy_additive_time_conditioning(model_config, model_state):
+        return build_legacy_additive_time_model(model_config), False, False
+
+    supports_coordinates = _has_coordinate_projection(model_state)
+    allow_missing_coordinate_projection = not supports_coordinates and _has_learned_time_embedding(
+        model_state
+    )
+    return build_model(model_config), supports_coordinates, allow_missing_coordinate_projection
+
+
+def _uses_legacy_additive_time_conditioning(
+    model_config: ModelConfig,
+    model_state: Mapping[str, Any],
+) -> bool:
+    first_projection = model_state.get("down_blocks.0.0.time_projection.weight")
+    if first_projection is None or not hasattr(first_projection, "shape"):
+        return False
+    return not _has_learned_time_embedding(model_state) and tuple(first_projection.shape) == (
+        model_config.hidden_channels,
+        model_config.hidden_channels,
+    )
+
+
+def _has_learned_time_embedding(model_state: Mapping[str, Any]) -> bool:
+    return any(key.startswith("time_embedding.") for key in model_state)
+
+
+def _has_coordinate_projection(model_state: Mapping[str, Any]) -> bool:
+    return any(key.startswith("coordinate_projection.") for key in model_state)
+
+
 def _load_model_state(
     model: Any,
     model_state: Mapping[str, Any],
     *,
     checkpoint_path: Path,
+    allow_missing_coordinate_projection: bool = False,
 ) -> None:
     try:
         model.load_state_dict(model_state)
     except RuntimeError as exc:
+        if allow_missing_coordinate_projection:
+            try:
+                result = model.load_state_dict(model_state, strict=False)
+            except RuntimeError:
+                pass
+            else:
+                missing_keys = list(result.missing_keys)
+                unexpected_keys = list(result.unexpected_keys)
+                if (
+                    missing_keys
+                    and all(key.startswith("coordinate_projection.") for key in missing_keys)
+                    and not unexpected_keys
+                ):
+                    return
         raise RuntimeError(
             f"Inference checkpoint is incompatible with flow U-Net: {checkpoint_path}. {exc}"
         ) from exc

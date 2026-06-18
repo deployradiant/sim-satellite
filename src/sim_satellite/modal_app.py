@@ -52,9 +52,17 @@ MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
     "artifacts/openearthmap-flow-unet-93m-256-coords-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
 )
-MODAL_IMAGE_ENV = {"SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB}
+MODAL_WEB_COMPARISON_CHECKPOINT_GLOB = os.environ.get(
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB",
+    "artifacts/openearthmap-flow-unet-93m-256-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
+)
+MODAL_IMAGE_ENV = {
+    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+}
 MODAL_WEB_ENV: dict[str, str | None] = {
-    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB
+    "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
+    "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
 }
 MODAL_TRAINING_TIMEOUT = 24 * 60 * 60
 MODAL_DATA_SETUP_TIMEOUT = 2 * 60 * 60
@@ -127,11 +135,15 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
 def web_remote() -> Any:
     web_config = WebConfig(
         checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB,
+        comparison_checkpoint_glob=MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
         manifest_path=str(MODAL_WEB_MANIFEST_PATH),
     )
     if not MODAL_WEB_MANIFEST_PATH.exists():
         _ensure_modal_openearthmap_data(WebConfig.manifest_path)
-        web_config = WebConfig(checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB)
+        web_config = WebConfig(
+            checkpoint_glob=MODAL_WEB_CHECKPOINT_GLOB,
+            comparison_checkpoint_glob=MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
+        )
     artifact_volume.reload()
     return create_app(
         _modal_web_config(web_config),
@@ -190,6 +202,18 @@ def _modal_web_config(config: WebConfig) -> WebConfig:
         checkpoint_glob=(
             _modal_artifact_path(config.checkpoint_glob) if config.checkpoint_glob else ""
         ),
+        checkpoint_label=config.checkpoint_label,
+        comparison_checkpoint_path=(
+            _modal_artifact_path(config.comparison_checkpoint_path)
+            if config.comparison_checkpoint_path
+            else ""
+        ),
+        comparison_checkpoint_glob=(
+            _modal_artifact_path(config.comparison_checkpoint_glob)
+            if config.comparison_checkpoint_glob
+            else ""
+        ),
+        comparison_checkpoint_label=config.comparison_checkpoint_label,
         manifest_path=(
             str(manifest_path)
             if _is_relative_to(manifest_path, MODAL_WEB_DATA_ROOT)

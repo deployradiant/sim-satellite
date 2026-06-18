@@ -268,12 +268,45 @@
       display: none;
     }
     .viewer h2,
+    .viewer h3,
     .classes h2 {
       margin: 0;
       font-size: 14px;
       line-height: 1.2;
       font-weight: 400;
       letter-spacing: 0;
+    }
+    .generated-viewer {
+      align-content: start;
+    }
+    .generated-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
+    .generated-panel {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .generated-panel[hidden] {
+      display: none;
+    }
+    .checkpoint-heading {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+      min-height: 34px;
+    }
+    .checkpoint-path {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .frame {
       aspect-ratio: 1;
@@ -501,6 +534,9 @@
       main.legend-collapsed {
         grid-template-columns: 1fr;
       }
+      .generated-grid {
+        grid-template-columns: 1fr 1fr;
+      }
       .frame {
         max-height: none;
       }
@@ -517,6 +553,9 @@
     }
     @media (max-width: 560px) {
       .controls {
+        grid-template-columns: 1fr;
+      }
+      .generated-grid {
         grid-template-columns: 1fr;
       }
       .controls button {
@@ -605,9 +644,24 @@
           <div class="frame"><img id="ground-truth" alt="Ground truth satellite image"></div>
         </div>
       </section>
-      <section class="viewer">
-        <h2>Generated image</h2>
-        <div class="frame" id="output-frame"><div class="empty">No image yet</div></div>
+      <section class="viewer generated-viewer">
+        <h2>Generated images</h2>
+        <div class="generated-grid">
+          <div class="generated-panel" id="output-panel-primary">
+            <div class="checkpoint-heading">
+              <h3 id="output-title-primary">Coordinate checkpoint</h3>
+              <div class="checkpoint-path" id="output-path-primary">Waiting for checkpoint</div>
+            </div>
+            <div class="frame" id="output-frame-primary"><div class="empty">No image yet</div></div>
+          </div>
+          <div class="generated-panel" id="output-panel-comparison" hidden>
+            <div class="checkpoint-heading">
+              <h3 id="output-title-comparison">Latest main checkpoint</h3>
+              <div class="checkpoint-path" id="output-path-comparison">Waiting for checkpoint</div>
+            </div>
+            <div class="frame" id="output-frame-comparison"><div class="empty">No image yet</div></div>
+          </div>
+        </div>
       </section>
     </main>
     <footer>
@@ -629,7 +683,22 @@
     const brushSizeInput = document.getElementById("brush-size");
     const brushValue = document.getElementById("brush-value");
     const resetMaskButton = document.getElementById("reset-mask");
-    const outputFrame = document.getElementById("output-frame");
+    const outputPanels = {
+      primary: document.getElementById("output-panel-primary"),
+      comparison: document.getElementById("output-panel-comparison")
+    };
+    const outputTitles = {
+      primary: document.getElementById("output-title-primary"),
+      comparison: document.getElementById("output-title-comparison")
+    };
+    const outputPaths = {
+      primary: document.getElementById("output-path-primary"),
+      comparison: document.getElementById("output-path-comparison")
+    };
+    const outputFrames = {
+      primary: document.getElementById("output-frame-primary"),
+      comparison: document.getElementById("output-frame-comparison")
+    };
     const statusEl = document.getElementById("status");
     const mainEl = document.querySelector("main");
     const legendToggle = document.getElementById("legend-toggle");
@@ -652,6 +721,13 @@
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
       statusEl.classList.toggle("error", isError);
+    }
+
+    function emptyMessage(text) {
+      const element = document.createElement("div");
+      element.className = "empty";
+      element.textContent = text;
+      return element;
     }
 
     function updateLegendCollapsed() {
@@ -697,12 +773,62 @@
       }
     }
 
+    function checkpointList(state) {
+      if (Array.isArray(state.checkpoints) && state.checkpoints.length) {
+        return state.checkpoints;
+      }
+      return [{
+        id: "primary",
+        label: "Checkpoint",
+        path: state.checkpointPath || "",
+        glob: state.checkpointGlob || "",
+        available: Boolean(state.checkpointAvailable)
+      }];
+    }
+
+    function checkpointFileName(path) {
+      if (!path) return "";
+      return path.split("/").filter(Boolean).pop() || path;
+    }
+
+    function checkpointById(state) {
+      return new Map(checkpointList(state).map((checkpoint) => [checkpoint.id, checkpoint]));
+    }
+
+    function availableCheckpoints(state) {
+      return checkpointList(state).filter((checkpoint) => checkpoint.available);
+    }
+
+    function renderCheckpointPanels(state) {
+      const checkpoints = checkpointById(state);
+      Object.entries(outputPanels).forEach(([id, panel]) => {
+        const checkpoint = checkpoints.get(id);
+        panel.hidden = !checkpoint;
+        if (!checkpoint) return;
+
+        outputTitles[id].textContent = checkpoint.label;
+        outputPaths[id].textContent = checkpoint.available
+          ? checkpointFileName(checkpoint.path)
+          : "Waiting for checkpoint";
+        if (!checkpoint.available && !outputFrames[id].querySelector("img")) {
+          outputFrames[id].replaceChildren(emptyMessage("No checkpoint"));
+        }
+      });
+    }
+
     function renderMeta(state) {
+      const checkpointText = checkpointList(state)
+        .map((checkpoint) => {
+          const name = checkpoint.available ? checkpointFileName(checkpoint.path) : "waiting";
+          return `${checkpoint.label}: ${name}`;
+        })
+        .join(" | ");
       metaEl.textContent = [
-        state.checkpointPath || "Waiting for checkpoint",
+        checkpointText,
         state.device,
         `${state.samples.length} masks`
-      ].join(" | ");
+      ].filter(Boolean).join(" | ");
+      renderCheckpointPanels(state);
     }
 
     function renderMask(index) {
@@ -797,33 +923,55 @@
     async function generate() {
       generateButton.disabled = true;
       generateButton.textContent = "Generating";
-      showProgress(stepsInput.value);
       setStatus("Starting generation...");
       try {
-        await refreshStateMetadata();
+        const state = await refreshStateMetadata();
+        const targets = availableCheckpoints(state);
+        if (!targets.length) throw new Error("No checkpoint is ready");
+        const requestedSteps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
+        const totalSteps = requestedSteps * targets.length;
+        let completedSteps = 0;
+        const completedPayloads = [];
+        showProgress(totalSteps);
+
         const body = {
           index: Number(sampleSelect.value),
           seed: Number(seedInput.value),
-          steps: Number(stepsInput.value)
+          steps: requestedSteps
         };
         if (maskDirty) {
           body.maskImage = maskCanvas.toDataURL("image/png");
         }
 
-        const response = await fetch("/api/generate/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.detail || payload.error || "Generation failed");
-        }
-        if (!response.body) throw new Error("Generation progress stream is unavailable");
+        for (const checkpoint of targets) {
+          renderOutputLoading(checkpoint);
+          const response = await fetch("/api/generate/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...body, checkpoint: checkpoint.id })
+          });
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || payload.error || "Generation failed");
+          }
+          if (!response.body) throw new Error("Generation progress stream is unavailable");
 
-        const payload = await readGenerationStream(response.body);
-        if (!payload) throw new Error("Generation ended before the image was ready");
-        renderGeneratedImage(payload);
+          const payload = await readGenerationStream(response.body, {
+            checkpoint,
+            offset: completedSteps,
+            totalSteps
+          });
+          if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
+          renderGeneratedImage(payload, checkpoint);
+          completedPayloads.push(payload);
+          completedSteps += payload.steps || requestedSteps;
+          updateProgress(completedSteps, totalSteps);
+        }
+
+        const labels = completedPayloads
+          .map((payload) => payload.checkpointLabel || "checkpoint")
+          .join(" + ");
+        setStatus(`Generated ${labels}`);
       } catch (error) {
         failProgress();
         setStatus(error.message, true);
@@ -833,7 +981,7 @@
       }
     }
 
-    async function readGenerationStream(stream) {
+    async function readGenerationStream(stream, progressState) {
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -846,7 +994,7 @@
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          const payload = handleGenerationEvent(JSON.parse(line));
+          const payload = handleGenerationEvent(JSON.parse(line), progressState);
           if (payload) completedPayload = payload;
         }
 
@@ -854,48 +1002,49 @@
       }
 
       if (buffer.trim()) {
-        const payload = handleGenerationEvent(JSON.parse(buffer));
+        const payload = handleGenerationEvent(JSON.parse(buffer), progressState);
         if (payload) completedPayload = payload;
       }
 
       return completedPayload;
     }
 
-    function handleGenerationEvent(payload) {
+    function handleGenerationEvent(payload, progressState) {
+      const label = payload.checkpointLabel || progressState.checkpoint.label;
       if (payload.event === "start") {
-        updateProgress(0, payload.steps);
-        setStatus("Loading model...");
+        updateProgress(progressState.offset, progressState.totalSteps);
+        setStatus(`Loading ${label}...`);
         return null;
       }
       if (payload.event === "step") {
-        updateProgress(payload.step, payload.steps);
-        setStatus(`Generating step ${payload.step} of ${payload.steps}`);
+        updateProgress(progressState.offset + payload.step, progressState.totalSteps);
+        setStatus(`${label}: step ${payload.step} of ${payload.steps}`);
         return null;
       }
       if (payload.event === "complete") {
-        updateProgress(payload.steps, payload.steps);
+        updateProgress(progressState.offset + payload.steps, progressState.totalSteps);
         return payload;
       }
       if (payload.event === "error") {
-        throw new Error(payload.detail || "Generation failed");
+        throw new Error(`${label}: ${payload.detail || "Generation failed"}`);
       }
       return null;
     }
 
-    function renderGeneratedImage(payload) {
+    function renderOutputLoading(checkpoint) {
+      const frame = outputFrames[checkpoint.id];
+      if (!frame) return;
+      frame.replaceChildren(emptyMessage("Generating"));
+    }
+
+    function renderGeneratedImage(payload, checkpoint) {
+      const checkpointId = payload.checkpointId || checkpoint.id;
+      const frame = outputFrames[checkpointId];
+      if (!frame) return;
       const image = document.createElement("img");
-      image.id = "generated";
       image.alt = "Generated satellite image";
       image.src = payload.image;
-      outputFrame.replaceChildren(image);
-
-      const message = [
-        `Generated ${payload.sample.name}`,
-        payload.maskEdited ? "edited mask" : "sample mask",
-        `seed ${payload.seed}`,
-        `${payload.steps} steps`
-      ].join(" | ");
-      setStatus(message);
+      frame.replaceChildren(image);
     }
 
     function renderPaintClassOptions() {
