@@ -89,27 +89,15 @@ def test_inference_rejects_malformed_checkpoints(
             infer.run_inference(config)
 
 
-def test_load_generator_accepts_flow_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
-
-    loaded = infer.load_generator(checkpoint_path, device="cpu")
-
-    assert loaded.model_config == ModelConfig(
+def test_load_generator_accepts_supported_checkpoint_formats(tmp_path: Path) -> None:
+    expected_coordinate_config = ModelConfig(
         image_size=32,
         image_channels=3,
         mask_channels=2,
         hidden_channels=4,
         seed=99,
     )
-    assert loaded.supports_coordinates is True
-
-
-def test_load_generator_accepts_no_coordinate_flow_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch, use_coordinates=False)
-
-    loaded = infer.load_generator(checkpoint_path, device="cpu")
-
-    assert loaded.model_config == ModelConfig(
+    expected_no_coordinate_config = ModelConfig(
         image_size=32,
         image_channels=3,
         mask_channels=2,
@@ -117,22 +105,34 @@ def test_load_generator_accepts_no_coordinate_flow_checkpoint(tmp_path: Path) ->
         seed=99,
         use_coordinates=False,
     )
-    assert loaded.supports_coordinates is False
-
-
-def test_load_generator_accepts_legacy_additive_time_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path = _write_legacy_additive_time_checkpoint(tmp_path, torch=torch)
-
-    loaded = infer.load_generator(checkpoint_path, device="cpu")
-
-    assert loaded.model_config == ModelConfig(
-        image_size=32,
-        image_channels=3,
-        mask_channels=2,
-        hidden_channels=4,
-        seed=99,
+    cases = (
+        (
+            _write_flow_checkpoint(tmp_path, torch=torch, filename="flow.pt"),
+            expected_coordinate_config,
+            True,
+        ),
+        (
+            _write_flow_checkpoint(
+                tmp_path,
+                torch=torch,
+                filename="flow-no-coordinates.pt",
+                use_coordinates=False,
+            ),
+            expected_no_coordinate_config,
+            False,
+        ),
+        (
+            _write_legacy_additive_time_checkpoint(tmp_path, torch=torch),
+            expected_coordinate_config,
+            False,
+        ),
     )
-    assert loaded.supports_coordinates is False
+
+    for checkpoint_path, expected_config, supports_coordinates in cases:
+        loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+        assert loaded.model_config == expected_config
+        assert loaded.supports_coordinates is supports_coordinates
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
@@ -166,9 +166,10 @@ def _write_flow_checkpoint(
     tmp_path: Path,
     *,
     torch: Any,
+    filename: str = "flow.pt",
     use_coordinates: bool = True,
 ) -> Path:
-    checkpoint_path = tmp_path / "flow.pt"
+    checkpoint_path = tmp_path / filename
     config = ModelConfig(
         image_size=32,
         image_channels=3,
