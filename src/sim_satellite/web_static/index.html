@@ -265,13 +265,6 @@
       min-width: 0;
       min-height: 38px;
     }
-    .ground-truth {
-      display: grid;
-      gap: 10px;
-    }
-    .ground-truth[hidden] {
-      display: none;
-    }
     .viewer h2,
     .viewer h3,
     .classes h2 {
@@ -284,16 +277,41 @@
     .generated-viewer {
       align-content: start;
     }
-    .generated-grid {
+    .comparison-stack {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
+      gap: 10px;
       align-items: start;
+    }
+    .comparison-row {
+      display: grid;
+      grid-template-columns: minmax(130px, 180px) minmax(0, 320px);
+      gap: 10px;
+      align-items: start;
+      min-width: 0;
+    }
+    .comparison-heading {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+      padding-top: 4px;
+    }
+    .comparison-frame {
+      aspect-ratio: 1;
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    .comparison-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
     }
     .generated-panel {
       display: grid;
-      gap: 8px;
-      min-width: 0;
     }
     .generated-panel[hidden] {
       display: none;
@@ -322,7 +340,7 @@
       align-items: start;
     }
     .sweep-header,
-    .sweep-seed {
+    .sweep-row-label {
       color: var(--muted);
       font-size: 12px;
       line-height: 1.25;
@@ -332,9 +350,8 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .sweep-seed {
+    .sweep-row-label {
       padding-top: 6px;
-      font-variant-numeric: tabular-nums;
     }
     .sweep-cell {
       display: grid;
@@ -597,9 +614,6 @@
       main.legend-collapsed {
         grid-template-columns: 1fr;
       }
-      .generated-grid {
-        grid-template-columns: 1fr 1fr;
-      }
       .frame {
         max-height: none;
       }
@@ -613,12 +627,12 @@
       .draw-toolbar {
         grid-template-columns: 1fr;
       }
+      .comparison-row {
+        grid-template-columns: minmax(110px, 150px) minmax(0, 280px);
+      }
     }
     @media (max-width: 560px) {
       .controls {
-        grid-template-columns: 1fr;
-      }
-      .generated-grid {
         grid-template-columns: 1fr;
       }
       .controls button {
@@ -638,6 +652,9 @@
       }
       .frame {
         min-height: 220px;
+      }
+      .comparison-row {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -707,27 +724,30 @@
           </button>
         </div>
         <div class="frame"><canvas id="mask" aria-label="Condition mask"></canvas></div>
-        <div class="ground-truth" id="ground-truth-panel">
-          <h2>Ground truth image</h2>
-          <div class="frame"><img id="ground-truth" alt="Ground truth satellite image"></div>
-        </div>
       </section>
       <section class="viewer generated-viewer">
-        <h2>Generated images</h2>
-        <div class="generated-grid">
-          <div class="generated-panel" id="output-panel-primary">
-            <div class="checkpoint-heading">
+        <h2>Comparison</h2>
+        <div class="comparison-stack">
+          <div class="comparison-row">
+            <div class="comparison-heading">
+              <h3>Ground truth</h3>
+              <div class="checkpoint-path">Reference image</div>
+            </div>
+            <div class="comparison-frame"><img id="ground-truth" alt="Ground truth satellite image"></div>
+          </div>
+          <div class="comparison-row generated-panel" id="output-panel-primary">
+            <div class="comparison-heading checkpoint-heading">
               <h3 id="output-title-primary">Coordinate checkpoint</h3>
               <div class="checkpoint-path" id="output-path-primary">Waiting for checkpoint</div>
             </div>
-            <div class="frame" id="output-frame-primary"><div class="empty">No image yet</div></div>
+            <div class="comparison-frame" id="output-frame-primary"><div class="empty">No image yet</div></div>
           </div>
-          <div class="generated-panel" id="output-panel-comparison" hidden>
-            <div class="checkpoint-heading">
+          <div class="comparison-row generated-panel" id="output-panel-comparison" hidden>
+            <div class="comparison-heading checkpoint-heading">
               <h3 id="output-title-comparison">No-coordinate checkpoint</h3>
               <div class="checkpoint-path" id="output-path-comparison">Waiting for checkpoint</div>
             </div>
-            <div class="frame" id="output-frame-comparison"><div class="empty">No image yet</div></div>
+            <div class="comparison-frame" id="output-frame-comparison"><div class="empty">No image yet</div></div>
           </div>
         </div>
         <div class="sweep-panel" id="sweep-panel" hidden>
@@ -753,7 +773,6 @@
     const sweepButton = document.getElementById("sweep");
     const maskCanvas = document.getElementById("mask");
     const groundTruthImage = document.getElementById("ground-truth");
-    const groundTruthPanel = document.getElementById("ground-truth-panel");
     const drawToolbar = document.getElementById("draw-toolbar");
     const drawModeInput = document.getElementById("draw-mode");
     const paintClassSelect = document.getElementById("paint-class");
@@ -1224,23 +1243,21 @@
     function renderSweepLayout(seeds, targets) {
       sweepCells = new Map();
       sweepGrid.replaceChildren();
-      sweepGrid.style.gridTemplateColumns = `minmax(56px, 72px) repeat(${targets.length}, minmax(150px, 1fr))`;
+      sweepGrid.style.gridTemplateColumns = `minmax(130px, 180px) repeat(${seeds.length}, minmax(150px, 1fr))`;
       const corner = document.createElement("div");
       corner.className = "sweep-header";
+      corner.textContent = "Seed";
       sweepGrid.appendChild(corner);
-      targets.forEach((checkpoint) => {
+      seeds.forEach((seed) => {
         const header = document.createElement("div");
         header.className = "sweep-header";
-        header.textContent = checkpoint.label;
-        header.title = checkpoint.label;
+        header.textContent = seed;
         sweepGrid.appendChild(header);
       });
-      seeds.forEach((seed) => {
-        const seedLabel = document.createElement("div");
-        seedLabel.className = "sweep-seed";
-        seedLabel.textContent = seed;
-        sweepGrid.appendChild(seedLabel);
-        targets.forEach((checkpoint) => {
+      appendSweepGroundTruthRow(seeds);
+      targets.forEach((checkpoint) => {
+        appendSweepRowLabel(checkpoint.label, checkpoint.path);
+        seeds.forEach((seed) => {
           const cell = document.createElement("div");
           cell.className = "sweep-cell";
           const frame = document.createElement("div");
@@ -1252,6 +1269,34 @@
         });
       });
       sweepPanel.hidden = false;
+    }
+
+    function appendSweepGroundTruthRow(seeds) {
+      appendSweepRowLabel("Ground truth", "Reference image");
+      seeds.forEach(() => {
+        const cell = document.createElement("div");
+        cell.className = "sweep-cell";
+        const frame = document.createElement("div");
+        frame.className = "sweep-frame";
+        const image = document.createElement("img");
+        image.alt = "Ground truth satellite image";
+        image.src = groundTruthImage.src;
+        frame.appendChild(image);
+        cell.appendChild(frame);
+        sweepGrid.appendChild(cell);
+      });
+    }
+
+    function appendSweepRowLabel(label, path) {
+      const rowLabel = document.createElement("div");
+      rowLabel.className = "sweep-row-label";
+      const title = document.createElement("h3");
+      title.textContent = label;
+      const detail = document.createElement("div");
+      detail.className = "checkpoint-path";
+      detail.textContent = path === "Reference image" ? path : checkpointFileName(path);
+      rowLabel.append(title, detail);
+      sweepGrid.appendChild(rowLabel);
     }
 
     function sweepFrame(seed, checkpoint) {
@@ -1320,7 +1365,6 @@
     function updateDrawingMode() {
       const isEnabled = drawModeInput.getAttribute("aria-pressed") === "true";
       maskCanvas.classList.toggle("drawing", isEnabled);
-      groundTruthPanel.hidden = isEnabled;
       drawToolbar.hidden = !isEnabled;
     }
 
