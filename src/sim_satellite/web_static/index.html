@@ -1055,112 +1055,117 @@
     }
 
     async function generate() {
-      generateButton.disabled = true;
-      sweepButton.disabled = true;
-      generateButton.textContent = "Generating";
-      setStatus("Starting generation...");
-      try {
+      await runGenerationAction(generateButton, "Generating", "Starting generation...", async () => {
         const state = await refreshStateMetadata();
         const targets = availableCheckpoints(state);
         if (!targets.length) throw new Error("No checkpoint is ready");
         const requestedSteps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
-        const totalSteps = requestedSteps * targets.length;
-        let completedSteps = 0;
-        const completedPayloads = [];
-        showProgress(totalSteps);
-
-        const body = {
-          index: Number(sampleSelect.value),
-          seed: Number(seedInput.value),
-          steps: requestedSteps
-        };
-        if (maskDirty) {
-          body.maskImage = maskCanvas.toDataURL("image/png");
-        }
-
-        for (const checkpoint of targets) {
-          renderOutputLoading(checkpoint);
-          const payload = await requestGenerationStream(body, checkpoint, {
-            checkpoint,
-            offset: completedSteps,
-            totalSteps
-          });
-          if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
-          renderGeneratedImage(payload, checkpoint);
-          completedPayloads.push(payload);
-          completedSteps += payload.steps || requestedSteps;
-          updateProgress(completedSteps, totalSteps);
-        }
+        const body = generationRequestBody(requestedSteps, Number(seedInput.value));
+        const completedPayloads = await runGenerationJobs(
+          singleGenerationJobs(targets, body),
+          requestedSteps
+        );
 
         const labels = completedPayloads
           .map((payload) => payload.checkpointLabel || "checkpoint")
           .join(" + ");
         setStatus(`Generated ${labels}`);
-      } catch (error) {
-        failProgress();
-        setStatus(error.message, true);
-      } finally {
-        generateButton.disabled = false;
-        sweepButton.disabled = false;
-        generateButton.textContent = "Generate";
-      }
+      });
     }
 
     async function sweepSeeds() {
-      generateButton.disabled = true;
-      sweepButton.disabled = true;
-      sweepButton.textContent = "Sweeping";
-      setStatus("Starting seed sweep...");
-      try {
+      await runGenerationAction(sweepButton, "Sweeping", "Starting seed sweep...", async () => {
         const seeds = parseSweepSeeds(sweepSeedsInput.value);
         const state = await refreshStateMetadata();
         const targets = availableCheckpoints(state);
         if (!targets.length) throw new Error("No checkpoint is ready");
         const requestedSteps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
-        const totalSteps = requestedSteps * targets.length * seeds.length;
-        let completedSteps = 0;
-        showProgress(totalSteps);
         renderSweepLayout(seeds, targets);
-
-        const body = {
-          index: Number(sampleSelect.value),
-          steps: requestedSteps
-        };
-        if (maskDirty) {
-          body.maskImage = maskCanvas.toDataURL("image/png");
-        }
-
-        for (const seed of seeds) {
-          for (const checkpoint of targets) {
-            renderSweepLoading(seed, checkpoint);
-            const payload = await requestGenerationStream(
-              { ...body, seed },
-              checkpoint,
-              {
-                checkpoint,
-                offset: completedSteps,
-                totalSteps,
-                seed
-              }
-            );
-            if (!payload) {
-              throw new Error(`${checkpoint.label} seed ${seed} ended before the image was ready`);
-            }
-            renderSweepImage(payload, seed, checkpoint);
-            completedSteps += payload.steps || requestedSteps;
-            updateProgress(completedSteps, totalSteps);
-          }
-        }
+        await runGenerationJobs(
+          sweepGenerationJobs(seeds, targets, generationRequestBody(requestedSteps)),
+          requestedSteps
+        );
 
         setStatus(`Seed sweep complete (${seeds.length} seeds)`);
+      });
+    }
+
+    async function runGenerationAction(activeButton, activeText, startMessage, action) {
+      const originalText = activeButton.textContent;
+      generateButton.disabled = true;
+      sweepButton.disabled = true;
+      activeButton.textContent = activeText;
+      setStatus(startMessage);
+      try {
+        await action();
       } catch (error) {
         failProgress();
         setStatus(error.message, true);
       } finally {
         generateButton.disabled = false;
         sweepButton.disabled = false;
-        sweepButton.textContent = "Sweep";
+        activeButton.textContent = originalText;
       }
+    }
+
+    function generationRequestBody(requestedSteps, seed) {
+      const body = {
+        index: Number(sampleSelect.value),
+        steps: requestedSteps
+      };
+      if (seed !== undefined) {
+        body.seed = seed;
+      }
+      if (maskDirty) {
+        body.maskImage = maskCanvas.toDataURL("image/png");
+      }
+      return body;
+    }
+
+    function singleGenerationJobs(targets, body) {
+      return targets.map((checkpoint) => ({
+        body,
+        checkpoint,
+        seed: body.seed,
+        onStart: () => renderOutputLoading(checkpoint),
+        onComplete: (payload) => renderGeneratedImage(payload, checkpoint),
+        missingMessage: `${checkpoint.label} ended before the image was ready`
+      }));
+    }
+
+    function sweepGenerationJobs(seeds, targets, body) {
+      return seeds.flatMap((seed) => targets.map((checkpoint) => ({
+        body: { ...body, seed },
+        checkpoint,
+        seed,
+        onStart: () => renderSweepLoading(seed, checkpoint),
+        onComplete: (payload) => renderSweepImage(payload, seed, checkpoint),
+        missingMessage: `${checkpoint.label} seed ${seed} ended before the image was ready`
+      })));
+    }
+
+    async function runGenerationJobs(jobs, requestedSteps) {
+      const totalSteps = requestedSteps * jobs.length;
+      let completedSteps = 0;
+      const completedPayloads = [];
+      showProgress(totalSteps);
+
+      for (const job of jobs) {
+        job.onStart();
+        const payload = await requestGenerationStream(job.body, job.checkpoint, {
+          checkpoint: job.checkpoint,
+          offset: completedSteps,
+          totalSteps,
+          seed: job.seed
+        });
+        if (!payload) throw new Error(job.missingMessage);
+        job.onComplete(payload);
+        completedPayloads.push(payload);
+        completedSteps += payload.steps || requestedSteps;
+        updateProgress(completedSteps, totalSteps);
+      }
+
+      return completedPayloads;
     }
 
     async function requestGenerationStream(body, checkpoint, progressState) {
