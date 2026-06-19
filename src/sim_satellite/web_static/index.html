@@ -64,7 +64,12 @@
     }
     .controls {
       display: grid;
-      grid-template-columns: minmax(180px, 300px) repeat(2, minmax(74px, 88px)) auto;
+      grid-template-columns:
+        minmax(180px, 300px)
+        repeat(2, minmax(74px, 88px))
+        minmax(170px, 220px)
+        auto
+        auto;
       gap: 10px;
       align-items: end;
       justify-content: end;
@@ -292,6 +297,64 @@
     }
     .generated-panel[hidden] {
       display: none;
+    }
+    .sweep-panel {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+      padding-top: 6px;
+    }
+    .sweep-panel[hidden] {
+      display: none;
+    }
+    .sweep-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+    .sweep-grid {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+      overflow-x: auto;
+      align-items: start;
+    }
+    .sweep-header,
+    .sweep-seed {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .sweep-header {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sweep-seed {
+      padding-top: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+    .sweep-cell {
+      display: grid;
+      gap: 5px;
+      min-width: 150px;
+    }
+    .sweep-frame {
+      aspect-ratio: 1;
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    .sweep-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
     }
     .checkpoint-heading {
       display: grid;
@@ -596,7 +659,12 @@
           Steps
           <input id="steps" type="number" min="1" step="1">
         </label>
+        <label>
+          Sweep seeds
+          <input id="sweep-seeds" type="text" inputmode="numeric" placeholder="26, 2026, 120123">
+        </label>
         <button id="generate" type="button">Generate</button>
+        <button id="sweep" type="button">Sweep</button>
       </div>
     </header>
     <div class="progress" id="progress" hidden>
@@ -662,6 +730,13 @@
             <div class="frame" id="output-frame-comparison"><div class="empty">No image yet</div></div>
           </div>
         </div>
+        <div class="sweep-panel" id="sweep-panel" hidden>
+          <div class="sweep-heading">
+            <h2>Seed sweep</h2>
+            <button id="clear-sweep" class="secondary" type="button">Clear</button>
+          </div>
+          <div class="sweep-grid" id="sweep-grid"></div>
+        </div>
       </section>
     </main>
     <footer>
@@ -673,7 +748,9 @@
     const sampleSelect = document.getElementById("sample");
     const seedInput = document.getElementById("seed");
     const stepsInput = document.getElementById("steps");
+    const sweepSeedsInput = document.getElementById("sweep-seeds");
     const generateButton = document.getElementById("generate");
+    const sweepButton = document.getElementById("sweep");
     const maskCanvas = document.getElementById("mask");
     const groundTruthImage = document.getElementById("ground-truth");
     const groundTruthPanel = document.getElementById("ground-truth-panel");
@@ -699,6 +776,9 @@
       primary: document.getElementById("output-frame-primary"),
       comparison: document.getElementById("output-frame-comparison")
     };
+    const sweepPanel = document.getElementById("sweep-panel");
+    const sweepGrid = document.getElementById("sweep-grid");
+    const clearSweepButton = document.getElementById("clear-sweep");
     const statusEl = document.getElementById("status");
     const mainEl = document.querySelector("main");
     const legendToggle = document.getElementById("legend-toggle");
@@ -709,6 +789,7 @@
     const progressLabel = document.getElementById("progress-label");
     const progressCount = document.getElementById("progress-count");
     const progressBar = document.getElementById("progress-bar");
+    const MAX_SWEEP_SEEDS = 8;
 
     let classes = [];
     let activeClassId = 0;
@@ -717,6 +798,7 @@
     let lastPoint = null;
     let latestState = null;
     let legendCollapsed = false;
+    let sweepCells = new Map();
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
@@ -799,6 +881,36 @@
       return checkpointList(state).filter((checkpoint) => checkpoint.available);
     }
 
+    function uniqueSeeds(seeds) {
+      return [...new Set(seeds)];
+    }
+
+    function defaultSweepSeeds(seed) {
+      const configuredSeed = Number(seed);
+      return uniqueSeeds([26, Number.isInteger(configuredSeed) ? configuredSeed : 2026, 120123, 7001])
+        .join(", ");
+    }
+
+    function parseSweepSeeds(value) {
+      const seeds = uniqueSeeds(
+        String(value)
+          .split(/[,\s]+/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .map((item) => Number(item))
+      );
+      if (!seeds.length) throw new Error("Add at least one sweep seed");
+      if (seeds.length > MAX_SWEEP_SEEDS) {
+        throw new Error(`Use ${MAX_SWEEP_SEEDS} or fewer sweep seeds`);
+      }
+      for (const seed of seeds) {
+        if (!Number.isSafeInteger(seed) || seed < 0) {
+          throw new Error("Sweep seeds must be non-negative integers");
+        }
+      }
+      return seeds;
+    }
+
     function renderCheckpointPanels(state) {
       const checkpoints = checkpointById(state);
       Object.entries(outputPanels).forEach(([id, panel]) => {
@@ -864,6 +976,9 @@
 
       seedInput.value = state.seed;
       stepsInput.value = state.steps;
+      if (!sweepSeedsInput.value) {
+        sweepSeedsInput.value = defaultSweepSeeds(state.seed);
+      }
       renderMeta(state);
 
       sampleSelect.innerHTML = "";
@@ -922,6 +1037,7 @@
 
     async function generate() {
       generateButton.disabled = true;
+      sweepButton.disabled = true;
       generateButton.textContent = "Generating";
       setStatus("Starting generation...");
       try {
@@ -945,18 +1061,7 @@
 
         for (const checkpoint of targets) {
           renderOutputLoading(checkpoint);
-          const response = await fetch("/api/generate/stream", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...body, checkpoint: checkpoint.id })
-          });
-          if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.detail || payload.error || "Generation failed");
-          }
-          if (!response.body) throw new Error("Generation progress stream is unavailable");
-
-          const payload = await readGenerationStream(response.body, {
+          const payload = await requestGenerationStream(body, checkpoint, {
             checkpoint,
             offset: completedSteps,
             totalSteps
@@ -977,8 +1082,80 @@
         setStatus(error.message, true);
       } finally {
         generateButton.disabled = false;
+        sweepButton.disabled = false;
         generateButton.textContent = "Generate";
       }
+    }
+
+    async function sweepSeeds() {
+      generateButton.disabled = true;
+      sweepButton.disabled = true;
+      sweepButton.textContent = "Sweeping";
+      setStatus("Starting seed sweep...");
+      try {
+        const seeds = parseSweepSeeds(sweepSeedsInput.value);
+        const state = await refreshStateMetadata();
+        const targets = availableCheckpoints(state);
+        if (!targets.length) throw new Error("No checkpoint is ready");
+        const requestedSteps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
+        const totalSteps = requestedSteps * targets.length * seeds.length;
+        let completedSteps = 0;
+        showProgress(totalSteps);
+        renderSweepLayout(seeds, targets);
+
+        const body = {
+          index: Number(sampleSelect.value),
+          steps: requestedSteps
+        };
+        if (maskDirty) {
+          body.maskImage = maskCanvas.toDataURL("image/png");
+        }
+
+        for (const seed of seeds) {
+          for (const checkpoint of targets) {
+            renderSweepLoading(seed, checkpoint);
+            const payload = await requestGenerationStream(
+              { ...body, seed },
+              checkpoint,
+              {
+                checkpoint,
+                offset: completedSteps,
+                totalSteps,
+                seed
+              }
+            );
+            if (!payload) {
+              throw new Error(`${checkpoint.label} seed ${seed} ended before the image was ready`);
+            }
+            renderSweepImage(payload, seed, checkpoint);
+            completedSteps += payload.steps || requestedSteps;
+            updateProgress(completedSteps, totalSteps);
+          }
+        }
+
+        setStatus(`Seed sweep complete (${seeds.length} seeds)`);
+      } catch (error) {
+        failProgress();
+        setStatus(error.message, true);
+      } finally {
+        generateButton.disabled = false;
+        sweepButton.disabled = false;
+        sweepButton.textContent = "Sweep";
+      }
+    }
+
+    async function requestGenerationStream(body, checkpoint, progressState) {
+      const response = await fetch("/api/generate/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, checkpoint: checkpoint.id })
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || payload.error || "Generation failed");
+      }
+      if (!response.body) throw new Error("Generation progress stream is unavailable");
+      return readGenerationStream(response.body, progressState);
     }
 
     async function readGenerationStream(stream, progressState) {
@@ -1010,7 +1187,10 @@
     }
 
     function handleGenerationEvent(payload, progressState) {
-      const label = payload.checkpointLabel || progressState.checkpoint.label;
+      const checkpointLabel = payload.checkpointLabel || progressState.checkpoint.label;
+      const label = progressState.seed === undefined
+        ? checkpointLabel
+        : `${checkpointLabel} seed ${progressState.seed}`;
       if (payload.event === "start") {
         updateProgress(progressState.offset, progressState.totalSteps);
         setStatus(`Loading ${label}...`);
@@ -1029,6 +1209,69 @@
         throw new Error(`${label}: ${payload.detail || "Generation failed"}`);
       }
       return null;
+    }
+
+    function clearSweep() {
+      sweepCells = new Map();
+      sweepGrid.replaceChildren();
+      sweepPanel.hidden = true;
+    }
+
+    function sweepKey(seed, checkpoint) {
+      return `${seed}:${checkpoint.id}`;
+    }
+
+    function renderSweepLayout(seeds, targets) {
+      sweepCells = new Map();
+      sweepGrid.replaceChildren();
+      sweepGrid.style.gridTemplateColumns = `minmax(56px, 72px) repeat(${targets.length}, minmax(150px, 1fr))`;
+      const corner = document.createElement("div");
+      corner.className = "sweep-header";
+      sweepGrid.appendChild(corner);
+      targets.forEach((checkpoint) => {
+        const header = document.createElement("div");
+        header.className = "sweep-header";
+        header.textContent = checkpoint.label;
+        header.title = checkpoint.label;
+        sweepGrid.appendChild(header);
+      });
+      seeds.forEach((seed) => {
+        const seedLabel = document.createElement("div");
+        seedLabel.className = "sweep-seed";
+        seedLabel.textContent = seed;
+        sweepGrid.appendChild(seedLabel);
+        targets.forEach((checkpoint) => {
+          const cell = document.createElement("div");
+          cell.className = "sweep-cell";
+          const frame = document.createElement("div");
+          frame.className = "sweep-frame";
+          frame.appendChild(emptyMessage("Queued"));
+          cell.appendChild(frame);
+          sweepGrid.appendChild(cell);
+          sweepCells.set(sweepKey(seed, checkpoint), cell);
+        });
+      });
+      sweepPanel.hidden = false;
+    }
+
+    function sweepFrame(seed, checkpoint) {
+      const cell = sweepCells.get(sweepKey(seed, checkpoint));
+      return cell ? cell.querySelector(".sweep-frame") : null;
+    }
+
+    function renderSweepLoading(seed, checkpoint) {
+      const frame = sweepFrame(seed, checkpoint);
+      if (!frame) return;
+      frame.replaceChildren(emptyMessage("Generating"));
+    }
+
+    function renderSweepImage(payload, seed, checkpoint) {
+      const frame = sweepFrame(seed, checkpoint);
+      if (!frame) return;
+      const image = document.createElement("img");
+      image.alt = `${checkpoint.label} seed ${seed}`;
+      image.src = payload.image;
+      frame.replaceChildren(image);
     }
 
     function renderOutputLoading(checkpoint) {
@@ -1160,9 +1403,17 @@
     drawModeInput.addEventListener("click", toggleDrawingMode);
     paintClassSelect.addEventListener("change", () => selectClass(Number(paintClassSelect.value)));
     brushSizeInput.addEventListener("input", updateBrushValue);
-    resetMaskButton.addEventListener("click", () => renderMask(sampleSelect.value || 0));
-    sampleSelect.addEventListener("change", () => renderSample(sampleSelect.value));
+    resetMaskButton.addEventListener("click", () => {
+      clearSweep();
+      renderMask(sampleSelect.value || 0);
+    });
+    sampleSelect.addEventListener("change", () => {
+      clearSweep();
+      renderSample(sampleSelect.value);
+    });
     generateButton.addEventListener("click", generate);
+    sweepButton.addEventListener("click", sweepSeeds);
+    clearSweepButton.addEventListener("click", clearSweep);
     loadState().catch((error) => setStatus(error.message, true));
     setInterval(() => {
       refreshStateMetadata().catch(() => {});
