@@ -7,6 +7,7 @@ import binascii
 import glob
 import json
 import re
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
@@ -39,6 +40,7 @@ DEFAULT_PORT = 8765
 DEFAULT_DISPLAY_SIZE = 256
 DEFAULT_MAX_SAMPLES = 32
 DEFAULT_WEB_CHECKPOINT_PATH = "artifacts/tiny-sim-satellite-modal.pt"
+DEFAULT_EVALUATION_LOG_PATH = "artifacts/web-evaluation-votes.jsonl"
 PRIMARY_CHECKPOINT_ID = "primary"
 COMPARISON_CHECKPOINT_ID = "comparison"
 STATIC_DIR = Path(__file__).with_name("web_static")
@@ -68,6 +70,7 @@ class WebConfig:
     port: int = DEFAULT_PORT
     max_samples: int = DEFAULT_MAX_SAMPLES
     display_size: int = DEFAULT_DISPLAY_SIZE
+    evaluation_log_path: str = DEFAULT_EVALUATION_LOG_PATH
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -80,6 +83,8 @@ class WebConfig:
             raise ValueError("max_samples must be positive")
         if self.display_size < 1:
             raise ValueError("display_size must be positive")
+        if not self.evaluation_log_path:
+            raise ValueError("evaluation_log_path must not be empty")
 
 
 class GenerateRequest(BaseModel):
@@ -88,6 +93,29 @@ class GenerateRequest(BaseModel):
     steps: int | None = None
     checkpoint: str = PRIMARY_CHECKPOINT_ID
     mask_image: str | None = Field(default=None, alias="maskImage")
+
+
+class EvaluationImage(BaseModel):
+    kind: str
+    label: str | None = None
+    checkpoint_id: str | None = Field(default=None, alias="checkpointId")
+    checkpoint_label: str | None = Field(default=None, alias="checkpointLabel")
+    seed: int | None = None
+
+
+class EvaluationVote(BaseModel):
+    task: str
+    trial_id: str = Field(alias="trialId")
+    session_id: str = Field(alias="sessionId")
+    sample_index: int = Field(alias="sampleIndex", ge=0)
+    sample_name: str | None = Field(default=None, alias="sampleName")
+    seed: int | None = None
+    choice: str
+    confidence: int | None = None
+    correct_choice: str | None = Field(default=None, alias="correctChoice")
+    left: EvaluationImage | None = None
+    right: EvaluationImage | None = None
+    shown: EvaluationImage | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +228,16 @@ def create_app(
             media_type=STREAM_MEDIA_TYPE,
         )
 
+    @app.post("/api/evaluation/votes")
+    def evaluation_vote(payload: EvaluationVote) -> dict[str, Any]:
+        record = _evaluation_vote_record(payload)
+        _append_evaluation_vote(record, config)
+        return {
+            "ok": True,
+            "createdAtEpochUtc": record["createdAtEpochUtc"],
+            "votes": _evaluation_vote_count(Path(config.evaluation_log_path)),
+        }
+
     return app
 
 
@@ -273,6 +311,10 @@ def _state_payload(
             }
             for index, name in enumerate(OPENEARTHMAP_CLASSES)
         ],
+        "evaluation": {
+            "logPath": config.evaluation_log_path,
+            "votes": _evaluation_vote_count(Path(config.evaluation_log_path)),
+        },
     }
 
 
@@ -697,6 +739,27 @@ def _data_uri(body: bytes, content_type: str) -> str:
     return f"data:{content_type};base64,{encoded}"
 
 
+def _evaluation_vote_record(payload: EvaluationVote) -> dict[str, Any]:
+    return {
+        "createdAtEpochUtc": int(time.time()),
+        **payload.model_dump(by_alias=True),
+    }
+
+
+def _append_evaluation_vote(record: dict[str, Any], config: WebConfig) -> None:
+    log_path = Path(config.evaluation_log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _evaluation_vote_count(log_path: Path) -> int:
+    if not log_path.exists():
+        return 0
+    with log_path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
 def _build_click_command() -> click.Command:
     @click.command("app", help="Launch the local mask-conditioned generation app.")
     @click.option("--checkpoint-path", default=WebConfig.checkpoint_path, show_default=True)
@@ -720,6 +783,11 @@ def _build_click_command() -> click.Command:
     @click.option("--host", default=WebConfig.host, show_default=True)
     @click.option("--port", default=WebConfig.port, show_default=True, type=int)
     @click.option("--max-samples", default=WebConfig.max_samples, show_default=True)
+    @click.option(
+        "--evaluation-log-path",
+        default=WebConfig.evaluation_log_path,
+        show_default=True,
+    )
     def command(
         checkpoint_path: str,
         checkpoint_glob: str,
@@ -734,6 +802,7 @@ def _build_click_command() -> click.Command:
         host: str,
         port: int,
         max_samples: int,
+        evaluation_log_path: str,
     ) -> None:
         serve(
             WebConfig(
@@ -750,6 +819,7 @@ def _build_click_command() -> click.Command:
                 host=host,
                 port=port,
                 max_samples=max_samples,
+                evaluation_log_path=evaluation_log_path,
             )
         )
 

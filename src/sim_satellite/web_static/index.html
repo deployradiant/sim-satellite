@@ -36,7 +36,7 @@
     .shell {
       min-height: 100vh;
       display: grid;
-      grid-template-rows: auto auto auto 1fr auto;
+      grid-template-rows: auto auto auto auto 1fr auto;
     }
     header {
       grid-row: 1;
@@ -138,6 +138,29 @@
       white-space: nowrap;
       border: 0;
     }
+    .tabs {
+      grid-row: 2;
+      display: flex;
+      gap: 8px;
+      padding: 10px 22px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }
+    .tab-button {
+      border-color: var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      font-weight: 400;
+    }
+    .tab-button:hover,
+    .tab-button[aria-selected="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--ink);
+    }
+    .tab-panel[hidden] {
+      display: none;
+    }
     button:disabled {
       cursor: wait;
       opacity: 0.65;
@@ -226,7 +249,7 @@
       border-color: var(--accent);
     }
     .draw-toolbar {
-      grid-row: 3;
+      grid-row: 4;
       display: grid;
       grid-template-columns: minmax(180px, 300px) minmax(180px, 280px) auto;
       gap: 12px;
@@ -241,7 +264,7 @@
       display: none;
     }
     main {
-      grid-row: 4;
+      grid-row: 5;
       display: grid;
       grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
       gap: 18px;
@@ -418,7 +441,7 @@
       font-size: 13px;
     }
     .progress {
-      grid-row: 2;
+      grid-row: 3;
       display: grid;
       gap: 6px;
       min-height: 42px;
@@ -473,6 +496,103 @@
     }
     .progress.error progress::-moz-progress-bar {
       background: var(--warn);
+    }
+    .evaluation-view {
+      grid-row: 5;
+      display: grid;
+      grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+      gap: 18px;
+      padding: 22px;
+      align-items: start;
+    }
+    .evaluation-controls,
+    .evaluation-stage {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+    .evaluation-controls h2,
+    .evaluation-stage h2,
+    .evaluation-card h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.2;
+      font-weight: 400;
+      letter-spacing: 0;
+    }
+    .segmented {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .segmented button {
+      border-color: var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      font-weight: 400;
+    }
+    .segmented button[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .evaluation-card {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .evaluation-images {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      min-width: 0;
+    }
+    .evaluation-images.single {
+      grid-template-columns: minmax(0, 420px);
+    }
+    .evaluation-frame {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .evaluation-frame-label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .evaluation-frame-box {
+      aspect-ratio: 1;
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    .evaluation-frame-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .evaluation-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .evaluation-actions button {
+      min-width: 84px;
+    }
+    .confidence-label input {
+      padding: 0;
+      accent-color: var(--accent);
+    }
+    .evaluation-count {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
     }
     .classes {
       display: grid;
@@ -580,7 +700,7 @@
       color: var(--muted);
     }
     footer {
-      grid-row: 5;
+      grid-row: 6;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -627,6 +747,9 @@
       .draw-toolbar {
         grid-template-columns: 1fr;
       }
+      .evaluation-view {
+        grid-template-columns: 1fr;
+      }
       .comparison-row {
         grid-template-columns: minmax(110px, 150px) minmax(0, 280px);
       }
@@ -650,10 +773,18 @@
         padding-left: 14px;
         padding-right: 14px;
       }
+      .tabs,
+      .evaluation-view {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
       .frame {
         min-height: 220px;
       }
       .comparison-row {
+        grid-template-columns: 1fr;
+      }
+      .evaluation-images {
         grid-template-columns: 1fr;
       }
     }
@@ -684,6 +815,10 @@
         <button id="sweep" type="button">Sweep</button>
       </div>
     </header>
+    <nav class="tabs" aria-label="Workspace">
+      <button class="tab-button" id="generate-tab" type="button" aria-selected="true" aria-controls="generate-view">Generate</button>
+      <button class="tab-button" id="evaluate-tab" type="button" aria-selected="false" aria-controls="evaluate-view">Evaluate</button>
+    </nav>
     <div class="progress" id="progress" hidden>
       <div class="progress-line">
         <span id="progress-label">Starting</span>
@@ -705,7 +840,7 @@
         <button id="reset-mask" class="secondary" type="button">Reset mask</button>
       </div>
     </div>
-    <main>
+    <main class="tab-panel" id="generate-view">
       <aside class="classes">
         <div class="side-heading">
           <h2 class="legend-title">Classes</h2>
@@ -759,6 +894,47 @@
         </div>
       </section>
     </main>
+    <section class="evaluation-view tab-panel" id="evaluate-view" hidden>
+      <div class="evaluation-controls">
+        <h2>Human eval</h2>
+        <div class="segmented" role="group" aria-label="Evaluation task">
+          <button id="eval-task-preference" type="button" aria-pressed="true">Preference</button>
+          <button id="eval-task-real-fake" type="button" aria-pressed="false">Real/Fake</button>
+        </div>
+        <label class="confidence-label">
+          Confidence
+          <input id="eval-confidence" type="range" min="1" max="5" step="1" value="3">
+        </label>
+        <button id="eval-start" type="button">New trial</button>
+        <div class="evaluation-count" id="eval-count">No votes recorded</div>
+      </div>
+      <div class="evaluation-stage">
+        <h2 id="eval-title">Preference trial</h2>
+        <div class="evaluation-card">
+          <div class="evaluation-images" id="eval-images">
+            <div class="evaluation-frame">
+              <div class="evaluation-frame-label">A</div>
+              <div class="evaluation-frame-box" id="eval-frame-left"><div class="empty">No trial yet</div></div>
+            </div>
+            <div class="evaluation-frame">
+              <div class="evaluation-frame-label">B</div>
+              <div class="evaluation-frame-box" id="eval-frame-right"><div class="empty">No trial yet</div></div>
+            </div>
+          </div>
+          <div class="evaluation-actions" id="eval-preference-actions">
+            <button id="eval-left" type="button">A</button>
+            <button id="eval-tie" class="secondary" type="button">Tie</button>
+            <button id="eval-right" type="button">B</button>
+            <button id="eval-bad-pair" class="secondary" type="button">Bad pair</button>
+          </div>
+          <div class="evaluation-actions" id="eval-real-fake-actions" hidden>
+            <button id="eval-real" type="button">Real</button>
+            <button id="eval-fake" type="button">Fake</button>
+            <button id="eval-skip" class="secondary" type="button">Skip</button>
+          </div>
+        </div>
+      </div>
+    </section>
     <footer>
       <span class="status-message" id="status">Ready</span>
       <div class="meta" id="meta">Loading checkpoint...</div>
@@ -766,6 +942,10 @@
   </div>
   <script>
     const sampleSelect = document.getElementById("sample");
+    const generateTab = document.getElementById("generate-tab");
+    const evaluateTab = document.getElementById("evaluate-tab");
+    const generateView = document.getElementById("generate-view");
+    const evaluateView = document.getElementById("evaluate-view");
     const seedInput = document.getElementById("seed");
     const stepsInput = document.getElementById("steps");
     const sweepSeedsInput = document.getElementById("sweep-seeds");
@@ -808,9 +988,30 @@
     const progressLabel = document.getElementById("progress-label");
     const progressCount = document.getElementById("progress-count");
     const progressBar = document.getElementById("progress-bar");
+    const evalTaskPreferenceButton = document.getElementById("eval-task-preference");
+    const evalTaskRealFakeButton = document.getElementById("eval-task-real-fake");
+    const evalConfidenceInput = document.getElementById("eval-confidence");
+    const evalStartButton = document.getElementById("eval-start");
+    const evalCount = document.getElementById("eval-count");
+    const evalTitle = document.getElementById("eval-title");
+    const evalImages = document.getElementById("eval-images");
+    const evalFrameLeft = document.getElementById("eval-frame-left");
+    const evalFrameRight = document.getElementById("eval-frame-right");
+    const evalPreferenceActions = document.getElementById("eval-preference-actions");
+    const evalRealFakeActions = document.getElementById("eval-real-fake-actions");
+    const evalLeftButton = document.getElementById("eval-left");
+    const evalTieButton = document.getElementById("eval-tie");
+    const evalRightButton = document.getElementById("eval-right");
+    const evalBadPairButton = document.getElementById("eval-bad-pair");
+    const evalRealButton = document.getElementById("eval-real");
+    const evalFakeButton = document.getElementById("eval-fake");
+    const evalSkipButton = document.getElementById("eval-skip");
     const MAX_SWEEP_SEEDS = 8;
 
     let classes = [];
+    let activeTab = "generate";
+    let evalTask = "preference";
+    let activeTrial = null;
     let activeClassId = 0;
     let maskDirty = false;
     let isDrawing = false;
@@ -829,6 +1030,284 @@
       element.className = "empty";
       element.textContent = text;
       return element;
+    }
+
+    function setActiveTab(tab) {
+      activeTab = tab;
+      const isGenerate = tab === "generate";
+      generateView.hidden = !isGenerate;
+      evaluateView.hidden = isGenerate;
+      generateTab.setAttribute("aria-selected", String(isGenerate));
+      evaluateTab.setAttribute("aria-selected", String(!isGenerate));
+      updateDrawingMode();
+    }
+
+    function setEvalTask(task) {
+      evalTask = task;
+      const isPreference = task === "preference";
+      evalTaskPreferenceButton.setAttribute("aria-pressed", String(isPreference));
+      evalTaskRealFakeButton.setAttribute("aria-pressed", String(!isPreference));
+      evalPreferenceActions.hidden = !isPreference;
+      evalRealFakeActions.hidden = isPreference;
+      evalTitle.textContent = isPreference ? "Preference trial" : "Real/Fake trial";
+      activeTrial = null;
+      setEvaluationAnswerDisabled(true);
+      renderEvaluationPlaceholder("No trial yet");
+    }
+
+    function renderEvaluationCount(state) {
+      const evaluation = state && state.evaluation ? state.evaluation : {};
+      const votes = Number(evaluation.votes) || 0;
+      const label = votes === 1 ? "1 vote recorded" : `${votes} votes recorded`;
+      evalCount.textContent = evaluation.logPath ? `${label} | ${evaluation.logPath}` : label;
+    }
+
+    function setEvaluationAnswerDisabled(disabled) {
+      [
+        evalLeftButton,
+        evalTieButton,
+        evalRightButton,
+        evalBadPairButton,
+        evalRealButton,
+        evalFakeButton,
+        evalSkipButton
+      ].forEach((button) => {
+        button.disabled = disabled;
+      });
+    }
+
+    function evaluationSessionId() {
+      const key = "simSatelliteEvaluationSessionId";
+      try {
+        const existing = window.localStorage.getItem(key);
+        if (existing) return existing;
+        const created = randomId("session");
+        window.localStorage.setItem(key, created);
+        return created;
+      } catch {
+        return randomId("session");
+      }
+    }
+
+    function randomId(prefix) {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return `${prefix}-${window.crypto.randomUUID()}`;
+      }
+      return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    }
+
+    function randomSeed() {
+      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+        const values = new Uint32Array(1);
+        window.crypto.getRandomValues(values);
+        return values[0];
+      }
+      return Math.floor(Math.random() * 4294967295);
+    }
+
+    function currentSample(state) {
+      const index = Number(sampleSelect.value);
+      return state.samples.find((sample) => sample.index === index) || state.samples[0];
+    }
+
+    function sampleImageSrc(sampleIndex) {
+      return `/api/image?index=${sampleIndex}&t=${Date.now()}`;
+    }
+
+    function renderEvaluationPlaceholder(text) {
+      evalImages.classList.remove("single");
+      evalFrameRight.closest(".evaluation-frame").hidden = false;
+      setEvaluationFrame(evalFrameLeft, "A", null, text);
+      setEvaluationFrame(evalFrameRight, "B", null, text);
+    }
+
+    function setEvaluationFrame(frame, label, item, placeholder) {
+      const parent = frame.closest(".evaluation-frame");
+      parent.querySelector(".evaluation-frame-label").textContent = label;
+      if (!item) {
+        frame.replaceChildren(emptyMessage(placeholder));
+        return;
+      }
+      const image = document.createElement("img");
+      image.alt = label;
+      image.src = item.src;
+      frame.replaceChildren(image);
+    }
+
+    function renderPreferenceTrial(left, right) {
+      evalImages.classList.remove("single");
+      evalFrameRight.closest(".evaluation-frame").hidden = false;
+      setEvaluationFrame(evalFrameLeft, "A", left, "");
+      setEvaluationFrame(evalFrameRight, "B", right, "");
+    }
+
+    function renderRealFakeTrial(shown) {
+      evalImages.classList.add("single");
+      evalFrameRight.closest(".evaluation-frame").hidden = true;
+      setEvaluationFrame(evalFrameLeft, "Image", shown, "");
+    }
+
+    function shuffledPair(first, second) {
+      return Math.random() < 0.5 ? [first, second] : [second, first];
+    }
+
+    function realEvaluationImage(sampleIndex) {
+      return {
+        src: sampleImageSrc(sampleIndex),
+        record: {
+          kind: "real",
+          label: "Ground truth"
+        }
+      };
+    }
+
+    function generatedEvaluationImage(payload, checkpoint, seed) {
+      return {
+        src: payload.image,
+        record: {
+          kind: "generated",
+          checkpointId: payload.checkpointId || checkpoint.id,
+          checkpointLabel: payload.checkpointLabel || checkpoint.label,
+          seed
+        }
+      };
+    }
+
+    async function startEvaluationTrial() {
+      await runEvaluationAction("Starting evaluation trial...", async () => {
+        const state = await refreshStateMetadata();
+        const targets = availableCheckpoints(state);
+        if (!targets.length) throw new Error("No checkpoint is ready");
+        const sample = currentSample(state);
+        const seed = randomSeed();
+        const steps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
+        if (evalTask === "preference") {
+          await startPreferenceTrial(state, targets, sample, seed, steps);
+        } else {
+          await startRealFakeTrial(state, targets, sample, seed, steps);
+        }
+      });
+    }
+
+    async function startPreferenceTrial(state, targets, sample, seed, steps) {
+      const body = generationRequestBody(steps, seed);
+      const generatedItems = [];
+      const generationTargets = targets.slice(0, Math.min(targets.length, 2));
+      showProgress(steps * generationTargets.length);
+
+      let completedSteps = 0;
+      for (const checkpoint of generationTargets) {
+        const payload = await requestGenerationStream(body, checkpoint, {
+          checkpoint,
+          offset: completedSteps,
+          totalSteps: steps * generationTargets.length,
+          seed
+        });
+        if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
+        generatedItems.push(generatedEvaluationImage(payload, checkpoint, seed));
+        completedSteps += payload.steps || steps;
+        updateProgress(completedSteps, steps * generationTargets.length);
+      }
+
+      const pair = generatedItems.length > 1
+        ? shuffledPair(generatedItems[0], generatedItems[1])
+        : shuffledPair(generatedItems[0], realEvaluationImage(sample.index));
+
+      renderPreferenceTrial(pair[0], pair[1]);
+      activeTrial = {
+        task: "preference",
+        trialId: randomId("trial"),
+        sessionId: evaluationSessionId(),
+        sampleIndex: sample.index,
+        sampleName: sample.name,
+        seed,
+        left: pair[0].record,
+        right: pair[1].record
+      };
+      setEvaluationAnswerDisabled(false);
+      setStatus("Preference trial ready");
+    }
+
+    async function startRealFakeTrial(state, targets, sample, seed, steps) {
+      const showFake = Math.random() < 0.5;
+      let shown = realEvaluationImage(sample.index);
+
+      if (showFake) {
+        const checkpoint = targets[0];
+        showProgress(steps);
+        const payload = await requestGenerationStream(generationRequestBody(steps, seed), checkpoint, {
+          checkpoint,
+          offset: 0,
+          totalSteps: steps,
+          seed
+        });
+        if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
+        shown = generatedEvaluationImage(payload, checkpoint, seed);
+      } else {
+        progressEl.hidden = true;
+      }
+
+      renderRealFakeTrial(shown);
+      activeTrial = {
+        task: "real_fake",
+        trialId: randomId("trial"),
+        sessionId: evaluationSessionId(),
+        sampleIndex: sample.index,
+        sampleName: sample.name,
+        seed,
+        shown: shown.record,
+        correctChoice: shown.record.kind === "real" ? "real" : "fake"
+      };
+      setEvaluationAnswerDisabled(false);
+      setStatus("Real/Fake trial ready");
+    }
+
+    async function runEvaluationAction(startMessage, action) {
+      activeTrial = null;
+      setEvaluationAnswerDisabled(true);
+      evalStartButton.disabled = true;
+      generateButton.disabled = true;
+      sweepButton.disabled = true;
+      setStatus(startMessage);
+      try {
+        await action();
+      } catch (error) {
+        failProgress();
+        setStatus(error.message, true);
+      } finally {
+        evalStartButton.disabled = false;
+        generateButton.disabled = false;
+        sweepButton.disabled = false;
+      }
+    }
+
+    async function submitEvaluationChoice(choice) {
+      if (!activeTrial) {
+        setStatus("Start a trial first", true);
+        return;
+      }
+      const payload = {
+        ...activeTrial,
+        choice,
+        confidence: Number(evalConfidenceInput.value)
+      };
+      const response = await fetch("/api/evaluation/votes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setStatus(result.detail || result.error || "Could not record vote", true);
+        return;
+      }
+      activeTrial = null;
+      setEvaluationAnswerDisabled(true);
+      if (latestState && latestState.evaluation) {
+        latestState.evaluation.votes = result.votes;
+        renderEvaluationCount(latestState);
+      }
+      setStatus("Vote recorded");
     }
 
     function updateLegendCollapsed() {
@@ -951,6 +1430,7 @@
         `${state.samples.length} masks`
       ].filter(Boolean).join(" | ");
       renderCheckpointPanels(state);
+      renderEvaluationCount(state);
     }
 
     function renderMask(index) {
@@ -1361,7 +1841,7 @@
     function updateDrawingMode() {
       const isEnabled = drawModeInput.getAttribute("aria-pressed") === "true";
       maskCanvas.classList.toggle("drawing", isEnabled);
-      drawToolbar.hidden = !isEnabled;
+      drawToolbar.hidden = !isEnabled || activeTab !== "generate";
     }
 
     function canDraw() {
@@ -1439,6 +1919,8 @@
 
     maskCanvas.addEventListener("pointerup", stopDrawing);
     maskCanvas.addEventListener("pointercancel", stopDrawing);
+    generateTab.addEventListener("click", () => setActiveTab("generate"));
+    evaluateTab.addEventListener("click", () => setActiveTab("evaluate"));
     legendToggle.addEventListener("click", toggleLegend);
     drawModeInput.addEventListener("click", toggleDrawingMode);
     paintClassSelect.addEventListener("change", () => selectClass(Number(paintClassSelect.value)));
@@ -1454,6 +1936,18 @@
     generateButton.addEventListener("click", generate);
     sweepButton.addEventListener("click", sweepSeeds);
     clearSweepButton.addEventListener("click", clearSweep);
+    evalTaskPreferenceButton.addEventListener("click", () => setEvalTask("preference"));
+    evalTaskRealFakeButton.addEventListener("click", () => setEvalTask("real_fake"));
+    evalStartButton.addEventListener("click", startEvaluationTrial);
+    evalLeftButton.addEventListener("click", () => submitEvaluationChoice("left"));
+    evalTieButton.addEventListener("click", () => submitEvaluationChoice("tie"));
+    evalRightButton.addEventListener("click", () => submitEvaluationChoice("right"));
+    evalBadPairButton.addEventListener("click", () => submitEvaluationChoice("bad_pair"));
+    evalRealButton.addEventListener("click", () => submitEvaluationChoice("real"));
+    evalFakeButton.addEventListener("click", () => submitEvaluationChoice("fake"));
+    evalSkipButton.addEventListener("click", () => submitEvaluationChoice("skip"));
+    setEvalTask("preference");
+    setActiveTab("generate");
     loadState().catch((error) => setStatus(error.message, true));
     setInterval(() => {
       refreshStateMetadata().catch(() => {});

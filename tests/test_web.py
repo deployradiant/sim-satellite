@@ -40,6 +40,7 @@ def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.Monkey
     ]
     assert payload["samples"][0]["name"] == "tile"
     assert payload["classes"][0]["name"] == "unlabeled"
+    assert payload["evaluation"]["votes"] == 0
 
     mask = _request(app, "GET", "/api/mask", query_string="index=0")
     assert mask.status_code == 200
@@ -158,6 +159,58 @@ def test_web_generate_uses_requested_comparison_checkpoint(
     assert response.json()["checkpointId"] == "comparison"
     assert response.json()["checkpointLabel"] == config.comparison_checkpoint_label
     assert load_calls == [comparison_checkpoint]
+
+
+def test_web_records_evaluation_vote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    log_path = tmp_path / "votes.jsonl"
+    config = web.WebConfig(
+        checkpoint_path=config.checkpoint_path,
+        manifest_path=config.manifest_path,
+        display_size=4,
+        evaluation_log_path=str(log_path),
+    )
+    monkeypatch.setattr(web.time, "time", lambda: 1234567890.9)
+    app = web.create_app(config)
+
+    response = _request(
+        app,
+        "POST",
+        "/api/evaluation/votes",
+        json_body={
+            "task": "real_fake",
+            "trialId": "trial-1",
+            "sessionId": "session-1",
+            "sampleIndex": 0,
+            "sampleName": "tile",
+            "seed": 42,
+            "choice": "fake",
+            "confidence": 4,
+            "correctChoice": "fake",
+            "shown": {
+                "kind": "generated",
+                "checkpointId": "primary",
+                "checkpointLabel": "Coordinate checkpoint",
+                "seed": 42,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "createdAtEpochUtc": 1234567890,
+        "votes": 1,
+    }
+    [line] = log_path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert record["createdAtEpochUtc"] == 1234567890
+    assert record["task"] == "real_fake"
+    assert record["trialId"] == "trial-1"
+    assert record["shown"]["checkpointId"] == "primary"
 
 
 def test_web_state_uses_latest_checkpoint_glob(tmp_path: Path) -> None:
