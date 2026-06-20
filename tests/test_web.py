@@ -26,7 +26,9 @@ def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.Monkey
     state = _request(app, "GET", "/api/state")
     assert state.status_code == 200
     payload = state.json()
-    assert payload["checkpointPath"] == config.checkpoint_path
+    assert "checkpointPath" not in payload
+    assert "checkpointGlob" not in payload
+    assert "checkpointAvailable" not in payload
     assert payload["checkpoints"] == [
         {
             "id": "primary",
@@ -155,7 +157,6 @@ def test_web_generate_uses_requested_comparison_checkpoint(
     assert response.status_code == 200
     assert response.json()["checkpointId"] == "comparison"
     assert response.json()["checkpointLabel"] == config.comparison_checkpoint_label
-    assert response.json()["checkpointPath"] == str(comparison_checkpoint)
     assert load_calls == [comparison_checkpoint]
 
 
@@ -178,8 +179,9 @@ def test_web_state_uses_latest_checkpoint_glob(tmp_path: Path) -> None:
     state = _request(app, "GET", "/api/state")
 
     assert state.status_code == 200
-    assert state.json()["checkpointPath"] == str(latest_checkpoint)
-    assert state.json()["checkpointAvailable"] is True
+    checkpoint = _checkpoint_payload(state.json(), "primary")
+    assert checkpoint["path"] == str(latest_checkpoint)
+    assert checkpoint["available"] is True
 
 
 def test_web_checkpoint_glob_waits_for_first_checkpoint(tmp_path: Path) -> None:
@@ -198,8 +200,9 @@ def test_web_checkpoint_glob_waits_for_first_checkpoint(tmp_path: Path) -> None:
     response = _request(app, "POST", "/api/generate", json_body={"index": 0})
 
     assert state.status_code == 200
-    assert state.json()["checkpointPath"] == ""
-    assert state.json()["checkpointAvailable"] is False
+    checkpoint = _checkpoint_payload(state.json(), "primary")
+    assert checkpoint["path"] == ""
+    assert checkpoint["available"] is False
     assert response.status_code == 503
     assert "No web app checkpoints match" in response.json()["detail"]
 
@@ -238,9 +241,7 @@ def test_web_generation_reloads_when_latest_checkpoint_changes(
     second_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
 
     assert first_response.status_code == 200
-    assert first_response.json()["checkpointPath"] == str(first_checkpoint)
     assert second_response.status_code == 200
-    assert second_response.json()["checkpointPath"] == str(next_checkpoint)
     assert load_calls == [first_checkpoint, next_checkpoint]
 
 
@@ -551,6 +552,13 @@ def _write_web_fixture(tmp_path: Path) -> tuple[web.WebConfig, Path]:
 
 def _fake_load_generator(checkpoint_path: str, *, device: str) -> object:
     return object()
+
+
+def _checkpoint_payload(payload: dict[str, Any], checkpoint_id: str) -> dict[str, Any]:
+    for checkpoint in payload["checkpoints"]:
+        if checkpoint["id"] == checkpoint_id:
+            return checkpoint
+    raise AssertionError(f"Missing checkpoint payload: {checkpoint_id}")
 
 
 def _png_data_uri(image: Image.Image) -> str:

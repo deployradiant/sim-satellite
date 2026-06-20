@@ -875,16 +875,7 @@
     }
 
     function checkpointList(state) {
-      if (Array.isArray(state.checkpoints) && state.checkpoints.length) {
-        return state.checkpoints;
-      }
-      return [{
-        id: "primary",
-        label: "Checkpoint",
-        path: state.checkpointPath || "",
-        glob: state.checkpointGlob || "",
-        available: Boolean(state.checkpointAvailable)
-      }];
+      return Array.isArray(state.checkpoints) ? state.checkpoints : [];
     }
 
     function checkpointFileName(path) {

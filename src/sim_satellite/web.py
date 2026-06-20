@@ -256,13 +256,7 @@ def _state_payload(
         _checkpoint_payload(slot, checkpoint_paths.get(slot.checkpoint_id))
         for slot in _checkpoint_slots(config)
     ]
-    primary_checkpoint_path = checkpoint_paths.get(PRIMARY_CHECKPOINT_ID)
     return {
-        "checkpointPath": (
-            str(primary_checkpoint_path) if primary_checkpoint_path is not None else ""
-        ),
-        "checkpointGlob": config.checkpoint_glob,
-        "checkpointAvailable": primary_checkpoint_path is not None,
         "checkpoints": checkpoints,
         "manifestPath": config.manifest_path,
         "split": config.split,
@@ -459,14 +453,8 @@ def _run_generation(
             prepared.temporary_mask_path.unlink(missing_ok=True)
 
     png = _image_tensor_png(generated.image, config.display_size)
-    checkpoint_path = getattr(
-        generated,
-        "checkpoint_path",
-        getattr(loaded_generator, "checkpoint_path", ""),
-    )
     return {
         "image": _data_uri(png, "image/png"),
-        "checkpointPath": str(checkpoint_path),
         "checkpointId": (
             checkpoint_slot.checkpoint_id if checkpoint_slot is not None else PRIMARY_CHECKPOINT_ID
         ),
