@@ -21,6 +21,7 @@ class ModelConfig:
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = 9
+    use_repaint_mask: bool = False
     hidden_channels: int = 32
     seed: int = 2026
     use_coordinates: bool = True
@@ -32,6 +33,8 @@ class ModelConfig:
             raise ValueError("image_channels must be positive")
         if self.mask_channels < 1:
             raise ValueError("mask_channels must be positive")
+        if not isinstance(self.use_repaint_mask, bool):
+            raise ValueError("use_repaint_mask must be a boolean")
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
         if not isinstance(self.use_coordinates, bool):
@@ -172,7 +175,7 @@ class ConditionalUNet(nn.Module):
             else None
         )
         self.input_conv = nn.Conv2d(
-            model_config.image_channels + model_config.mask_channels,
+            model_config.image_channels + _condition_channels(model_config),
             base_channels,
             3,
             padding=1,
@@ -190,7 +193,7 @@ class ConditionalUNet(nn.Module):
                         current_channels,
                         level_channels,
                         time_channels=time_channels,
-                        mask_channels=model_config.mask_channels,
+                        mask_channels=_condition_channels(model_config),
                     )
                 )
                 current_channels = level_channels
@@ -204,14 +207,14 @@ class ConditionalUNet(nn.Module):
             current_channels,
             current_channels,
             time_channels=time_channels,
-            mask_channels=model_config.mask_channels,
+            mask_channels=_condition_channels(model_config),
         )
         self.mid_attention = SelfAttention2d(current_channels)
         self.mid_block2 = ConditionedResBlock(
             current_channels,
             current_channels,
             time_channels=time_channels,
-            mask_channels=model_config.mask_channels,
+            mask_channels=_condition_channels(model_config),
         )
 
         self.up_blocks = nn.ModuleList()
@@ -226,7 +229,7 @@ class ConditionalUNet(nn.Module):
                         current_channels + skip_channel_count,
                         level_channels,
                         time_channels=time_channels,
-                        mask_channels=model_config.mask_channels,
+                        mask_channels=_condition_channels(model_config),
                     )
                 )
                 current_channels = level_channels
@@ -323,6 +326,10 @@ def _attention_head_count(channels: int) -> int:
         if channels % heads == 0:
             return heads
     return 1
+
+
+def _condition_channels(config: ModelConfig) -> int:
+    return config.mask_channels + (1 if config.use_repaint_mask else 0)
 
 
 def _spatial_size(tensor: torch.Tensor) -> tuple[int, int]:

@@ -9,6 +9,11 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
+from sim_satellite.repaint import (
+    flow_prediction_loss,
+    training_task_for_step,
+    validation_tasks,
+)
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
@@ -19,7 +24,7 @@ from sim_satellite.train import (
     _sample_flow_timesteps,
     _training_device,
 )
-from sim_satellite.training_config import TrainingConfig
+from sim_satellite.training_config import TrainingConfig, load_training_config_values
 
 
 def test_training_cli_uses_json_config_file(
@@ -64,6 +69,19 @@ def test_training_config_rejects_unknown_fields() -> None:
 
     with pytest.raises(ValueError, match="Unknown training config fields: future_field"):
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
+
+
+def test_training_config_validates_repaint_fields() -> None:
+    for values in (
+        {"repaint_probability": -0.1},
+        {"repaint_probability": 1.1},
+        {"repaint_extension_probability": -0.1},
+        {"repaint_min_size_ratio": 0.0},
+        {"repaint_max_size_ratio": 1.1},
+        {"repaint_min_size_ratio": 0.8, "repaint_max_size_ratio": 0.2},
+    ):
+        with pytest.raises(ValueError):
+            load_training_config_values(values)
 
 
 def test_training_cuda_runtime_helpers() -> None:
@@ -122,6 +140,42 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     assert mixed_tail_mass > logit_tail_mass * 2.0
 
 
+def test_flow_prediction_loss_can_focus_on_repaint_region() -> None:
+    prediction = torch.tensor([[[[2.0, 10.0], [2.0, 10.0]]]])
+    target = torch.zeros_like(prediction)
+    repaint_mask = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+
+    loss = flow_prediction_loss(
+        prediction,
+        target,
+        repaint_mask=repaint_mask,
+        torch=torch,
+    )
+
+    assert torch.allclose(loss, torch.tensor(4.0))
+
+
+def test_repaint_probability_schedules_deterministic_batch_mix() -> None:
+    config = load_training_config_values({"steps": 10, "repaint_probability": 0.2})
+
+    tasks = [training_task_for_step(config.repaint_probability, step) for step in range(1, 11)]
+
+    assert tasks == [
+        "base",
+        "base",
+        "base",
+        "base",
+        "repaint",
+        "base",
+        "base",
+        "base",
+        "base",
+        "repaint",
+    ]
+    assert config.model_config().use_repaint_mask is True
+    assert validation_tasks(config.repaint_probability) == ("base", "repaint")
+
+
 def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     manifest_path.write_text(
@@ -170,6 +224,7 @@ def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Pat
         _load_validation_batches(
             TrainingConfig(manifest_path=str(manifest_path), validation_every=1)
         )
+
 
 class _FakeTorch:
     bfloat16 = object()

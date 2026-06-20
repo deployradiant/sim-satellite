@@ -30,6 +30,36 @@ def test_conditional_unet_forward_shape_is_deterministic() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_conditional_unet_accepts_repaint_mask_condition() -> None:
+    torch.manual_seed(123)
+    config = ModelConfig(
+        image_size=32,
+        mask_channels=4,
+        use_repaint_mask=True,
+        hidden_channels=8,
+    )
+    model = build_model(config)
+    model.eval()
+
+    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
+    condition = torch.zeros(
+        2,
+        config.mask_channels + 1,
+        config.image_size,
+        config.image_size,
+    )
+    condition[:, 1] = 1.0
+    condition[:, -1] = 1.0
+    timestep = torch.tensor([0.25, 0.75])
+    coordinates = torch.tensor([[0.0, 0.0], [12.0, 34.0]])
+
+    with torch.no_grad():
+        output = model(image, condition, timestep, coordinates)
+
+    assert output.shape == image.shape
+    assert torch.isfinite(output).all()
+
+
 def test_model_output_changes_with_timestep() -> None:
     torch.manual_seed(123)
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)

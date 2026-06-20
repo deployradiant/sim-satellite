@@ -39,6 +39,10 @@ class TrainingConfig:
     hidden_channels: int = 32
     use_coordinates: bool = True
     mask_drop_probability: float = 0.0
+    repaint_probability: float = 0.0
+    repaint_extension_probability: float = 0.5
+    repaint_min_size_ratio: float = 0.12
+    repaint_max_size_ratio: float = 0.45
     precision: str = "float32"
     timing_sample_every: int = 0
     color_stats_every: int = 0
@@ -57,6 +61,7 @@ class TrainingConfig:
             image_size=self.image_size,
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
+            use_repaint_mask=self.repaint_probability > 0.0,
             hidden_channels=self.hidden_channels,
             seed=self.seed,
             use_coordinates=self.use_coordinates,
@@ -93,6 +98,16 @@ def _validate_training_config(config: TrainingConfig) -> None:
 
     if config.mask_drop_probability < 0.0 or config.mask_drop_probability > 1.0:
         raise ValueError("mask_drop_probability must be between 0 and 1")
+    if config.repaint_probability < 0.0 or config.repaint_probability > 1.0:
+        raise ValueError("repaint_probability must be between 0 and 1")
+    if config.repaint_extension_probability < 0.0 or config.repaint_extension_probability > 1.0:
+        raise ValueError("repaint_extension_probability must be between 0 and 1")
+    if config.repaint_min_size_ratio <= 0.0 or config.repaint_min_size_ratio > 1.0:
+        raise ValueError("repaint_min_size_ratio must be in (0, 1]")
+    if config.repaint_max_size_ratio <= 0.0 or config.repaint_max_size_ratio > 1.0:
+        raise ValueError("repaint_max_size_ratio must be in (0, 1]")
+    if config.repaint_min_size_ratio > config.repaint_max_size_ratio:
+        raise ValueError("repaint_min_size_ratio must be <= repaint_max_size_ratio")
     if config.precision not in {"float32", "bf16"}:
         raise ValueError("precision must be one of: bf16, float32")
     if config.device != "cuda" and not config.device.startswith("cuda:"):
