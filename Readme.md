@@ -74,6 +74,13 @@ uv run modal volume put --force sim-satellite-artifacts artifacts/tiny-sim-satel
 uv run modal serve -m sim_satellite.modal_app
 ```
 
+Modal GPU defaults are intentionally split by workload. Training uses
+`SIM_SATELLITE_MODAL_TRAINING_GPU`, defaulting to `H100!`. Batch inference uses
+`SIM_SATELLITE_MODAL_INFERENCE_GPU`, defaulting to `T4`. The web endpoint uses
+`SIM_SATELLITE_MODAL_WEB_GPU`, defaulting to the inference GPU. Keep
+inference-only web endpoints on `T4` unless they fail memory or latency checks;
+try `L4` or `A10` before using training-class GPUs.
+
 If `sim-satellite-artifacts` already exists, skip the `modal volume create`
 command. Modal prints the temporary `web_remote` URL when `modal serve` starts.
 For a persistent URL, deploy the same app instead:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -9,6 +10,18 @@ from sim_satellite import modal_app
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.web import WebConfig
+
+
+def test_modal_gpu_defaults_keep_inference_and_web_on_cheapest_gpu() -> None:
+    assert modal_app.DEFAULT_MODAL_TRAINING_GPU == "H100!"
+    assert modal_app.DEFAULT_MODAL_INFERENCE_GPU == "T4"
+    if "SIM_SATELLITE_MODAL_INFERENCE_GPU" not in os.environ:
+        assert modal_app.MODAL_INFERENCE_GPU == "T4"
+    if not {
+        "SIM_SATELLITE_MODAL_INFERENCE_GPU",
+        "SIM_SATELLITE_MODAL_WEB_GPU",
+    } & set(os.environ):
+        assert modal_app.MODAL_WEB_GPU == "T4"
 
 
 def test_modal_training_maps_relative_manifest_to_remote_data_root(

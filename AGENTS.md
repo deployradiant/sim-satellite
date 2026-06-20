@@ -53,6 +53,10 @@ Use the `thermo-nuclear-code-quality-review` skill as the guide for strict maint
 - When making web app, inference, checkpoint, or generation changes, update the
   Modal-hosted online app when possible and show the user the URL or exact
   command they can use to open it.
+- Inference-only Modal web endpoints should default to the cheapest GPU that can
+  serve the model. The current default is `SIM_SATELLITE_MODAL_WEB_GPU=T4`.
+  Escalate to `L4` or `A10` only after a concrete memory or latency failure; do
+  not spend H100-class GPUs on serving by default.
 - After each training run that produces a user-facing checkpoint, make sure the
   online app is serving that checkpoint or clearly tell the user what checkpoint
   is online and what remains to update.

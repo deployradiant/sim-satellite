@@ -48,7 +48,17 @@ MODAL_WEB_DATA_ROOT = Path(
     )
 )
 MODAL_WEB_MANIFEST_PATH = MODAL_WEB_DATA_ROOT / "manifest.jsonl"
-MODAL_GPU = os.environ.get("SIM_SATELLITE_MODAL_GPU", "H100!")
+DEFAULT_MODAL_TRAINING_GPU = "H100!"
+DEFAULT_MODAL_INFERENCE_GPU = "T4"
+MODAL_TRAINING_GPU = os.environ.get(
+    "SIM_SATELLITE_MODAL_TRAINING_GPU",
+    DEFAULT_MODAL_TRAINING_GPU,
+)
+MODAL_INFERENCE_GPU = os.environ.get(
+    "SIM_SATELLITE_MODAL_INFERENCE_GPU",
+    DEFAULT_MODAL_INFERENCE_GPU,
+)
+MODAL_WEB_GPU = os.environ.get("SIM_SATELLITE_MODAL_WEB_GPU", MODAL_INFERENCE_GPU)
 MODAL_WEB_CHECKPOINT_GLOB = os.environ.get(
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB",
     "artifacts/openearthmap-flow-unet-93m-256-coords-nodeep-lr2e4-h100-b10-20k-save1k-step-*.pt",
@@ -92,7 +102,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
 @app.function(
     image=image,
     timeout=MODAL_TRAINING_TIMEOUT,
-    gpu=MODAL_GPU,
+    gpu=MODAL_TRAINING_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
@@ -111,7 +121,7 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
 @app.function(
     image=image,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
-    gpu=MODAL_GPU,
+    gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
@@ -128,7 +138,7 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     image=image,
     env=MODAL_WEB_ENV,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
-    gpu=MODAL_GPU,
+    gpu=MODAL_WEB_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
