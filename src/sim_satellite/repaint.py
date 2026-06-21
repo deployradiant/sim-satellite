@@ -94,7 +94,7 @@ def sample_repaint_mask(
             )
             continue
 
-        shape_kind = int(torch.randint(0, 4, (), generator=generator, device=device).item())
+        shape_kind = int(torch.randint(0, 5, (), generator=generator, device=device).item())
         if shape_kind == 0:
             _fill_rectangle_mask(
                 mask[batch_index],
@@ -117,6 +117,16 @@ def sample_repaint_mask(
             )
         elif shape_kind == 2:
             _fill_brush_mask(
+                mask[batch_index],
+                image_size=image_size,
+                min_size=min_size,
+                max_size=max_size,
+                torch=torch,
+                generator=generator,
+                device=device,
+            )
+        elif shape_kind == 3:
+            _fill_round_mask(
                 mask[batch_index],
                 image_size=image_size,
                 min_size=min_size,
@@ -257,6 +267,41 @@ def _fill_square_stamp(mask: torch.Tensor, center_x: int, center_y: int, *, radi
     top = max(0, center_y - radius)
     bottom = min(image_size, center_y + radius + 1)
     mask[:, top:bottom, left:right] = 1.0
+
+
+def _fill_round_mask(
+    mask: torch.Tensor,
+    *,
+    image_size: int,
+    min_size: int,
+    max_size: int,
+    torch: ModuleType,
+    generator: torch.Generator,
+    device: torch.device,
+) -> None:
+    diameter = int(
+        torch.randint(min_size, max_size + 1, (), generator=generator, device=device).item()
+    )
+    radius = max(1, diameter // 2)
+    if radius * 2 < image_size:
+        center_x = int(
+            torch.randint(
+                radius, image_size - radius, (), generator=generator, device=device
+            ).item()
+        )
+        center_y = int(
+            torch.randint(
+                radius, image_size - radius, (), generator=generator, device=device
+            ).item()
+        )
+    else:
+        center_x = int(torch.randint(0, image_size, (), generator=generator, device=device).item())
+        center_y = int(torch.randint(0, image_size, (), generator=generator, device=device).item())
+
+    y_coordinates = torch.arange(image_size, device=device).view(image_size, 1)
+    x_coordinates = torch.arange(image_size, device=device).view(1, image_size)
+    circle = (x_coordinates - center_x) ** 2 + (y_coordinates - center_y) ** 2 <= radius**2
+    mask[:, circle] = 1.0
 
 
 def _fill_blob_mask(
