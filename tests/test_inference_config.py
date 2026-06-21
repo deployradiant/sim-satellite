@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import torch
+from PIL import Image
 
 from sim_satellite import infer
 from sim_satellite.infer import InferenceConfig, InferenceResult
@@ -165,6 +166,48 @@ def test_load_generator_rejects_unexpected_coordinate_projection(tmp_path: Path)
         infer.load_generator(checkpoint_path, device="cpu")
 
 
+def test_generate_image_supports_repaint_checkpoint_condition(tmp_path: Path) -> None:
+    checkpoint_path = _write_flow_checkpoint(
+        tmp_path,
+        torch=torch,
+        filename="repaint-flow.pt",
+        use_coordinates=False,
+        use_repaint_mask=True,
+    )
+    mask_path = tmp_path / "mask.png"
+    Image.new("L", (32, 32), color=1).save(mask_path)
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+    result = infer.generate_image_with_model(
+        loaded,
+        infer.GenerationConfig(
+            mask_path=str(mask_path),
+            steps=1,
+            guidance_scale=2.0,
+        ),
+    )
+
+    assert result.image.shape == (1, 3, 32, 32)
+    assert result.semantic_mask.shape == (1, 2, 32, 32)
+    assert torch.isfinite(result.image).all()
+
+
+def test_empty_guidance_condition_preserves_repaint_channel() -> None:
+    config = ModelConfig(mask_channels=2, use_repaint_mask=True)
+    model_condition = torch.zeros(1, 3, 2, 2)
+    model_condition[:, 0] = 1.0
+    model_condition[:, -1] = 1.0
+
+    empty_condition = infer._empty_guidance_condition(
+        model_condition,
+        config,
+        torch=torch,
+    )
+
+    assert torch.equal(empty_condition[:, : config.mask_channels], torch.zeros(1, 2, 2, 2))
+    assert torch.equal(empty_condition[:, config.mask_channels :], torch.ones(1, 1, 2, 2))
+
+
 def test_flow_inference_tensors_match_schedule() -> None:
     timesteps, step_size = infer._flow_inference_tensors(4, torch=torch, device="cpu")
 
@@ -188,6 +231,7 @@ def _write_flow_checkpoint(
     torch: Any,
     filename: str = "flow.pt",
     use_coordinates: bool = True,
+    use_repaint_mask: bool = False,
 ) -> Path:
     checkpoint_path = tmp_path / filename
     config = ModelConfig(
@@ -197,6 +241,7 @@ def _write_flow_checkpoint(
         hidden_channels=4,
         seed=99,
         use_coordinates=use_coordinates,
+        use_repaint_mask=use_repaint_mask,
     )
     model = build_model(config)
     checkpoint = {
