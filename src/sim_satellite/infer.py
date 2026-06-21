@@ -247,8 +247,8 @@ def _guided_prediction(
     if guidance_scale == 1.0:
         return conditional
 
-    empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep, coordinates)
+    unconditional_condition = torch.zeros_like(semantic_mask)
+    unconditional = model(image, unconditional_condition, timestep, coordinates)
     return unconditional + guidance_scale * (conditional - unconditional)
 
 

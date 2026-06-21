@@ -7,9 +7,25 @@ import time
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from sim_satellite.model import ModelConfig
+
+MetricValue = float | int
+
+
+class TrainingLossRecord(TypedDict):
+    step: int
+    loss: float
+    task: str
+    step_seconds: float
+    step_images_per_second: float
+
+
+class ValidationLossRecord(TypedDict):
+    step: int
+    loss: float
+    task: str
 
 
 def print_train_start(
@@ -120,6 +136,7 @@ def print_validation_progress(
     steps: int,
     batch_size: int,
     loss: float,
+    task: str,
     color_stats: Mapping[str, float | int],
 ) -> None:
     _print_event(
@@ -128,6 +145,7 @@ def print_validation_progress(
             "step": step,
             "steps": steps,
             "loss": loss,
+            "task": task,
             **color_stats,
             **run_timing_payload(
                 started_at_epoch_utc=started_at_epoch_utc,
@@ -150,8 +168,8 @@ def print_train_progress(
     steps: int,
     batch_size: int,
     loss: float,
-    loss_record: Mapping[str, float | int],
-    step_timing: Mapping[str, float | int],
+    loss_record: TrainingLossRecord,
+    step_timing: Mapping[str, MetricValue],
 ) -> None:
     _print_event(
         {
@@ -159,6 +177,7 @@ def print_train_progress(
             "step": step,
             "steps": steps,
             "loss": loss,
+            "task": loss_record["task"],
             "step_seconds": loss_record["step_seconds"],
             "step_images_per_second": loss_record["step_images_per_second"],
             **step_timing,
@@ -243,11 +262,13 @@ def loss_record(
     loss: float,
     step_seconds: float,
     batch_size: int,
-    step_timing: Mapping[str, float | int],
-) -> dict[str, float | int]:
-    record: dict[str, float | int] = {
+    step_timing: Mapping[str, MetricValue],
+    task: str,
+) -> TrainingLossRecord:
+    record: TrainingLossRecord = {
         "step": step,
         "loss": loss,
+        "task": task,
         "step_seconds": step_seconds,
         "step_images_per_second": batch_size / step_seconds if step_seconds > 0.0 else 0.0,
     }
@@ -267,8 +288,8 @@ def write_training_artifacts(
     model_config: ModelConfig,
     config: Any,
     model_parameters: int,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
+    losses: list[TrainingLossRecord],
+    validation_losses: list[ValidationLossRecord],
     final_loss: float,
     step: int,
     run_timing: Mapping[str, float | int | None],
@@ -314,8 +335,8 @@ def _write_training_metrics(
     model_config: ModelConfig,
     config: Any,
     model_parameters: int,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
+    losses: list[TrainingLossRecord],
+    validation_losses: list[ValidationLossRecord],
     final_loss: float,
     step: int,
     run_timing: Mapping[str, float | int | None],
@@ -342,8 +363,8 @@ def _write_training_metrics(
 
 def _write_loss_plot(
     path: Path,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
+    losses: list[TrainingLossRecord],
+    validation_losses: list[ValidationLossRecord],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     import matplotlib
@@ -401,8 +422,8 @@ def _write_training_checkpoint(
     device_generator: Any | None,
     model_config: ModelConfig,
     config: Any,
-    losses: list[dict[str, float | int]],
-    validation_losses: list[dict[str, float | int]],
+    losses: list[TrainingLossRecord],
+    validation_losses: list[ValidationLossRecord],
     final_loss: float,
     step: int,
     metrics_path: Path,
