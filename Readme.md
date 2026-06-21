@@ -34,8 +34,7 @@ Final mask-conditioned generation metrics can be enabled with
 `generation_metrics_guidance_scale`. They require either `validation_split` or
 `validation_holdout_patterns` so the generated images are compared against
 held-out real images. The training result and metrics JSON record MSE, PSNR,
-SSIM, and explicit unavailable statuses for FID, KID, LPIPS, DINOv2-FID, and
-SatCLIP-FID until a pretrained feature/perceptual metric dependency is wired in.
+and SSIM.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared

@@ -32,11 +32,9 @@ def test_generation_metric_accumulator_reports_paired_image_metrics() -> None:
     assert payload["psnr_finite_sample_count"] == 1
     assert payload["psnr_exact_match_count"] == 1
     assert 0.0 <= payload["ssim"] < 1.0
-    assert payload["fid"] is None
-    assert payload["kid"] is None
-    assert payload["lpips"] is None
-    assert "dinov2_fid" in payload["reference_metric_status"]
-    assert "satclip_fid" in payload["reference_metric_status"]
+    assert "fid" not in payload
+    assert "kid" not in payload
+    assert "lpips" not in payload
 
 
 def test_generation_metric_accumulator_marks_psnr_unbounded_for_exact_matches() -> None:
@@ -65,12 +63,13 @@ def test_structural_similarity_rejects_mismatched_batches() -> None:
         )
 
 
-def test_disabled_generation_metrics_payload_names_reference_metric_gaps() -> None:
+def test_disabled_generation_metrics_payload_only_names_computable_metrics() -> None:
     payload = disabled_generation_metrics_payload()
 
     assert payload["enabled"] is False
     assert payload["mse"] is None
     assert payload["ssim"] is None
-    assert payload["fid"] is None
-    assert "feature extractor" in payload["reference_metric_status"]["fid"]
-    assert "perceptual-distance" in payload["reference_metric_status"]["lpips"]
+    assert payload["psnr"] is None
+    assert "fid" not in payload
+    assert "kid" not in payload
+    assert "lpips" not in payload

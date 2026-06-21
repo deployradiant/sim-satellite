@@ -5,14 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-REFERENCE_METRIC_STATUS = {
-    "fid": "not computed: no pretrained image feature extractor is configured",
-    "kid": "not computed: no pretrained image feature extractor is configured",
-    "lpips": "not computed: no pretrained perceptual-distance model is configured",
-    "dinov2_fid": "not computed: no DINOv2 feature extractor is configured",
-    "satclip_fid": "not computed: no SatCLIP feature extractor is configured",
-}
-
 
 @dataclass
 class GenerationMetricAccumulator:
@@ -80,12 +72,6 @@ class GenerationMetricAccumulator:
             "psnr_finite_sample_count": self._psnr_count,
             "psnr_exact_match_count": self.sample_count - self._psnr_count,
             "ssim": self._ssim_sum / self.sample_count,
-            "fid": None,
-            "kid": None,
-            "lpips": None,
-            "dinov2_fid": None,
-            "satclip_fid": None,
-            "reference_metric_status": dict(REFERENCE_METRIC_STATUS),
         }
 
 
@@ -94,15 +80,9 @@ def disabled_generation_metrics_payload() -> dict[str, Any]:
         "enabled": False,
         "status": "disabled: set generation_metrics_samples > 0",
         "sample_count": 0,
-        "fid": None,
-        "kid": None,
-        "lpips": None,
         "mse": None,
         "psnr": None,
         "ssim": None,
-        "dinov2_fid": None,
-        "satclip_fid": None,
-        "reference_metric_status": dict(REFERENCE_METRIC_STATUS),
     }
 
 
