@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import click
 import torch
@@ -96,8 +96,8 @@ def run_training(
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
     final_loss = 0.0
-    losses: list[dict[str, float | int | str]] = []
-    validation_losses: list[dict[str, float | int | str]] = []
+    losses: list[training_log.TrainingLossRecord] = []
+    validation_losses: list[training_log.ValidationLossRecord] = []
     start_step = 0
     if config.resume_from:
         start_step, final_loss, losses, validation_losses = _load_training_state(
@@ -182,7 +182,7 @@ def run_training(
         should_write_artifacts = (
             config.save_every > 0 and step_number % config.save_every == 0
         ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
-        loss_record = None
+        loss_record: training_log.TrainingLossRecord | None = None
         if should_log or should_write_artifacts or step_timing:
             final_loss = training_log.loss_scalar(loss)
             loss_record = training_log.loss_record(
@@ -212,7 +212,7 @@ def run_training(
                     preloaded_samples=preloaded_samples,
                     log_color_stats=should_log_color_stats,
                 )
-                validation_record: dict[str, float | int | str] = {
+                validation_record: training_log.ValidationLossRecord = {
                     "step": step_number,
                     "loss": validation_loss,
                     "task": validation_task,
@@ -563,7 +563,12 @@ def _load_training_state(
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-) -> tuple[int, float, list[dict[str, float | int | str]], list[dict[str, float | int | str]]]:
+) -> tuple[
+    int,
+    float,
+    list[training_log.TrainingLossRecord],
+    list[training_log.ValidationLossRecord],
+]:
     if not path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location=device)
@@ -585,8 +590,11 @@ def _load_training_state(
         device_generator.set_state(device_generator_state)
     step = int(checkpoint["step"])
     final_loss = float(checkpoint.get("final_loss", 0.0))
-    losses = list(checkpoint.get("losses", []))
-    validation_losses = list(checkpoint.get("validation_losses", []))
+    losses = cast(list[training_log.TrainingLossRecord], list(checkpoint.get("losses", [])))
+    validation_losses = cast(
+        list[training_log.ValidationLossRecord],
+        list(checkpoint.get("validation_losses", [])),
+    )
     return step, final_loss, losses, validation_losses
 
 
