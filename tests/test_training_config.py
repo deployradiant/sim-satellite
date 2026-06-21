@@ -9,11 +9,17 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
-from sim_satellite.generation import autocast_context
+from sim_satellite.inpaint import (
+    flow_prediction_loss,
+    training_task_for_step,
+    validation_tasks,
+)
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
+    _apply_inpaint_training_task,
+    _autocast_context,
     _load_training_samples,
     _load_validation_batches,
     _sample_flow_timesteps,
@@ -66,6 +72,19 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
+def test_training_config_validates_inpaint_fields() -> None:
+    for values in (
+        {"inpaint_probability": -0.1},
+        {"inpaint_probability": 1.1},
+        {"inpaint_extension_probability": -0.1},
+        {"inpaint_min_size_ratio": 0.0},
+        {"inpaint_max_size_ratio": 1.1},
+        {"inpaint_min_size_ratio": 0.8, "inpaint_max_size_ratio": 0.2},
+    ):
+        with pytest.raises(ValueError):
+            load_training_config_values(values)
+
+
 def test_training_config_validates_generation_metric_fields() -> None:
     cases = (
         ({"generation_metrics_samples": -1}, "generation_metrics_samples must be non-negative"),
@@ -86,7 +105,7 @@ def test_training_cuda_runtime_helpers() -> None:
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
 
     fake_torch = _FakeTorch(cuda_available=True)
-    context = autocast_context(fake_torch, "bf16", "cuda")
+    context = _autocast_context(fake_torch, "bf16")
 
     assert context == "autocast-context"
     assert fake_torch.autocast_calls == [("cuda", fake_torch.bfloat16)]
@@ -135,6 +154,75 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     assert logit_tail_mass < 0.05
     assert mixed_tail_mass > 0.08
     assert mixed_tail_mass > logit_tail_mass * 2.0
+
+
+def test_flow_prediction_loss_can_focus_on_inpaint_region() -> None:
+    prediction = torch.tensor([[[[2.0, 10.0], [2.0, 10.0]]]])
+    target = torch.zeros_like(prediction)
+    inpaint_mask = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+
+    loss = flow_prediction_loss(
+        prediction,
+        target,
+        inpaint_mask=inpaint_mask,
+        torch=torch,
+    )
+
+    assert torch.allclose(loss, torch.tensor(4.0))
+
+
+def test_inpaint_probability_schedules_deterministic_batch_mix() -> None:
+    config = load_training_config_values({"steps": 10, "inpaint_probability": 0.2})
+
+    tasks = [training_task_for_step(config.inpaint_probability, step) for step in range(1, 11)]
+    thirty_percent_tasks = [training_task_for_step(0.3, step) for step in range(1, 11)]
+    sixty_percent_tasks = [training_task_for_step(0.6, step) for step in range(1, 11)]
+
+    assert tasks == [
+        "base",
+        "base",
+        "base",
+        "base",
+        "inpaint",
+        "base",
+        "base",
+        "base",
+        "base",
+        "inpaint",
+    ]
+    assert thirty_percent_tasks.count("inpaint") == 3
+    assert sixty_percent_tasks.count("inpaint") == 6
+    assert validation_tasks(config.inpaint_probability) == ("base", "inpaint")
+
+
+def test_inpaint_task_zeros_semantic_condition_inside_sampled_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inpaint_mask = torch.tensor([[[[0.0, 1.0], [0.0, 1.0]]]])
+
+    def fake_sample_inpaint_mask(*_: object, **__: object) -> torch.Tensor:
+        return inpaint_mask
+
+    monkeypatch.setattr(train_module, "sample_inpaint_mask", fake_sample_inpaint_mask)
+    semantic_mask = torch.ones(1, 2, 2, 2)
+
+    _, inpaint_condition, sampled_mask = _apply_inpaint_training_task(
+        clean=torch.zeros(1, 3, 2, 2),
+        semantic_mask=semantic_mask,
+        noisy=torch.zeros(1, 3, 2, 2),
+        timestep=torch.zeros(1),
+        training_task="inpaint",
+        image_size=2,
+        extension_probability=0.0,
+        min_size_ratio=0.5,
+        max_size_ratio=0.5,
+        torch=torch,
+        generator=torch.Generator(device="cpu").manual_seed(123),
+        device=torch.device("cpu"),
+    )
+
+    assert sampled_mask is inpaint_mask
+    assert torch.equal(inpaint_condition, semantic_mask * (1.0 - inpaint_mask))
 
 
 def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:
@@ -229,6 +317,7 @@ def test_generation_metrics_load_validation_batches_without_periodic_validation(
                 validation_every=0,
             )
         )
+
 
 class _FakeTorch:
     bfloat16 = object()

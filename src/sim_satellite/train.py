@@ -6,10 +6,11 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import click
 import torch
@@ -17,7 +18,14 @@ import torch
 from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.prepared import PreparedSample
-from sim_satellite.generation import autocast_context, generate_conditioned_images
+from sim_satellite.generation import generate_conditioned_images
+from sim_satellite.inpaint import (
+    TRAINING_TASK_INPAINT,
+    flow_prediction_loss,
+    sample_inpaint_mask,
+    training_task_for_step,
+    validation_tasks,
+)
 from sim_satellite.model import (
     ModelConfig,
     build_model,
@@ -90,8 +98,8 @@ def run_training(
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
     final_loss = 0.0
-    losses: list[dict[str, float | int]] = []
-    validation_losses: list[dict[str, float | int]] = []
+    losses: list[training_log.TrainingLossRecord] = []
+    validation_losses: list[training_log.ValidationLossRecord] = []
     start_step = 0
     if config.resume_from:
         start_step, final_loss, losses, validation_losses = _load_training_state(
@@ -146,6 +154,7 @@ def run_training(
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
+        training_task = training_task_for_step(config.inpaint_probability, step_number)
         step_started_at = time.monotonic()
         should_log_color_stats = _should_log_color_stats(config, step_number)
         loss, step_timing = _train_step(
@@ -159,6 +168,10 @@ def run_training(
             random_generator=random_generator,
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
+            training_task=training_task,
+            inpaint_extension_probability=config.inpaint_extension_probability,
+            inpaint_min_size_ratio=config.inpaint_min_size_ratio,
+            inpaint_max_size_ratio=config.inpaint_max_size_ratio,
             use_coordinates=config.use_coordinates,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
@@ -174,7 +187,7 @@ def run_training(
         should_write_artifacts = (
             config.save_every > 0 and step_number % config.save_every == 0
         ) or (config.plot_every > 0 and step_number % config.plot_every == 0)
-        loss_record = None
+        loss_record: training_log.TrainingLossRecord | None = None
         if should_log or should_write_artifacts or step_timing:
             final_loss = training_log.loss_scalar(loss)
             loss_record = training_log.loss_record(
@@ -183,6 +196,7 @@ def run_training(
                 step_seconds=step_seconds,
                 batch_size=config.batch_size,
                 step_timing=step_timing,
+                task=training_task,
             )
             losses.append(loss_record)
 
@@ -191,32 +205,36 @@ def run_training(
             and config.validation_every > 0
             and step_number % config.validation_every == 0
         ):
-            validation_loss, validation_color_stats = _evaluate_validation_loss(
-                model,
-                validation_batches,
-                torch=torch,
-                model_config=model_config,
-                device=device,
-                config=config,
-                preloaded_samples=preloaded_samples,
-                log_color_stats=should_log_color_stats,
-            )
-            validation_record: dict[str, float | int] = {
-                "step": step_number,
-                "loss": validation_loss,
-            }
-            validation_record.update(validation_color_stats)
-            validation_losses.append(validation_record)
-            training_log.print_validation_progress(
-                started_at_epoch_utc=started_at_epoch_utc,
-                started_at_monotonic=started_at_monotonic,
-                start_step=start_step,
-                step=step_number,
-                steps=config.steps,
-                batch_size=config.batch_size,
-                loss=validation_loss,
-                color_stats=validation_color_stats,
-            )
+            for validation_task in validation_tasks(config.inpaint_probability):
+                validation_loss, validation_color_stats = _evaluate_validation_loss(
+                    model,
+                    validation_batches,
+                    torch=torch,
+                    model_config=model_config,
+                    device=device,
+                    config=config,
+                    training_task=validation_task,
+                    preloaded_samples=preloaded_samples,
+                    log_color_stats=should_log_color_stats,
+                )
+                validation_record: training_log.ValidationLossRecord = {
+                    "step": step_number,
+                    "loss": validation_loss,
+                    "task": validation_task,
+                }
+                validation_record.update(validation_color_stats)
+                validation_losses.append(validation_record)
+                training_log.print_validation_progress(
+                    started_at_epoch_utc=started_at_epoch_utc,
+                    started_at_monotonic=started_at_monotonic,
+                    start_step=start_step,
+                    step=step_number,
+                    steps=config.steps,
+                    batch_size=config.batch_size,
+                    loss=validation_loss,
+                    task=validation_task,
+                    color_stats=validation_color_stats,
+                )
 
         if should_log:
             if loss_record is None:
@@ -227,6 +245,7 @@ def run_training(
                     step_seconds=step_seconds,
                     batch_size=config.batch_size,
                     step_timing=step_timing,
+                    task=training_task,
                 )
                 losses.append(loss_record)
             training_log.print_train_progress(
@@ -250,6 +269,7 @@ def run_training(
                     step_seconds=step_seconds,
                     batch_size=config.batch_size,
                     step_timing=step_timing,
+                    task=training_task,
                 )
                 losses.append(loss_record)
             training_log.write_training_artifacts(
@@ -285,7 +305,13 @@ def run_training(
 
     final_step = max(start_step, config.steps)
     if not losses and config.resume_from:
-        losses.append({"step": final_step, "loss": final_loss})
+        losses.append(
+            {
+                "step": final_step,
+                "loss": final_loss,
+                "task": training_task_for_step(config.inpaint_probability, final_step),
+            }
+        )
     generation_metrics = _evaluate_final_generation_metrics(
         model,
         validation_batches,
@@ -359,6 +385,12 @@ def _should_log_color_stats(config: TrainingConfig, step_number: int) -> bool:
     )
 
 
+def _autocast_context(torch: Any, precision: str) -> Any:
+    if precision == "float32":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+
 def _synchronize_device(torch: Any, device: Any, enabled: bool) -> None:
     if not enabled:
         return
@@ -396,6 +428,10 @@ def _train_step(
     random_generator: torch.Generator,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
+    training_task: str,
+    inpaint_extension_probability: float,
+    inpaint_min_size_ratio: float,
+    inpaint_max_size_ratio: float,
     use_coordinates: bool,
     precision: str,
     profile_timing: bool,
@@ -455,15 +491,34 @@ def _train_step(
         )
         keep_mask = (keep_mask >= mask_drop_probability).float().view(-1, 1, 1, 1)
         semantic_mask = semantic_mask * keep_mask
+    noisy, semantic_mask, inpaint_mask = _apply_inpaint_training_task(
+        clean,
+        semantic_mask,
+        noisy,
+        timestep,
+        training_task=training_task,
+        image_size=model_config.image_size,
+        extension_probability=inpaint_extension_probability,
+        min_size_ratio=inpaint_min_size_ratio,
+        max_size_ratio=inpaint_max_size_ratio,
+        torch=torch,
+        generator=random_generator,
+        device=device,
+    )
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
         timing["random_seconds"] = max(0.0, time.monotonic() - random_started_at)
 
     compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
-    with autocast_context(torch, precision, device):
+    with _autocast_context(torch, precision):
         prediction = model(noisy, semantic_mask, timestep, coordinates)
-    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+    loss = flow_prediction_loss(
+        prediction,
+        target,
+        inpaint_mask=inpaint_mask,
+        torch=torch,
+    )
     loss.backward()
     optimizer.step()
     _synchronize_device(torch, device, profile_timing)
@@ -471,6 +526,40 @@ def _train_step(
         timing["train_compute_seconds"] = max(0.0, time.monotonic() - compute_started_at)
         timing["timing_sampled"] = 1
     return loss.detach(), timing
+
+
+def _apply_inpaint_training_task(
+    clean: torch.Tensor,
+    semantic_mask: torch.Tensor,
+    noisy: torch.Tensor,
+    timestep: torch.Tensor,
+    *,
+    training_task: str,
+    image_size: int,
+    extension_probability: float,
+    min_size_ratio: float,
+    max_size_ratio: float,
+    torch: ModuleType,
+    generator: torch.Generator,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    inpaint_mask = None
+    if training_task == TRAINING_TASK_INPAINT:
+        inpaint_mask = sample_inpaint_mask(
+            clean.shape[0],
+            image_size,
+            extension_probability=extension_probability,
+            min_size_ratio=min_size_ratio,
+            max_size_ratio=max_size_ratio,
+            torch=torch,
+            generator=generator,
+            device=device,
+        )
+        context_noise = torch.randn(clean.shape, generator=generator, device=device)
+        context_noisy = interpolate_flow_sample(clean, context_noise, timestep)
+        noisy = torch.where((1.0 - inpaint_mask).bool(), context_noisy, noisy)
+        semantic_mask = semantic_mask * (1.0 - inpaint_mask)
+    return noisy, semantic_mask, inpaint_mask
 
 
 def _load_training_state(
@@ -483,7 +572,12 @@ def _load_training_state(
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-) -> tuple[int, float, list[dict[str, float | int]], list[dict[str, float | int]]]:
+) -> tuple[
+    int,
+    float,
+    list[training_log.TrainingLossRecord],
+    list[training_log.ValidationLossRecord],
+]:
     if not path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location=device)
@@ -505,8 +599,11 @@ def _load_training_state(
         device_generator.set_state(device_generator_state)
     step = int(checkpoint["step"])
     final_loss = float(checkpoint.get("final_loss", 0.0))
-    losses = list(checkpoint.get("losses", []))
-    validation_losses = list(checkpoint.get("validation_losses", []))
+    losses = cast(list[training_log.TrainingLossRecord], list(checkpoint.get("losses", [])))
+    validation_losses = cast(
+        list[training_log.ValidationLossRecord],
+        list(checkpoint.get("validation_losses", [])),
+    )
     return step, final_loss, losses, validation_losses
 
 
@@ -588,6 +685,7 @@ def _evaluate_validation_loss(
     model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
+    training_task: str,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     log_color_stats: bool,
 ) -> tuple[float, dict[str, float | int]]:
@@ -627,9 +725,28 @@ def _evaluate_validation_loss(
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
-            with autocast_context(torch, config.precision, device):
+            noisy, semantic_mask, inpaint_mask = _apply_inpaint_training_task(
+                clean,
+                semantic_mask,
+                noisy,
+                timestep,
+                training_task=training_task,
+                image_size=model_config.image_size,
+                extension_probability=config.inpaint_extension_probability,
+                min_size_ratio=config.inpaint_min_size_ratio,
+                max_size_ratio=config.inpaint_max_size_ratio,
+                torch=torch,
+                generator=generator,
+                device=device,
+            )
+            with _autocast_context(torch, config.precision):
                 prediction = model(noisy, semantic_mask, timestep, coordinates)
-            loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+            loss = flow_prediction_loss(
+                prediction,
+                target,
+                inpaint_mask=inpaint_mask,
+                torch=torch,
+            )
             losses.append(loss.detach())
 
     if was_training:

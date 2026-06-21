@@ -42,6 +42,10 @@ class TrainingConfig:
     hidden_channels: int = 32
     use_coordinates: bool = True
     mask_drop_probability: float = 0.0
+    inpaint_probability: float = 0.0
+    inpaint_extension_probability: float = 0.5
+    inpaint_min_size_ratio: float = 0.12
+    inpaint_max_size_ratio: float = 0.45
     precision: str = "float32"
     timing_sample_every: int = 0
     color_stats_every: int = 0
@@ -106,6 +110,16 @@ def _validate_training_config(config: TrainingConfig) -> None:
         raise ValueError("mask_drop_probability must be between 0 and 1")
     if config.generation_metrics_guidance_scale < 0.0:
         raise ValueError("generation_metrics_guidance_scale must be non-negative")
+    if config.inpaint_probability < 0.0 or config.inpaint_probability > 1.0:
+        raise ValueError("inpaint_probability must be between 0 and 1")
+    if config.inpaint_extension_probability < 0.0 or config.inpaint_extension_probability > 1.0:
+        raise ValueError("inpaint_extension_probability must be between 0 and 1")
+    if config.inpaint_min_size_ratio <= 0.0 or config.inpaint_min_size_ratio > 1.0:
+        raise ValueError("inpaint_min_size_ratio must be in (0, 1]")
+    if config.inpaint_max_size_ratio <= 0.0 or config.inpaint_max_size_ratio > 1.0:
+        raise ValueError("inpaint_max_size_ratio must be in (0, 1]")
+    if config.inpaint_min_size_ratio > config.inpaint_max_size_ratio:
+        raise ValueError("inpaint_min_size_ratio must be <= inpaint_max_size_ratio")
     if config.precision not in {"float32", "bf16"}:
         raise ValueError("precision must be one of: bf16, float32")
     if config.device != "cuda" and not config.device.startswith("cuda:"):
