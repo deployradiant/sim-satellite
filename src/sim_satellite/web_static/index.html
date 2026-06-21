@@ -940,6 +940,7 @@
       <div class="meta" id="meta">Loading checkpoint...</div>
     </footer>
   </div>
+  <script src="/static/evaluation.js"></script>
   <script>
     const sampleSelect = document.getElementById("sample");
     const generateTab = document.getElementById("generate-tab");
@@ -988,35 +989,16 @@
     const progressLabel = document.getElementById("progress-label");
     const progressCount = document.getElementById("progress-count");
     const progressBar = document.getElementById("progress-bar");
-    const evalTaskPreferenceButton = document.getElementById("eval-task-preference");
-    const evalTaskRealFakeButton = document.getElementById("eval-task-real-fake");
-    const evalConfidenceInput = document.getElementById("eval-confidence");
-    const evalStartButton = document.getElementById("eval-start");
-    const evalCount = document.getElementById("eval-count");
-    const evalTitle = document.getElementById("eval-title");
-    const evalImages = document.getElementById("eval-images");
-    const evalFrameLeft = document.getElementById("eval-frame-left");
-    const evalFrameRight = document.getElementById("eval-frame-right");
-    const evalPreferenceActions = document.getElementById("eval-preference-actions");
-    const evalRealFakeActions = document.getElementById("eval-real-fake-actions");
-    const evalLeftButton = document.getElementById("eval-left");
-    const evalTieButton = document.getElementById("eval-tie");
-    const evalRightButton = document.getElementById("eval-right");
-    const evalBadPairButton = document.getElementById("eval-bad-pair");
-    const evalRealButton = document.getElementById("eval-real");
-    const evalFakeButton = document.getElementById("eval-fake");
-    const evalSkipButton = document.getElementById("eval-skip");
     const MAX_SWEEP_SEEDS = 8;
 
     let classes = [];
     let activeTab = "generate";
-    let evalTask = "preference";
-    let activeTrial = null;
     let activeClassId = 0;
     let maskDirty = false;
     let isDrawing = false;
     let lastPoint = null;
     let latestState = null;
+    let evaluationController = null;
     let legendCollapsed = false;
     let sweepCells = new Map();
 
@@ -1040,274 +1022,6 @@
       generateTab.setAttribute("aria-selected", String(isGenerate));
       evaluateTab.setAttribute("aria-selected", String(!isGenerate));
       updateDrawingMode();
-    }
-
-    function setEvalTask(task) {
-      evalTask = task;
-      const isPreference = task === "preference";
-      evalTaskPreferenceButton.setAttribute("aria-pressed", String(isPreference));
-      evalTaskRealFakeButton.setAttribute("aria-pressed", String(!isPreference));
-      evalPreferenceActions.hidden = !isPreference;
-      evalRealFakeActions.hidden = isPreference;
-      evalTitle.textContent = isPreference ? "Preference trial" : "Real/Fake trial";
-      activeTrial = null;
-      setEvaluationAnswerDisabled(true);
-      renderEvaluationPlaceholder("No trial yet");
-    }
-
-    function renderEvaluationCount(state) {
-      const evaluation = state && state.evaluation ? state.evaluation : {};
-      const votes = Number(evaluation.votes) || 0;
-      const label = votes === 1 ? "1 vote recorded" : `${votes} votes recorded`;
-      evalCount.textContent = evaluation.logPath ? `${label} | ${evaluation.logPath}` : label;
-    }
-
-    function setEvaluationAnswerDisabled(disabled) {
-      [
-        evalLeftButton,
-        evalTieButton,
-        evalRightButton,
-        evalBadPairButton,
-        evalRealButton,
-        evalFakeButton,
-        evalSkipButton
-      ].forEach((button) => {
-        button.disabled = disabled;
-      });
-    }
-
-    function evaluationSessionId() {
-      const key = "simSatelliteEvaluationSessionId";
-      try {
-        const existing = window.localStorage.getItem(key);
-        if (existing) return existing;
-        const created = randomId("session");
-        window.localStorage.setItem(key, created);
-        return created;
-      } catch {
-        return randomId("session");
-      }
-    }
-
-    function randomId(prefix) {
-      if (window.crypto && typeof window.crypto.randomUUID === "function") {
-        return `${prefix}-${window.crypto.randomUUID()}`;
-      }
-      return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
-    }
-
-    function randomSeed() {
-      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
-        const values = new Uint32Array(1);
-        window.crypto.getRandomValues(values);
-        return values[0];
-      }
-      return Math.floor(Math.random() * 4294967295);
-    }
-
-    function currentSample(state) {
-      const index = Number(sampleSelect.value);
-      return state.samples.find((sample) => sample.index === index) || state.samples[0];
-    }
-
-    function sampleImageSrc(sampleIndex) {
-      return `/api/image?index=${sampleIndex}&t=${Date.now()}`;
-    }
-
-    function renderEvaluationPlaceholder(text) {
-      evalImages.classList.remove("single");
-      evalFrameRight.closest(".evaluation-frame").hidden = false;
-      setEvaluationFrame(evalFrameLeft, "A", null, text);
-      setEvaluationFrame(evalFrameRight, "B", null, text);
-    }
-
-    function setEvaluationFrame(frame, label, item, placeholder) {
-      const parent = frame.closest(".evaluation-frame");
-      parent.querySelector(".evaluation-frame-label").textContent = label;
-      if (!item) {
-        frame.replaceChildren(emptyMessage(placeholder));
-        return;
-      }
-      const image = document.createElement("img");
-      image.alt = label;
-      image.src = item.src;
-      frame.replaceChildren(image);
-    }
-
-    function renderPreferenceTrial(left, right) {
-      evalImages.classList.remove("single");
-      evalFrameRight.closest(".evaluation-frame").hidden = false;
-      setEvaluationFrame(evalFrameLeft, "A", left, "");
-      setEvaluationFrame(evalFrameRight, "B", right, "");
-    }
-
-    function renderRealFakeTrial(shown) {
-      evalImages.classList.add("single");
-      evalFrameRight.closest(".evaluation-frame").hidden = true;
-      setEvaluationFrame(evalFrameLeft, "Image", shown, "");
-    }
-
-    function shuffledPair(first, second) {
-      return Math.random() < 0.5 ? [first, second] : [second, first];
-    }
-
-    function realEvaluationImage(sampleIndex) {
-      return {
-        src: sampleImageSrc(sampleIndex),
-        record: {
-          kind: "real",
-          label: "Ground truth"
-        }
-      };
-    }
-
-    function generatedEvaluationImage(payload, checkpoint, seed) {
-      return {
-        src: payload.image,
-        record: {
-          kind: "generated",
-          checkpointId: payload.checkpointId || checkpoint.id,
-          checkpointLabel: payload.checkpointLabel || checkpoint.label,
-          seed
-        }
-      };
-    }
-
-    async function startEvaluationTrial() {
-      await runEvaluationAction("Starting evaluation trial...", async () => {
-        const state = await refreshStateMetadata();
-        const targets = availableCheckpoints(state);
-        if (!targets.length) throw new Error("No checkpoint is ready");
-        const sample = currentSample(state);
-        const seed = randomSeed();
-        const steps = Math.max(Number(stepsInput.value) || state.steps || 1, 1);
-        if (evalTask === "preference") {
-          await startPreferenceTrial(state, targets, sample, seed, steps);
-        } else {
-          await startRealFakeTrial(state, targets, sample, seed, steps);
-        }
-      });
-    }
-
-    async function startPreferenceTrial(state, targets, sample, seed, steps) {
-      const body = generationRequestBody(steps, seed);
-      const generatedItems = [];
-      const generationTargets = targets.slice(0, Math.min(targets.length, 2));
-      showProgress(steps * generationTargets.length);
-
-      let completedSteps = 0;
-      for (const checkpoint of generationTargets) {
-        const payload = await requestGenerationStream(body, checkpoint, {
-          checkpoint,
-          offset: completedSteps,
-          totalSteps: steps * generationTargets.length,
-          seed
-        });
-        if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
-        generatedItems.push(generatedEvaluationImage(payload, checkpoint, seed));
-        completedSteps += payload.steps || steps;
-        updateProgress(completedSteps, steps * generationTargets.length);
-      }
-
-      const pair = generatedItems.length > 1
-        ? shuffledPair(generatedItems[0], generatedItems[1])
-        : shuffledPair(generatedItems[0], realEvaluationImage(sample.index));
-
-      renderPreferenceTrial(pair[0], pair[1]);
-      activeTrial = {
-        task: "preference",
-        trialId: randomId("trial"),
-        sessionId: evaluationSessionId(),
-        sampleIndex: sample.index,
-        sampleName: sample.name,
-        seed,
-        left: pair[0].record,
-        right: pair[1].record
-      };
-      setEvaluationAnswerDisabled(false);
-      setStatus("Preference trial ready");
-    }
-
-    async function startRealFakeTrial(state, targets, sample, seed, steps) {
-      const showFake = Math.random() < 0.5;
-      let shown = realEvaluationImage(sample.index);
-
-      if (showFake) {
-        const checkpoint = targets[0];
-        showProgress(steps);
-        const payload = await requestGenerationStream(generationRequestBody(steps, seed), checkpoint, {
-          checkpoint,
-          offset: 0,
-          totalSteps: steps,
-          seed
-        });
-        if (!payload) throw new Error(`${checkpoint.label} ended before the image was ready`);
-        shown = generatedEvaluationImage(payload, checkpoint, seed);
-      } else {
-        progressEl.hidden = true;
-      }
-
-      renderRealFakeTrial(shown);
-      activeTrial = {
-        task: "real_fake",
-        trialId: randomId("trial"),
-        sessionId: evaluationSessionId(),
-        sampleIndex: sample.index,
-        sampleName: sample.name,
-        seed,
-        shown: shown.record,
-        correctChoice: shown.record.kind === "real" ? "real" : "fake"
-      };
-      setEvaluationAnswerDisabled(false);
-      setStatus("Real/Fake trial ready");
-    }
-
-    async function runEvaluationAction(startMessage, action) {
-      activeTrial = null;
-      setEvaluationAnswerDisabled(true);
-      evalStartButton.disabled = true;
-      generateButton.disabled = true;
-      sweepButton.disabled = true;
-      setStatus(startMessage);
-      try {
-        await action();
-      } catch (error) {
-        failProgress();
-        setStatus(error.message, true);
-      } finally {
-        evalStartButton.disabled = false;
-        generateButton.disabled = false;
-        sweepButton.disabled = false;
-      }
-    }
-
-    async function submitEvaluationChoice(choice) {
-      if (!activeTrial) {
-        setStatus("Start a trial first", true);
-        return;
-      }
-      const payload = {
-        ...activeTrial,
-        choice,
-        confidence: Number(evalConfidenceInput.value)
-      };
-      const response = await fetch("/api/evaluation/votes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setStatus(result.detail || result.error || "Could not record vote", true);
-        return;
-      }
-      activeTrial = null;
-      setEvaluationAnswerDisabled(true);
-      if (latestState && latestState.evaluation) {
-        latestState.evaluation.votes = result.votes;
-        renderEvaluationCount(latestState);
-      }
-      setStatus("Vote recorded");
     }
 
     function updateLegendCollapsed() {
@@ -1353,6 +1067,15 @@
       }
     }
 
+    function hideProgress() {
+      progressEl.hidden = true;
+    }
+
+    function setGenerationControlsDisabled(disabled) {
+      generateButton.disabled = disabled;
+      sweepButton.disabled = disabled;
+    }
+
     function checkpointList(state) {
       return Array.isArray(state.checkpoints) ? state.checkpoints : [];
     }
@@ -1368,6 +1091,19 @@
 
     function availableCheckpoints(state) {
       return checkpointList(state).filter((checkpoint) => checkpoint.available);
+    }
+
+    function currentSample(state) {
+      const index = Number(sampleSelect.value);
+      return state.samples.find((sample) => sample.index === index) || state.samples[0];
+    }
+
+    function requestedSteps(state) {
+      return Math.max(Number(stepsInput.value) || state.steps || 1, 1);
+    }
+
+    function sampleImageSrc(sampleIndex) {
+      return `/api/image?index=${sampleIndex}&t=${Date.now()}`;
     }
 
     function uniqueSeeds(seeds) {
@@ -1430,7 +1166,9 @@
         `${state.samples.length} masks`
       ].filter(Boolean).join(" | ");
       renderCheckpointPanels(state);
-      renderEvaluationCount(state);
+      if (evaluationController) {
+        evaluationController.renderCount(state);
+      }
     }
 
     function renderMask(index) {
@@ -1563,8 +1301,7 @@
 
     async function runGenerationAction(activeButton, activeText, startMessage, action) {
       const originalText = activeButton.textContent;
-      generateButton.disabled = true;
-      sweepButton.disabled = true;
+      setGenerationControlsDisabled(true);
       activeButton.textContent = activeText;
       setStatus(startMessage);
       try {
@@ -1573,8 +1310,7 @@
         failProgress();
         setStatus(error.message, true);
       } finally {
-        generateButton.disabled = false;
-        sweepButton.disabled = false;
+        setGenerationControlsDisabled(false);
         activeButton.textContent = originalText;
       }
     }
@@ -1936,17 +1672,29 @@
     generateButton.addEventListener("click", generate);
     sweepButton.addEventListener("click", sweepSeeds);
     clearSweepButton.addEventListener("click", clearSweep);
-    evalTaskPreferenceButton.addEventListener("click", () => setEvalTask("preference"));
-    evalTaskRealFakeButton.addEventListener("click", () => setEvalTask("real_fake"));
-    evalStartButton.addEventListener("click", startEvaluationTrial);
-    evalLeftButton.addEventListener("click", () => submitEvaluationChoice("left"));
-    evalTieButton.addEventListener("click", () => submitEvaluationChoice("tie"));
-    evalRightButton.addEventListener("click", () => submitEvaluationChoice("right"));
-    evalBadPairButton.addEventListener("click", () => submitEvaluationChoice("bad_pair"));
-    evalRealButton.addEventListener("click", () => submitEvaluationChoice("real"));
-    evalFakeButton.addEventListener("click", () => submitEvaluationChoice("fake"));
-    evalSkipButton.addEventListener("click", () => submitEvaluationChoice("skip"));
-    setEvalTask("preference");
+    evaluationController = window.createEvaluationController({
+      availableCheckpoints,
+      currentSample,
+      emptyMessage,
+      failProgress,
+      generationRequestBody,
+      hideProgress,
+      onVoteRecorded: (votes) => {
+        if (latestState && latestState.evaluation) {
+          latestState.evaluation.votes = votes;
+          evaluationController.renderCount(latestState);
+        }
+      },
+      refreshStateMetadata,
+      requestGenerationStream,
+      requestedSteps,
+      sampleImageSrc,
+      setGenerationControlsDisabled,
+      setStatus,
+      showProgress,
+      updateProgress
+    });
+    evaluationController.init();
     setActiveTab("generate");
     loadState().catch((error) => setStatus(error.message, true));
     setInterval(() => {

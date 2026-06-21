@@ -54,6 +54,10 @@ def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.Monkey
         assert preview.size == (config.display_size, config.display_size)
         assert preview.mode == "RGB"
 
+    asset = _request(app, "GET", "/static/evaluation.js")
+    assert asset.status_code == 200
+    assert b"createEvaluationController" in asset.content
+
 
 def test_web_create_app_does_not_load_generator(
     tmp_path: Path,
@@ -189,7 +193,6 @@ def test_web_records_evaluation_vote(
             "seed": 42,
             "choice": "fake",
             "confidence": 4,
-            "correctChoice": "fake",
             "shown": {
                 "kind": "generated",
                 "checkpointId": "primary",
@@ -210,7 +213,31 @@ def test_web_records_evaluation_vote(
     assert record["createdAtEpochUtc"] == 1234567890
     assert record["task"] == "real_fake"
     assert record["trialId"] == "trial-1"
+    assert record["correctChoice"] == "fake"
     assert record["shown"]["checkpointId"] == "primary"
+
+
+def test_web_rejects_invalid_evaluation_vote_shape(tmp_path: Path) -> None:
+    config, _ = _write_web_fixture(tmp_path)
+    app = web.create_app(config)
+
+    response = _request(
+        app,
+        "POST",
+        "/api/evaluation/votes",
+        json_body={
+            "task": "real_fake",
+            "trialId": "trial-1",
+            "sessionId": "session-1",
+            "sampleIndex": 0,
+            "choice": "left",
+            "confidence": 4,
+            "left": {"kind": "generated", "checkpointId": "primary"},
+            "right": {"kind": "real"},
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_web_state_uses_latest_checkpoint_glob(tmp_path: Path) -> None:

@@ -15,13 +15,14 @@ from pathlib import Path
 from queue import Queue
 from tempfile import NamedTemporaryFile
 from threading import Thread
-from typing import Any
+from typing import Any, Literal
 
 import click
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
@@ -96,7 +97,7 @@ class GenerateRequest(BaseModel):
 
 
 class EvaluationImage(BaseModel):
-    kind: str
+    kind: Literal["real", "generated"]
     label: str | None = None
     checkpoint_id: str | None = Field(default=None, alias="checkpointId")
     checkpoint_label: str | None = Field(default=None, alias="checkpointLabel")
@@ -104,18 +105,31 @@ class EvaluationImage(BaseModel):
 
 
 class EvaluationVote(BaseModel):
-    task: str
+    task: Literal["preference", "real_fake"]
     trial_id: str = Field(alias="trialId")
     session_id: str = Field(alias="sessionId")
     sample_index: int = Field(alias="sampleIndex", ge=0)
     sample_name: str | None = Field(default=None, alias="sampleName")
     seed: int | None = None
-    choice: str
-    confidence: int | None = None
-    correct_choice: str | None = Field(default=None, alias="correctChoice")
+    choice: Literal["left", "right", "tie", "bad_pair", "real", "fake", "skip"]
+    confidence: int = Field(ge=1, le=5)
     left: EvaluationImage | None = None
     right: EvaluationImage | None = None
     shown: EvaluationImage | None = None
+
+    @model_validator(mode="after")
+    def validate_task_payload(self) -> EvaluationVote:
+        if self.task == "preference":
+            if self.left is None or self.right is None or self.shown is not None:
+                raise ValueError("preference votes require left and right images only")
+            if self.choice not in {"left", "right", "tie", "bad_pair"}:
+                raise ValueError("preference choice must be left, right, tie, or bad_pair")
+        else:
+            if self.shown is None or self.left is not None or self.right is not None:
+                raise ValueError("real_fake votes require one shown image only")
+            if self.choice not in {"real", "fake", "skip"}:
+                raise ValueError("real_fake choice must be real, fake, or skip")
+        return self
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,7 @@ def create_app(
     samples = _load_samples(config)
     loaded_generators: dict[str, tuple[tuple[Path, int, int], Any]] = {}
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     def checkpoint_slot(checkpoint_id: str) -> CheckpointSlot:
         return _checkpoint_slot(config, checkpoint_id)
@@ -740,10 +755,12 @@ def _data_uri(body: bytes, content_type: str) -> str:
 
 
 def _evaluation_vote_record(payload: EvaluationVote) -> dict[str, Any]:
-    return {
-        "createdAtEpochUtc": int(time.time()),
-        **payload.model_dump(by_alias=True),
-    }
+    record = payload.model_dump(by_alias=True, exclude_none=True)
+    if payload.task == "real_fake":
+        if payload.shown is None:
+            raise ValueError("real_fake votes require one shown image only")
+        record["correctChoice"] = "real" if payload.shown.kind == "real" else "fake"
+    return {"createdAtEpochUtc": int(time.time()), **record}
 
 
 def _append_evaluation_vote(record: dict[str, Any], config: WebConfig) -> None:
