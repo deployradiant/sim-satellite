@@ -51,9 +51,11 @@ context. Base batches use the normal full-image flow objective with an all-ones
 repaint channel. Repaint batches sample interior rectangles, multiple
 disconnected rectangles, brush-like strokes, blobs, and edge strips. Known
 context is clamped onto its noised path, and loss is computed only over the
-repaint region. A value of `0.2` makes every fifth batch a repaint batch. A
-256px context window with repaint ratios from 0.125 to 0.5 trains roughly 32px
-to 128px repaint areas without changing the current model scale.
+repaint region. Repaint batches are selected with a deterministic schedule that
+tracks the configured long-run fraction, so `0.2` makes every fifth batch a
+repaint batch. A 256px context window with repaint ratios from 0.125 to 0.5
+trains roughly 32px to 128px repaint areas without changing the current model
+scale.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared

@@ -159,6 +159,8 @@ def test_repaint_probability_schedules_deterministic_batch_mix() -> None:
     config = load_training_config_values({"steps": 10, "repaint_probability": 0.2})
 
     tasks = [training_task_for_step(config.repaint_probability, step) for step in range(1, 11)]
+    thirty_percent_tasks = [training_task_for_step(0.3, step) for step in range(1, 11)]
+    sixty_percent_tasks = [training_task_for_step(0.6, step) for step in range(1, 11)]
 
     assert tasks == [
         "base",
@@ -172,6 +174,8 @@ def test_repaint_probability_schedules_deterministic_batch_mix() -> None:
         "base",
         "repaint",
     ]
+    assert thirty_percent_tasks.count("repaint") == 3
+    assert sixty_percent_tasks.count("repaint") == 6
     assert config.model_config().use_repaint_mask is True
     assert validation_tasks(config.repaint_probability) == ("base", "repaint")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from types import ModuleType
 
 import torch
@@ -11,12 +12,14 @@ TRAINING_TASK_REPAINT = "repaint"
 
 
 def training_task_for_step(repaint_probability: float, step_number: int) -> str:
-    if repaint_probability <= 0.0:
+    if repaint_probability <= 0.0 or step_number < 1:
         return TRAINING_TASK_BASE
     if repaint_probability >= 1.0:
         return TRAINING_TASK_REPAINT
-    repaint_period = max(1, round(1.0 / repaint_probability))
-    return TRAINING_TASK_REPAINT if step_number % repaint_period == 0 else TRAINING_TASK_BASE
+
+    repaint_count = math.floor(step_number * repaint_probability + 1e-12)
+    previous_repaint_count = math.floor((step_number - 1) * repaint_probability + 1e-12)
+    return TRAINING_TASK_REPAINT if repaint_count > previous_repaint_count else TRAINING_TASK_BASE
 
 
 def validation_tasks(repaint_probability: float) -> tuple[str, ...]:
