@@ -18,6 +18,7 @@ from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
+    _apply_inpaint_training_task,
     _autocast_context,
     _load_training_samples,
     _load_validation_batches,
@@ -176,8 +177,37 @@ def test_inpaint_probability_schedules_deterministic_batch_mix() -> None:
     ]
     assert thirty_percent_tasks.count("inpaint") == 3
     assert sixty_percent_tasks.count("inpaint") == 6
-    assert config.model_config().use_inpaint_mask is True
     assert validation_tasks(config.inpaint_probability) == ("base", "inpaint")
+
+
+def test_inpaint_task_zeros_semantic_condition_inside_sampled_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inpaint_mask = torch.tensor([[[[0.0, 1.0], [0.0, 1.0]]]])
+
+    def fake_sample_inpaint_mask(*_: object, **__: object) -> torch.Tensor:
+        return inpaint_mask
+
+    monkeypatch.setattr(train_module, "sample_inpaint_mask", fake_sample_inpaint_mask)
+    semantic_mask = torch.ones(1, 2, 2, 2)
+
+    _, inpaint_condition, sampled_mask = _apply_inpaint_training_task(
+        clean=torch.zeros(1, 3, 2, 2),
+        semantic_mask=semantic_mask,
+        noisy=torch.zeros(1, 3, 2, 2),
+        timestep=torch.zeros(1),
+        training_task="inpaint",
+        image_size=2,
+        extension_probability=0.0,
+        min_size_ratio=0.5,
+        max_size_ratio=0.5,
+        torch=torch,
+        generator=torch.Generator(device="cpu").manual_seed(123),
+        device=torch.device("cpu"),
+    )
+
+    assert sampled_mask is inpaint_mask
+    assert torch.equal(inpaint_condition, semantic_mask * (1.0 - inpaint_mask))
 
 
 def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:

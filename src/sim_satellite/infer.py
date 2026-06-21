@@ -17,7 +17,6 @@ from sim_satellite.data.prepared import (
     prepared_coordinates_tuple,
 )
 from sim_satellite.data.tensors import load_mask_tensor
-from sim_satellite.inpaint import append_inpaint_condition
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
@@ -185,7 +184,6 @@ def generate_image_with_model(
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
-    model_condition = _inference_model_condition(semantic_mask, model_config, torch=torch)
     generation_coordinates = config.coordinates if model_config.use_coordinates else None
     coordinates = (
         None
@@ -199,10 +197,9 @@ def generate_image_with_model(
             velocity = _guided_prediction(
                 model,
                 image,
-                model_condition,
+                semantic_mask,
                 timestep,
                 coordinates,
-                model_config=model_config,
                 guidance_scale=config.guidance_scale,
                 torch=torch,
             )
@@ -239,54 +236,20 @@ def _flow_inference_tensors(steps: int, *, torch: Any, device: Any) -> tuple[Any
 def _guided_prediction(
     model: Any,
     image: Any,
-    model_condition: Any,
+    semantic_mask: Any,
     timestep: Any,
     coordinates: Any,
     *,
-    model_config: ModelConfig,
     guidance_scale: float,
     torch: Any,
 ) -> Any:
-    conditional = model(image, model_condition, timestep, coordinates)
+    conditional = model(image, semantic_mask, timestep, coordinates)
     if guidance_scale == 1.0:
         return conditional
 
-    unconditional_condition = _empty_guidance_condition(
-        model_condition,
-        model_config,
-        torch=torch,
-    )
+    unconditional_condition = torch.zeros_like(semantic_mask)
     unconditional = model(image, unconditional_condition, timestep, coordinates)
     return unconditional + guidance_scale * (conditional - unconditional)
-
-
-def _inference_model_condition(
-    semantic_mask: Any,
-    model_config: ModelConfig,
-    *,
-    torch: Any,
-) -> Any:
-    return append_inpaint_condition(
-        semantic_mask,
-        inpaint_mask=None,
-        use_inpaint_mask=model_config.use_inpaint_mask,
-        torch=torch,
-    )
-
-
-def _empty_guidance_condition(
-    model_condition: Any,
-    model_config: ModelConfig,
-    *,
-    torch: Any,
-) -> Any:
-    unconditional_condition = torch.zeros_like(model_condition)
-    if model_config.use_inpaint_mask:
-        unconditional_condition[:, model_config.mask_channels :] = model_condition[
-            :,
-            model_config.mask_channels :,
-        ]
-    return unconditional_condition
 
 
 def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:

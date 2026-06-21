@@ -47,24 +47,6 @@ def flow_prediction_loss(
     return (loss * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def append_inpaint_condition(
-    semantic_mask: torch.Tensor,
-    *,
-    inpaint_mask: torch.Tensor | None,
-    use_inpaint_mask: bool,
-    torch: ModuleType,
-) -> torch.Tensor:
-    if not use_inpaint_mask:
-        return semantic_mask
-    if inpaint_mask is None:
-        inpaint_mask = torch.ones(
-            (semantic_mask.shape[0], 1, semantic_mask.shape[-2], semantic_mask.shape[-1]),
-            device=semantic_mask.device,
-            dtype=semantic_mask.dtype,
-        )
-    return torch.cat([semantic_mask, inpaint_mask.to(dtype=semantic_mask.dtype)], dim=1)
-
-
 def sample_inpaint_mask(
     batch_size: int,
     image_size: int,

@@ -61,7 +61,6 @@ class TrainingConfig:
             image_size=self.image_size,
             image_channels=self.image_channels,
             mask_channels=self.mask_channels,
-            use_inpaint_mask=self.inpaint_probability > 0.0,
             hidden_channels=self.hidden_channels,
             seed=self.seed,
             use_coordinates=self.use_coordinates,

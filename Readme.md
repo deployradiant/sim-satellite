@@ -45,15 +45,14 @@ the same model with a small inpaint batch mix:
 }
 ```
 
-When `inpaint_probability` is greater than zero, the model gets one extra
-conditioning channel where `1` marks pixels to generate and `0` marks known
-context. Base batches use the normal full-image flow objective with an all-ones
-inpaint channel. Inpaint batches sample interior rectangles, multiple
-disconnected rectangles, brush-like strokes, round masks, blobs, and edge
-strips. Known context is clamped onto its noised path, and loss is computed
-only over the inpaint region. Inpaint batches are selected with a deterministic
+When `inpaint_probability` is greater than zero, the same model architecture is
+trained with occasional inpaint batches. Inpaint batches sample interior
+rectangles, multiple disconnected rectangles, brush-like strokes, round masks,
+blobs, and edge strips. Known image context is clamped onto its noised path,
+semantic conditioning is zeroed inside the inpaint region, and loss is computed
+only over that region. Inpaint batches are selected with a deterministic
 schedule that tracks the configured long-run fraction, so `0.2` makes every
-fifth batch a inpaint batch. A 256px context window with inpaint ratios from
+fifth batch an inpaint batch. A 256px context window with inpaint ratios from
 0.125 to 0.5 trains roughly 32px to 128px inpaint areas without changing the
 current model scale.
 

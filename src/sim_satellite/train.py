@@ -19,7 +19,6 @@ from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_ba
 from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.inpaint import (
     TRAINING_TASK_INPAINT,
-    append_inpaint_condition,
     flow_prediction_loss,
     sample_inpaint_mask,
     training_task_for_step,
@@ -480,7 +479,6 @@ def _train_step(
         noisy,
         timestep,
         training_task=training_task,
-        use_inpaint_mask=model_config.use_inpaint_mask,
         image_size=model_config.image_size,
         extension_probability=inpaint_extension_probability,
         min_size_ratio=inpaint_min_size_ratio,
@@ -519,7 +517,6 @@ def _apply_inpaint_training_task(
     timestep: torch.Tensor,
     *,
     training_task: str,
-    use_inpaint_mask: bool,
     image_size: int,
     extension_probability: float,
     min_size_ratio: float,
@@ -543,13 +540,7 @@ def _apply_inpaint_training_task(
         context_noise = torch.randn(clean.shape, generator=generator, device=device)
         context_noisy = interpolate_flow_sample(clean, context_noise, timestep)
         noisy = torch.where((1.0 - inpaint_mask).bool(), context_noisy, noisy)
-
-    semantic_mask = append_inpaint_condition(
-        semantic_mask,
-        inpaint_mask=inpaint_mask,
-        use_inpaint_mask=use_inpaint_mask,
-        torch=torch,
-    )
+        semantic_mask = semantic_mask * (1.0 - inpaint_mask)
     return noisy, semantic_mask, inpaint_mask
 
 
@@ -711,7 +702,6 @@ def _evaluate_validation_loss(
                 noisy,
                 timestep,
                 training_task=training_task,
-                use_inpaint_mask=model_config.use_inpaint_mask,
                 image_size=model_config.image_size,
                 extension_probability=config.inpaint_extension_probability,
                 min_size_ratio=config.inpaint_min_size_ratio,
