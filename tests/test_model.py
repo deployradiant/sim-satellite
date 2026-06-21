@@ -30,12 +30,12 @@ def test_conditional_unet_forward_shape_is_deterministic() -> None:
     assert torch.isfinite(output).all()
 
 
-def test_conditional_unet_accepts_repaint_mask_condition() -> None:
+def test_conditional_unet_accepts_inpaint_mask_condition() -> None:
     torch.manual_seed(123)
     config = ModelConfig(
         image_size=32,
         mask_channels=4,
-        use_repaint_mask=True,
+        use_inpaint_mask=True,
         hidden_channels=8,
     )
     model = build_model(config)

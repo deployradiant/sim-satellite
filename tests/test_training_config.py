@@ -9,7 +9,7 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
-from sim_satellite.repaint import (
+from sim_satellite.inpaint import (
     flow_prediction_loss,
     training_task_for_step,
     validation_tasks,
@@ -71,14 +71,14 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
-def test_training_config_validates_repaint_fields() -> None:
+def test_training_config_validates_inpaint_fields() -> None:
     for values in (
-        {"repaint_probability": -0.1},
-        {"repaint_probability": 1.1},
-        {"repaint_extension_probability": -0.1},
-        {"repaint_min_size_ratio": 0.0},
-        {"repaint_max_size_ratio": 1.1},
-        {"repaint_min_size_ratio": 0.8, "repaint_max_size_ratio": 0.2},
+        {"inpaint_probability": -0.1},
+        {"inpaint_probability": 1.1},
+        {"inpaint_extension_probability": -0.1},
+        {"inpaint_min_size_ratio": 0.0},
+        {"inpaint_max_size_ratio": 1.1},
+        {"inpaint_min_size_ratio": 0.8, "inpaint_max_size_ratio": 0.2},
     ):
         with pytest.raises(ValueError):
             load_training_config_values(values)
@@ -140,25 +140,25 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     assert mixed_tail_mass > logit_tail_mass * 2.0
 
 
-def test_flow_prediction_loss_can_focus_on_repaint_region() -> None:
+def test_flow_prediction_loss_can_focus_on_inpaint_region() -> None:
     prediction = torch.tensor([[[[2.0, 10.0], [2.0, 10.0]]]])
     target = torch.zeros_like(prediction)
-    repaint_mask = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+    inpaint_mask = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
 
     loss = flow_prediction_loss(
         prediction,
         target,
-        repaint_mask=repaint_mask,
+        inpaint_mask=inpaint_mask,
         torch=torch,
     )
 
     assert torch.allclose(loss, torch.tensor(4.0))
 
 
-def test_repaint_probability_schedules_deterministic_batch_mix() -> None:
-    config = load_training_config_values({"steps": 10, "repaint_probability": 0.2})
+def test_inpaint_probability_schedules_deterministic_batch_mix() -> None:
+    config = load_training_config_values({"steps": 10, "inpaint_probability": 0.2})
 
-    tasks = [training_task_for_step(config.repaint_probability, step) for step in range(1, 11)]
+    tasks = [training_task_for_step(config.inpaint_probability, step) for step in range(1, 11)]
     thirty_percent_tasks = [training_task_for_step(0.3, step) for step in range(1, 11)]
     sixty_percent_tasks = [training_task_for_step(0.6, step) for step in range(1, 11)]
 
@@ -167,17 +167,17 @@ def test_repaint_probability_schedules_deterministic_batch_mix() -> None:
         "base",
         "base",
         "base",
-        "repaint",
+        "inpaint",
         "base",
         "base",
         "base",
         "base",
-        "repaint",
+        "inpaint",
     ]
-    assert thirty_percent_tasks.count("repaint") == 3
-    assert sixty_percent_tasks.count("repaint") == 6
-    assert config.model_config().use_repaint_mask is True
-    assert validation_tasks(config.repaint_probability) == ("base", "repaint")
+    assert thirty_percent_tasks.count("inpaint") == 3
+    assert sixty_percent_tasks.count("inpaint") == 6
+    assert config.model_config().use_inpaint_mask is True
+    assert validation_tasks(config.inpaint_probability) == ("base", "inpaint")
 
 
 def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:

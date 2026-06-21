@@ -17,8 +17,8 @@ from sim_satellite.data.prepared import (
     prepared_coordinates_tuple,
 )
 from sim_satellite.data.tensors import load_mask_tensor
+from sim_satellite.inpaint import append_inpaint_condition
 from sim_satellite.model import ModelConfig, build_model
-from sim_satellite.repaint import append_repaint_condition
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 DEFAULT_TARGET = "modal"
@@ -266,10 +266,10 @@ def _inference_model_condition(
     *,
     torch: Any,
 ) -> Any:
-    return append_repaint_condition(
+    return append_inpaint_condition(
         semantic_mask,
-        repaint_mask=None,
-        use_repaint_mask=model_config.use_repaint_mask,
+        inpaint_mask=None,
+        use_inpaint_mask=model_config.use_inpaint_mask,
         torch=torch,
     )
 
@@ -281,7 +281,7 @@ def _empty_guidance_condition(
     torch: Any,
 ) -> Any:
     unconditional_condition = torch.zeros_like(model_condition)
-    if model_config.use_repaint_mask:
+    if model_config.use_inpaint_mask:
         unconditional_condition[:, model_config.mask_channels :] = model_condition[
             :,
             model_config.mask_channels :,

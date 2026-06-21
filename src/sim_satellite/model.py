@@ -21,7 +21,7 @@ class ModelConfig:
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = 9
-    use_repaint_mask: bool = False
+    use_inpaint_mask: bool = False
     hidden_channels: int = 32
     seed: int = 2026
     use_coordinates: bool = True
@@ -33,8 +33,8 @@ class ModelConfig:
             raise ValueError("image_channels must be positive")
         if self.mask_channels < 1:
             raise ValueError("mask_channels must be positive")
-        if not isinstance(self.use_repaint_mask, bool):
-            raise ValueError("use_repaint_mask must be a boolean")
+        if not isinstance(self.use_inpaint_mask, bool):
+            raise ValueError("use_inpaint_mask must be a boolean")
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
         if not isinstance(self.use_coordinates, bool):
@@ -329,7 +329,7 @@ def _attention_head_count(channels: int) -> int:
 
 
 def _condition_channels(config: ModelConfig) -> int:
-    return config.mask_channels + (1 if config.use_repaint_mask else 0)
+    return config.mask_channels + (1 if config.use_inpaint_mask else 0)
 
 
 def _spatial_size(tensor: torch.Tensor) -> tuple[int, int]:

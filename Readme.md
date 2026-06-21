@@ -31,30 +31,30 @@ Training reads run settings from a JSON file. Omitted fields use
 `TrainingConfig` defaults.
 
 For checkpoints intended for an inpainting or infinite-canvas workflow, train
-the same model with a small repaint batch mix:
+the same model with a small inpaint batch mix:
 
 ```json
 {
   "image_size": 256,
-  "repaint_probability": 0.2,
-  "repaint_extension_probability": 0.5,
-  "repaint_min_size_ratio": 0.125,
-  "repaint_max_size_ratio": 0.5,
+  "inpaint_probability": 0.2,
+  "inpaint_extension_probability": 0.5,
+  "inpaint_min_size_ratio": 0.125,
+  "inpaint_max_size_ratio": 0.5,
   "validation_holdout_patterns": "abancay",
   "validation_every": 1000
 }
 ```
 
-When `repaint_probability` is greater than zero, the model gets one extra
+When `inpaint_probability` is greater than zero, the model gets one extra
 conditioning channel where `1` marks pixels to generate and `0` marks known
 context. Base batches use the normal full-image flow objective with an all-ones
-repaint channel. Repaint batches sample interior rectangles, multiple
+inpaint channel. Inpaint batches sample interior rectangles, multiple
 disconnected rectangles, brush-like strokes, round masks, blobs, and edge
 strips. Known context is clamped onto its noised path, and loss is computed
-only over the repaint region. Repaint batches are selected with a deterministic
+only over the inpaint region. Inpaint batches are selected with a deterministic
 schedule that tracks the configured long-run fraction, so `0.2` makes every
-fifth batch a repaint batch. A 256px context window with repaint ratios from
-0.125 to 0.5 trains roughly 32px to 128px repaint areas without changing the
+fifth batch a inpaint batch. A 256px context window with inpaint ratios from
+0.125 to 0.5 trains roughly 32px to 128px inpaint areas without changing the
 current model scale.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset

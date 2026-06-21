@@ -1,4 +1,4 @@
-"""Repaint training helpers."""
+"""Inpaint training helpers."""
 
 from __future__ import annotations
 
@@ -8,31 +8,31 @@ from types import ModuleType
 import torch
 
 TRAINING_TASK_BASE = "base"
-TRAINING_TASK_REPAINT = "repaint"
+TRAINING_TASK_INPAINT = "inpaint"
 
 
-def training_task_for_step(repaint_probability: float, step_number: int) -> str:
-    if repaint_probability <= 0.0 or step_number < 1:
+def training_task_for_step(inpaint_probability: float, step_number: int) -> str:
+    if inpaint_probability <= 0.0 or step_number < 1:
         return TRAINING_TASK_BASE
-    if repaint_probability >= 1.0:
-        return TRAINING_TASK_REPAINT
+    if inpaint_probability >= 1.0:
+        return TRAINING_TASK_INPAINT
 
-    repaint_count = math.floor(step_number * repaint_probability + 1e-12)
-    previous_repaint_count = math.floor((step_number - 1) * repaint_probability + 1e-12)
-    return TRAINING_TASK_REPAINT if repaint_count > previous_repaint_count else TRAINING_TASK_BASE
+    inpaint_count = math.floor(step_number * inpaint_probability + 1e-12)
+    previous_inpaint_count = math.floor((step_number - 1) * inpaint_probability + 1e-12)
+    return TRAINING_TASK_INPAINT if inpaint_count > previous_inpaint_count else TRAINING_TASK_BASE
 
 
-def validation_tasks(repaint_probability: float) -> tuple[str, ...]:
-    if repaint_probability <= 0.0:
+def validation_tasks(inpaint_probability: float) -> tuple[str, ...]:
+    if inpaint_probability <= 0.0:
         return (TRAINING_TASK_BASE,)
-    return (TRAINING_TASK_BASE, TRAINING_TASK_REPAINT)
+    return (TRAINING_TASK_BASE, TRAINING_TASK_INPAINT)
 
 
 def flow_prediction_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     *,
-    repaint_mask: torch.Tensor | None,
+    inpaint_mask: torch.Tensor | None,
     torch: ModuleType,
 ) -> torch.Tensor:
     loss = torch.nn.functional.mse_loss(
@@ -40,32 +40,32 @@ def flow_prediction_loss(
         target.float(),
         reduction="none",
     )
-    if repaint_mask is None:
+    if inpaint_mask is None:
         return loss.mean()
 
-    weights = repaint_mask.expand_as(loss).float()
+    weights = inpaint_mask.expand_as(loss).float()
     return (loss * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def append_repaint_condition(
+def append_inpaint_condition(
     semantic_mask: torch.Tensor,
     *,
-    repaint_mask: torch.Tensor | None,
-    use_repaint_mask: bool,
+    inpaint_mask: torch.Tensor | None,
+    use_inpaint_mask: bool,
     torch: ModuleType,
 ) -> torch.Tensor:
-    if not use_repaint_mask:
+    if not use_inpaint_mask:
         return semantic_mask
-    if repaint_mask is None:
-        repaint_mask = torch.ones(
+    if inpaint_mask is None:
+        inpaint_mask = torch.ones(
             (semantic_mask.shape[0], 1, semantic_mask.shape[-2], semantic_mask.shape[-1]),
             device=semantic_mask.device,
             dtype=semantic_mask.dtype,
         )
-    return torch.cat([semantic_mask, repaint_mask.to(dtype=semantic_mask.dtype)], dim=1)
+    return torch.cat([semantic_mask, inpaint_mask.to(dtype=semantic_mask.dtype)], dim=1)
 
 
-def sample_repaint_mask(
+def sample_inpaint_mask(
     batch_size: int,
     image_size: int,
     *,
@@ -159,16 +159,16 @@ def _fill_rectangle_mask(
     generator: torch.Generator,
     device: torch.device,
 ) -> None:
-    repaint_width = int(
+    inpaint_width = int(
         torch.randint(min_size, max_size + 1, (), generator=generator, device=device).item()
     )
-    repaint_height = int(
+    inpaint_height = int(
         torch.randint(min_size, max_size + 1, (), generator=generator, device=device).item()
     )
     left = int(
         torch.randint(
             0,
-            image_size - repaint_width + 1,
+            image_size - inpaint_width + 1,
             (),
             generator=generator,
             device=device,
@@ -177,13 +177,13 @@ def _fill_rectangle_mask(
     top = int(
         torch.randint(
             0,
-            image_size - repaint_height + 1,
+            image_size - inpaint_height + 1,
             (),
             generator=generator,
             device=device,
         ).item()
     )
-    mask[:, top : top + repaint_height, left : left + repaint_width] = 1.0
+    mask[:, top : top + inpaint_height, left : left + inpaint_width] = 1.0
 
 
 def _fill_multi_rectangle_mask(

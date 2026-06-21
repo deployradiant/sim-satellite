@@ -166,13 +166,13 @@ def test_load_generator_rejects_unexpected_coordinate_projection(tmp_path: Path)
         infer.load_generator(checkpoint_path, device="cpu")
 
 
-def test_generate_image_supports_repaint_checkpoint_condition(tmp_path: Path) -> None:
+def test_generate_image_supports_inpaint_checkpoint_condition(tmp_path: Path) -> None:
     checkpoint_path = _write_flow_checkpoint(
         tmp_path,
         torch=torch,
-        filename="repaint-flow.pt",
+        filename="inpaint-flow.pt",
         use_coordinates=False,
-        use_repaint_mask=True,
+        use_inpaint_mask=True,
     )
     mask_path = tmp_path / "mask.png"
     Image.new("L", (32, 32), color=1).save(mask_path)
@@ -192,8 +192,8 @@ def test_generate_image_supports_repaint_checkpoint_condition(tmp_path: Path) ->
     assert torch.isfinite(result.image).all()
 
 
-def test_empty_guidance_condition_preserves_repaint_channel() -> None:
-    config = ModelConfig(mask_channels=2, use_repaint_mask=True)
+def test_empty_guidance_condition_preserves_inpaint_channel() -> None:
+    config = ModelConfig(mask_channels=2, use_inpaint_mask=True)
     model_condition = torch.zeros(1, 3, 2, 2)
     model_condition[:, 0] = 1.0
     model_condition[:, -1] = 1.0
@@ -231,7 +231,7 @@ def _write_flow_checkpoint(
     torch: Any,
     filename: str = "flow.pt",
     use_coordinates: bool = True,
-    use_repaint_mask: bool = False,
+    use_inpaint_mask: bool = False,
 ) -> Path:
     checkpoint_path = tmp_path / filename
     config = ModelConfig(
@@ -241,7 +241,7 @@ def _write_flow_checkpoint(
         hidden_channels=4,
         seed=99,
         use_coordinates=use_coordinates,
-        use_repaint_mask=use_repaint_mask,
+        use_inpaint_mask=use_inpaint_mask,
     )
     model = build_model(config)
     checkpoint = {

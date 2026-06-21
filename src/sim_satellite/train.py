@@ -17,19 +17,19 @@ import torch
 from sim_satellite import diagnostics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.prepared import PreparedSample
+from sim_satellite.inpaint import (
+    TRAINING_TASK_INPAINT,
+    append_inpaint_condition,
+    flow_prediction_loss,
+    sample_inpaint_mask,
+    training_task_for_step,
+    validation_tasks,
+)
 from sim_satellite.model import (
     ModelConfig,
     build_model,
     flow_velocity,
     interpolate_flow_sample,
-)
-from sim_satellite.repaint import (
-    TRAINING_TASK_REPAINT,
-    append_repaint_condition,
-    flow_prediction_loss,
-    sample_repaint_mask,
-    training_task_for_step,
-    validation_tasks,
 )
 from sim_satellite.training_config import TrainingConfig, load_training_config_file
 
@@ -149,7 +149,7 @@ def run_training(
     model.train()
     for step in range(start_step, config.steps):
         step_number = step + 1
-        training_task = training_task_for_step(config.repaint_probability, step_number)
+        training_task = training_task_for_step(config.inpaint_probability, step_number)
         step_started_at = time.monotonic()
         should_log_color_stats = _should_log_color_stats(config, step_number)
         loss, step_timing = _train_step(
@@ -164,9 +164,9 @@ def run_training(
             preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
             training_task=training_task,
-            repaint_extension_probability=config.repaint_extension_probability,
-            repaint_min_size_ratio=config.repaint_min_size_ratio,
-            repaint_max_size_ratio=config.repaint_max_size_ratio,
+            inpaint_extension_probability=config.inpaint_extension_probability,
+            inpaint_min_size_ratio=config.inpaint_min_size_ratio,
+            inpaint_max_size_ratio=config.inpaint_max_size_ratio,
             use_coordinates=config.use_coordinates,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
@@ -200,7 +200,7 @@ def run_training(
             and config.validation_every > 0
             and step_number % config.validation_every == 0
         ):
-            for validation_task in validation_tasks(config.repaint_probability):
+            for validation_task in validation_tasks(config.inpaint_probability):
                 validation_loss, validation_color_stats = _evaluate_validation_loss(
                     model,
                     validation_batches,
@@ -303,7 +303,7 @@ def run_training(
             {
                 "step": final_step,
                 "loss": final_loss,
-                "task": training_task_for_step(config.repaint_probability, final_step),
+                "task": training_task_for_step(config.inpaint_probability, final_step),
             }
         )
     training_log.write_training_artifacts(
@@ -412,9 +412,9 @@ def _train_step(
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
     training_task: str,
-    repaint_extension_probability: float,
-    repaint_min_size_ratio: float,
-    repaint_max_size_ratio: float,
+    inpaint_extension_probability: float,
+    inpaint_min_size_ratio: float,
+    inpaint_max_size_ratio: float,
     use_coordinates: bool,
     precision: str,
     profile_timing: bool,
@@ -474,17 +474,17 @@ def _train_step(
         )
         keep_mask = (keep_mask >= mask_drop_probability).float().view(-1, 1, 1, 1)
         semantic_mask = semantic_mask * keep_mask
-    noisy, semantic_mask, repaint_mask = _apply_repaint_training_task(
+    noisy, semantic_mask, inpaint_mask = _apply_inpaint_training_task(
         clean,
         semantic_mask,
         noisy,
         timestep,
         training_task=training_task,
-        use_repaint_mask=model_config.use_repaint_mask,
+        use_inpaint_mask=model_config.use_inpaint_mask,
         image_size=model_config.image_size,
-        extension_probability=repaint_extension_probability,
-        min_size_ratio=repaint_min_size_ratio,
-        max_size_ratio=repaint_max_size_ratio,
+        extension_probability=inpaint_extension_probability,
+        min_size_ratio=inpaint_min_size_ratio,
+        max_size_ratio=inpaint_max_size_ratio,
         torch=torch,
         generator=random_generator,
         device=device,
@@ -500,7 +500,7 @@ def _train_step(
     loss = flow_prediction_loss(
         prediction,
         target,
-        repaint_mask=repaint_mask,
+        inpaint_mask=inpaint_mask,
         torch=torch,
     )
     loss.backward()
@@ -512,14 +512,14 @@ def _train_step(
     return loss.detach(), timing
 
 
-def _apply_repaint_training_task(
+def _apply_inpaint_training_task(
     clean: torch.Tensor,
     semantic_mask: torch.Tensor,
     noisy: torch.Tensor,
     timestep: torch.Tensor,
     *,
     training_task: str,
-    use_repaint_mask: bool,
+    use_inpaint_mask: bool,
     image_size: int,
     extension_probability: float,
     min_size_ratio: float,
@@ -528,9 +528,9 @@ def _apply_repaint_training_task(
     generator: torch.Generator,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    repaint_mask = None
-    if training_task == TRAINING_TASK_REPAINT:
-        repaint_mask = sample_repaint_mask(
+    inpaint_mask = None
+    if training_task == TRAINING_TASK_INPAINT:
+        inpaint_mask = sample_inpaint_mask(
             clean.shape[0],
             image_size,
             extension_probability=extension_probability,
@@ -542,15 +542,15 @@ def _apply_repaint_training_task(
         )
         context_noise = torch.randn(clean.shape, generator=generator, device=device)
         context_noisy = interpolate_flow_sample(clean, context_noise, timestep)
-        noisy = torch.where((1.0 - repaint_mask).bool(), context_noisy, noisy)
+        noisy = torch.where((1.0 - inpaint_mask).bool(), context_noisy, noisy)
 
-    semantic_mask = append_repaint_condition(
+    semantic_mask = append_inpaint_condition(
         semantic_mask,
-        repaint_mask=repaint_mask,
-        use_repaint_mask=use_repaint_mask,
+        inpaint_mask=inpaint_mask,
+        use_inpaint_mask=use_inpaint_mask,
         torch=torch,
     )
-    return noisy, semantic_mask, repaint_mask
+    return noisy, semantic_mask, inpaint_mask
 
 
 def _load_training_state(
@@ -705,17 +705,17 @@ def _evaluate_validation_loss(
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
-            noisy, semantic_mask, repaint_mask = _apply_repaint_training_task(
+            noisy, semantic_mask, inpaint_mask = _apply_inpaint_training_task(
                 clean,
                 semantic_mask,
                 noisy,
                 timestep,
                 training_task=training_task,
-                use_repaint_mask=model_config.use_repaint_mask,
+                use_inpaint_mask=model_config.use_inpaint_mask,
                 image_size=model_config.image_size,
-                extension_probability=config.repaint_extension_probability,
-                min_size_ratio=config.repaint_min_size_ratio,
-                max_size_ratio=config.repaint_max_size_ratio,
+                extension_probability=config.inpaint_extension_probability,
+                min_size_ratio=config.inpaint_min_size_ratio,
+                max_size_ratio=config.inpaint_max_size_ratio,
                 torch=torch,
                 generator=generator,
                 device=device,
@@ -725,7 +725,7 @@ def _evaluate_validation_loss(
             loss = flow_prediction_loss(
                 prediction,
                 target,
-                repaint_mask=repaint_mask,
+                inpaint_mask=inpaint_mask,
                 torch=torch,
             )
             losses.append(loss.detach())
