@@ -6,7 +6,6 @@ import json
 import math
 import time
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
@@ -18,6 +17,7 @@ import torch
 from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.prepared import PreparedSample
+from sim_satellite.generation import autocast_context, generate_conditioned_images
 from sim_satellite.model import (
     ModelConfig,
     build_model,
@@ -359,12 +359,6 @@ def _should_log_color_stats(config: TrainingConfig, step_number: int) -> bool:
     )
 
 
-def _autocast_context(torch: Any, precision: str) -> Any:
-    if precision == "float32":
-        return nullcontext()
-    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-
-
 def _synchronize_device(torch: Any, device: Any, enabled: bool) -> None:
     if not enabled:
         return
@@ -467,7 +461,7 @@ def _train_step(
 
     compute_started_at = time.monotonic()
     optimizer.zero_grad(set_to_none=True)
-    with _autocast_context(torch, precision):
+    with autocast_context(torch, precision, device):
         prediction = model(noisy, semantic_mask, timestep, coordinates)
     loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
     loss.backward()
@@ -633,7 +627,7 @@ def _evaluate_validation_loss(
             )
             noisy = interpolate_flow_sample(clean, noise, timestep)
             target = flow_velocity(clean, noise)
-            with _autocast_context(torch, config.precision):
+            with autocast_context(torch, config.precision, device):
                 prediction = model(noisy, semantic_mask, timestep, coordinates)
             loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
             losses.append(loss.detach())
@@ -697,7 +691,7 @@ def _evaluate_final_generation_metrics(
             if not config.use_coordinates:
                 coordinates = None
 
-            generated = _generate_conditioned_images(
+            generated = generate_conditioned_images(
                 model,
                 semantic_mask,
                 coordinates,
@@ -722,68 +716,6 @@ def _evaluate_final_generation_metrics(
     )
     training_log.print_generation_metrics_done(payload)
     return payload
-
-
-def _generate_conditioned_images(
-    model: Any,
-    semantic_mask: Any,
-    coordinates: Any,
-    *,
-    torch: Any,
-    model_config: ModelConfig,
-    device: Any,
-    seed: int,
-    steps: int,
-    guidance_scale: float,
-    precision: str,
-) -> Any:
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    image_shape = (
-        semantic_mask.shape[0],
-        model_config.image_channels,
-        model_config.image_size,
-        model_config.image_size,
-    )
-    image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
-    step_size = 1.0 / float(steps)
-    timesteps = torch.tensor(
-        [(step - 0.5) * step_size for step in reversed(range(1, steps + 1))],
-        dtype=torch.float32,
-        device=device,
-    )
-    with torch.inference_mode():
-        for timestep in timesteps:
-            with _autocast_context(torch, precision):
-                velocity = _guided_prediction(
-                    model,
-                    image,
-                    semantic_mask,
-                    timestep,
-                    coordinates,
-                    guidance_scale=guidance_scale,
-                    torch=torch,
-                )
-            image = image - velocity * step_size
-    return (image.clamp(-1.0, 1.0) + 1.0) / 2.0
-
-
-def _guided_prediction(
-    model: Any,
-    image: Any,
-    semantic_mask: Any,
-    timestep: Any,
-    coordinates: Any,
-    *,
-    guidance_scale: float,
-    torch: Any,
-) -> Any:
-    conditional = model(image, semantic_mask, timestep, coordinates)
-    if guidance_scale == 1.0:
-        return conditional
-
-    empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep, coordinates)
-    return unconditional + guidance_scale * (conditional - unconditional)
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

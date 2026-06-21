@@ -9,11 +9,11 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
+from sim_satellite.generation import autocast_context
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
-    _autocast_context,
     _load_training_samples,
     _load_validation_batches,
     _sample_flow_timesteps,
@@ -86,7 +86,7 @@ def test_training_cuda_runtime_helpers() -> None:
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
 
     fake_torch = _FakeTorch(cuda_available=True)
-    context = _autocast_context(fake_torch, "bf16")
+    context = autocast_context(fake_torch, "bf16", "cuda")
 
     assert context == "autocast-context"
     assert fake_torch.autocast_calls == [("cuda", fake_torch.bfloat16)]

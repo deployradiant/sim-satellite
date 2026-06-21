@@ -17,6 +17,7 @@ from sim_satellite.data.prepared import (
     prepared_coordinates_tuple,
 )
 from sim_satellite.data.tensors import load_mask_tensor
+from sim_satellite.generation import generate_conditioned_images
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
@@ -171,15 +172,6 @@ def generate_image_with_model(
     model_config = loaded_generator.model_config
     device = loaded_generator.device
 
-    torch.manual_seed(config.seed)
-    generator = torch.Generator(device="cpu").manual_seed(config.seed)
-    image_shape = (
-        1,
-        model_config.image_channels,
-        model_config.image_size,
-        model_config.image_size,
-    )
-    image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
     mask_path = _resolve_mask_path(config.mask_path)
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
@@ -191,22 +183,18 @@ def generate_image_with_model(
         else torch.tensor([generation_coordinates], dtype=torch.float32, device=device)
     )
 
-    timesteps, step_size = _flow_inference_tensors(config.steps, torch=torch, device=device)
-    with torch.inference_mode():
-        for completed_steps, timestep in enumerate(timesteps, start=1):
-            velocity = _guided_prediction(
-                model,
-                image,
-                semantic_mask,
-                timestep,
-                coordinates,
-                guidance_scale=config.guidance_scale,
-                torch=torch,
-            )
-            image = image - velocity * step_size
-            if progress is not None:
-                progress(completed_steps, config.steps)
-        image = (image.clamp(-1.0, 1.0) + 1.0) / 2.0
+    image = generate_conditioned_images(
+        model,
+        semantic_mask,
+        coordinates,
+        torch=torch,
+        model_config=model_config,
+        device=device,
+        seed=config.seed,
+        steps=config.steps,
+        guidance_scale=config.guidance_scale,
+        progress=progress,
+    )
 
     return GenerationResult(
         image=image,
@@ -216,41 +204,6 @@ def generate_image_with_model(
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
     )
-
-
-def _flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
-    step_size = 1.0 / float(steps)
-    return tuple(((step - 0.5) * step_size, step_size) for step in reversed(range(1, steps + 1)))
-
-
-def _flow_inference_tensors(steps: int, *, torch: Any, device: Any) -> tuple[Any, float]:
-    step_size = 1.0 / float(steps)
-    timesteps = torch.tensor(
-        [(step - 0.5) * step_size for step in reversed(range(1, steps + 1))],
-        dtype=torch.float32,
-        device=device,
-    ).view(steps, 1)
-    return timesteps, step_size
-
-
-def _guided_prediction(
-    model: Any,
-    image: Any,
-    semantic_mask: Any,
-    timestep: Any,
-    coordinates: Any,
-    *,
-    guidance_scale: float,
-    torch: Any,
-) -> Any:
-    conditional = model(image, semantic_mask, timestep, coordinates)
-    if guidance_scale == 1.0:
-        return conditional
-
-    empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep, coordinates)
-    return unconditional + guidance_scale * (conditional - unconditional)
-
 
 def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
