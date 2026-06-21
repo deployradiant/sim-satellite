@@ -29,6 +29,12 @@ uv run sim-satellite infer --target modal
 
 Training reads run settings from a JSON file. Omitted fields use
 `TrainingConfig` defaults.
+Final mask-conditioned generation metrics can be enabled with
+`generation_metrics_samples`, `generation_metrics_steps`, and
+`generation_metrics_guidance_scale`. They require either `validation_split` or
+`validation_holdout_patterns` so the generated images are compared against
+held-out real images. The training result and metrics JSON record MSE, PSNR,
+and SSIM.
 
 For checkpoints intended for an inpainting or infinite-canvas workflow, train
 the same model with a small inpaint batch mix:

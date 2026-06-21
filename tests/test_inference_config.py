@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
+from sim_satellite.generation import flow_inference_schedule, flow_inference_tensors
 from sim_satellite.infer import InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
@@ -166,7 +167,7 @@ def test_load_generator_rejects_unexpected_coordinate_projection(tmp_path: Path)
 
 
 def test_flow_inference_tensors_match_schedule() -> None:
-    timesteps, step_size = infer._flow_inference_tensors(4, torch=torch, device="cpu")
+    timesteps, step_size = flow_inference_tensors(4, torch=torch, device="cpu")
 
     assert timesteps.shape == (4, 1)
     assert step_size == 0.25
@@ -174,7 +175,7 @@ def test_flow_inference_tensors_match_schedule() -> None:
         timesteps.flatten(),
         torch.tensor([0.875, 0.625, 0.375, 0.125]),
     )
-    assert infer._flow_inference_schedule(4) == (
+    assert flow_inference_schedule(4) == (
         (0.875, 0.25),
         (0.625, 0.25),
         (0.375, 0.25),

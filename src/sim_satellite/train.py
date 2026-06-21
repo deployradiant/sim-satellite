@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -14,9 +15,10 @@ from typing import Any, cast
 import click
 import torch
 
-from sim_satellite import diagnostics, training_data, training_log
+from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.prepared import PreparedSample
+from sim_satellite.generation import generate_conditioned_images
 from sim_satellite.inpaint import (
     TRAINING_TASK_INPAINT,
     flow_prediction_loss,
@@ -48,6 +50,7 @@ class TrainingResult:
     model_parameters: int
     metrics_path: str
     loss_plot_path: str
+    generation_metrics: dict[str, Any]
 
 
 def run_training(
@@ -139,6 +142,9 @@ def run_training(
         preload_seconds=preload_seconds,
         timing_sample_every=config.timing_sample_every,
         color_stats_every=config.color_stats_every,
+        generation_metrics_samples=config.generation_metrics_samples,
+        generation_metrics_steps=config.generation_metrics_steps,
+        generation_metrics_guidance_scale=config.generation_metrics_guidance_scale,
         model_parameters=model_parameters,
         image_size=config.image_size,
         device=device,
@@ -281,6 +287,7 @@ def run_training(
                 model_parameters=model_parameters,
                 losses=losses,
                 validation_losses=validation_losses,
+                generation_metrics=evaluation_metrics.disabled_generation_metrics_payload(),
                 final_loss=final_loss,
                 step=step_number,
                 run_timing=training_log.run_timing_payload(
@@ -305,6 +312,15 @@ def run_training(
                 "task": training_task_for_step(config.inpaint_probability, final_step),
             }
         )
+    generation_metrics = _evaluate_final_generation_metrics(
+        model,
+        validation_batches,
+        torch=torch,
+        model_config=model_config,
+        device=device,
+        config=config,
+        preloaded_samples=preloaded_samples,
+    )
     training_log.write_training_artifacts(
         checkpoint_path,
         metrics_path,
@@ -318,6 +334,7 @@ def run_training(
         model_parameters=model_parameters,
         losses=losses,
         validation_losses=validation_losses,
+        generation_metrics=generation_metrics,
         final_loss=final_loss,
         step=final_step,
         run_timing=training_log.run_timing_payload(
@@ -341,6 +358,7 @@ def run_training(
         model_parameters=model_parameters,
         metrics_path=str(metrics_path),
         loss_plot_path=str(loss_plot_path),
+        generation_metrics=generation_metrics,
     )
 
 
@@ -616,7 +634,7 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
 
 
 def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
-    if config.validation_every <= 0:
+    if config.validation_every <= 0 and config.generation_metrics_samples <= 0:
         return ()
 
     manifest_path = Path(config.manifest_path)
@@ -636,7 +654,8 @@ def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSam
         patterns = _validation_holdout_patterns(config)
         if not patterns:
             raise ValueError(
-                "validation_every requires validation_split or validation_holdout_patterns"
+                "validation_every or generation_metrics_samples requires "
+                "validation_split or validation_holdout_patterns"
             )
         dataset = SatelliteDataset(manifest_path, split=config.split, shuffle_seed=config.seed + 1)
         samples = tuple(
@@ -645,7 +664,17 @@ def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSam
 
     if not samples:
         raise RuntimeError(f"No validation samples found in {manifest_path}")
-    return tuple(iter_batches(samples, config.batch_size))
+    batches = tuple(iter_batches(samples, config.batch_size))
+    return batches[: _validation_batch_limit(config)]
+
+
+def _validation_batch_limit(config: TrainingConfig) -> int:
+    limit = 0
+    if config.validation_every > 0:
+        limit = max(limit, config.validation_batches)
+    if config.generation_metrics_samples > 0:
+        limit = max(limit, math.ceil(config.generation_metrics_samples / config.batch_size))
+    return limit
 
 
 def _evaluate_validation_loss(
@@ -728,6 +757,82 @@ def _evaluate_validation_loss(
             diagnostics.image_batch_color_stats(torch.cat(color_batches, dim=0))
         )
     return training_log.loss_scalar(torch.stack(losses).mean()), color_stats
+
+
+def _evaluate_final_generation_metrics(
+    model: Any,
+    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
+    *,
+    torch: Any,
+    model_config: ModelConfig,
+    device: Any,
+    config: TrainingConfig,
+    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
+) -> dict[str, Any]:
+    if config.generation_metrics_samples <= 0:
+        return evaluation_metrics.disabled_generation_metrics_payload()
+
+    if not validation_batches:
+        raise RuntimeError("generation_metrics_samples requires validation samples")
+
+    training_log.print_generation_metrics_start(
+        sample_count=config.generation_metrics_samples,
+        generation_steps=config.generation_metrics_steps,
+        guidance_scale=config.generation_metrics_guidance_scale,
+    )
+    accumulator = evaluation_metrics.GenerationMetricAccumulator()
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        for batch_index, samples in enumerate(validation_batches):
+            remaining = config.generation_metrics_samples - accumulator.sample_count
+            if remaining <= 0:
+                break
+            samples = samples[:remaining]
+            crop_boxes = [
+                training_data.center_square_crop_box(
+                    sample,
+                    crop_size=model_config.image_size,
+                    preloaded_samples=preloaded_samples,
+                )
+                for sample in samples
+            ]
+            clean, semantic_mask, coordinates = training_data.load_batch(
+                samples,
+                crop_boxes,
+                torch=torch,
+                model_config=model_config,
+                device=device,
+                preloaded_samples=preloaded_samples,
+            )
+            if not config.use_coordinates:
+                coordinates = None
+
+            generated = generate_conditioned_images(
+                model,
+                semantic_mask,
+                coordinates,
+                torch=torch,
+                model_config=model_config,
+                device=device,
+                seed=config.seed + 20_000 + batch_index,
+                steps=config.generation_metrics_steps,
+                guidance_scale=config.generation_metrics_guidance_scale,
+                precision=config.precision,
+            )
+            real = (clean.float().clamp(-1.0, 1.0) + 1.0) / 2.0
+            accumulator.update(generated, real, torch=torch)
+
+    if was_training:
+        model.train()
+
+    payload = accumulator.payload(
+        requested_sample_count=config.generation_metrics_samples,
+        generation_steps=config.generation_metrics_steps,
+        guidance_scale=config.generation_metrics_guidance_scale,
+    )
+    training_log.print_generation_metrics_done(payload)
+    return payload
 
 
 def _validation_holdout_patterns(config: TrainingConfig) -> tuple[str, ...]:

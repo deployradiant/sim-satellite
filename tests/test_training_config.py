@@ -85,6 +85,21 @@ def test_training_config_validates_inpaint_fields() -> None:
             load_training_config_values(values)
 
 
+def test_training_config_validates_generation_metric_fields() -> None:
+    cases = (
+        ({"generation_metrics_samples": -1}, "generation_metrics_samples must be non-negative"),
+        ({"generation_metrics_steps": 0}, "generation_metrics_steps must be positive"),
+        (
+            {"generation_metrics_guidance_scale": -0.5},
+            "generation_metrics_guidance_scale must be non-negative",
+        ),
+    )
+
+    for values, message in cases:
+        with pytest.raises(ValueError, match=message):
+            load_training_config_values(values)
+
+
 def test_training_cuda_runtime_helpers() -> None:
     with pytest.raises(RuntimeError, match="CUDA-capable GPU"):
         _training_device(TrainingConfig(device="cuda"), torch=_FakeTorch(cuda_available=False))
@@ -257,6 +272,50 @@ def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Pat
     with pytest.raises(ValueError, match="validation_split or validation_holdout_patterns"):
         _load_validation_batches(
             TrainingConfig(manifest_path=str(manifest_path), validation_every=1)
+        )
+
+
+def test_generation_metrics_load_validation_batches_without_periodic_validation(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
+                '"split": "train"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    batches = _load_validation_batches(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            validation_holdout_patterns="abancay",
+            generation_metrics_samples=1,
+            validation_every=0,
+            batch_size=1,
+        )
+    )
+
+    assert len(batches) == 1
+    assert batches[0][0].image_path.name == "a.tif"
+
+    with pytest.raises(ValueError, match="validation_split or validation_holdout_patterns"):
+        _load_validation_batches(
+            TrainingConfig(
+                manifest_path=str(manifest_path),
+                generation_metrics_samples=1,
+                validation_every=0,
+            )
         )
 
 

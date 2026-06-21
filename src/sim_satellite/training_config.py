@@ -32,6 +32,9 @@ class TrainingConfig:
     validation_holdout_patterns: str = ""
     validation_every: int = 0
     validation_batches: int = 8
+    generation_metrics_samples: int = 0
+    generation_metrics_steps: int = 16
+    generation_metrics_guidance_scale: float = 1.0
     device: str = "cuda"
     image_size: int = 32
     image_channels: int = 3
@@ -81,7 +84,14 @@ def load_training_config_values(values: Mapping[str, Any]) -> TrainingConfig:
 
 
 def _validate_training_config(config: TrainingConfig) -> None:
-    for name in ("steps", "batch_size", "log_every", "validation_batches", "learning_rate"):
+    for name in (
+        "steps",
+        "batch_size",
+        "log_every",
+        "validation_batches",
+        "generation_metrics_steps",
+        "learning_rate",
+    ):
         if getattr(config, name) <= 0:
             raise ValueError(f"{name} must be positive")
 
@@ -89,6 +99,7 @@ def _validate_training_config(config: TrainingConfig) -> None:
         "save_every",
         "plot_every",
         "validation_every",
+        "generation_metrics_samples",
         "timing_sample_every",
         "color_stats_every",
     ):
@@ -97,6 +108,8 @@ def _validate_training_config(config: TrainingConfig) -> None:
 
     if config.mask_drop_probability < 0.0 or config.mask_drop_probability > 1.0:
         raise ValueError("mask_drop_probability must be between 0 and 1")
+    if config.generation_metrics_guidance_scale < 0.0:
+        raise ValueError("generation_metrics_guidance_scale must be non-negative")
     if config.inpaint_probability < 0.0 or config.inpaint_probability > 1.0:
         raise ValueError("inpaint_probability must be between 0 and 1")
     if config.inpaint_extension_probability < 0.0 or config.inpaint_extension_probability > 1.0:

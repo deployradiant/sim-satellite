@@ -7,25 +7,13 @@ import time
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from sim_satellite.model import ModelConfig
 
 MetricValue = float | int
-
-
-class TrainingLossRecord(TypedDict):
-    step: int
-    loss: float
-    task: str
-    step_seconds: float
-    step_images_per_second: float
-
-
-class ValidationLossRecord(TypedDict):
-    step: int
-    loss: float
-    task: str
+TrainingLossRecord = dict[str, MetricValue | str]
+ValidationLossRecord = dict[str, MetricValue | str]
 
 
 def print_train_start(
@@ -45,6 +33,9 @@ def print_train_start(
     preload_seconds: float,
     timing_sample_every: int,
     color_stats_every: int,
+    generation_metrics_samples: int,
+    generation_metrics_steps: int,
+    generation_metrics_guidance_scale: float,
     model_parameters: int,
     image_size: int,
     device: Any,
@@ -70,6 +61,9 @@ def print_train_start(
             "preload_seconds": preload_seconds,
             "timing_sample_every": timing_sample_every,
             "color_stats_every": color_stats_every,
+            "generation_metrics_samples": generation_metrics_samples,
+            "generation_metrics_steps": generation_metrics_steps,
+            "generation_metrics_guidance_scale": generation_metrics_guidance_scale,
             "model_parameters": model_parameters,
             "image_size": image_size,
             "device": str(device),
@@ -193,6 +187,33 @@ def print_train_progress(
     )
 
 
+def print_generation_metrics_start(
+    *,
+    sample_count: int,
+    generation_steps: int,
+    guidance_scale: float,
+) -> None:
+    _print_event(
+        {
+            "event": "generation_metrics_start",
+            "sample_count": sample_count,
+            "generation_steps": generation_steps,
+            "guidance_scale": guidance_scale,
+            "logged_at_epoch_utc": time.time(),
+        }
+    )
+
+
+def print_generation_metrics_done(metrics: Mapping[str, object]) -> None:
+    _print_event(
+        {
+            "event": "generation_metrics_done",
+            "logged_at_epoch_utc": time.time(),
+            **metrics,
+        }
+    )
+
+
 def run_timing_payload(
     *,
     started_at_epoch_utc: float,
@@ -290,6 +311,7 @@ def write_training_artifacts(
     model_parameters: int,
     losses: list[TrainingLossRecord],
     validation_losses: list[ValidationLossRecord],
+    generation_metrics: Mapping[str, Any],
     final_loss: float,
     step: int,
     run_timing: Mapping[str, float | int | None],
@@ -302,6 +324,7 @@ def write_training_artifacts(
         model_parameters=model_parameters,
         losses=losses,
         validation_losses=validation_losses,
+        generation_metrics=generation_metrics,
         final_loss=final_loss,
         step=step,
         run_timing=run_timing,
@@ -317,6 +340,7 @@ def write_training_artifacts(
         config=config,
         losses=losses,
         validation_losses=validation_losses,
+        generation_metrics=generation_metrics,
         final_loss=final_loss,
         step=step,
         metrics_path=metrics_path,
@@ -337,6 +361,7 @@ def _write_training_metrics(
     model_parameters: int,
     losses: list[TrainingLossRecord],
     validation_losses: list[ValidationLossRecord],
+    generation_metrics: Mapping[str, Any],
     final_loss: float,
     step: int,
     run_timing: Mapping[str, float | int | None],
@@ -353,6 +378,7 @@ def _write_training_metrics(
                 "run_timing": dict(run_timing),
                 "losses": losses,
                 "validation_losses": validation_losses,
+                "generation_metrics": dict(generation_metrics),
             },
             indent=2,
         )
@@ -424,6 +450,7 @@ def _write_training_checkpoint(
     config: Any,
     losses: list[TrainingLossRecord],
     validation_losses: list[ValidationLossRecord],
+    generation_metrics: Mapping[str, Any],
     final_loss: float,
     step: int,
     metrics_path: Path,
@@ -444,6 +471,7 @@ def _write_training_checkpoint(
             "step": step,
             "losses": losses,
             "validation_losses": validation_losses,
+            "generation_metrics": dict(generation_metrics),
             "final_loss": final_loss,
             "metrics_path": str(metrics_path),
             "loss_plot_path": str(loss_plot_path),
