@@ -61,7 +61,7 @@ def load_batch(
     model_config: ModelConfig,
     device: Any,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
-) -> tuple[Any, Any, Any | None]:
+) -> tuple[Any, Any]:
     missing_samples = tuple(sample for sample in samples if sample not in preloaded_samples)
     assert not missing_samples, "Samples must be preloaded prepared data: " + ", ".join(
         str(sample.prepared_path) for sample in missing_samples
@@ -69,12 +69,9 @@ def load_batch(
 
     images: list[Any] = []
     mask_labels: list[Any] = []
-    coordinates: list[Any] = []
     for sample, crop_box in zip(samples, crop_boxes, strict=True):
         prepared = preloaded_samples[sample]
         left, top, right, bottom = crop_box
-        if prepared.coordinates is not None:
-            coordinates.append(prepared.coordinates.float())
 
         image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
         if image.shape[-2:] == (model_config.image_size, model_config.image_size):
@@ -104,13 +101,9 @@ def load_batch(
 
     image_batch = torch.stack(images).to(device).float() / 127.5 - 1.0
     label_batch = torch.stack(mask_labels).to(device)
-    if coordinates and len(coordinates) != len(samples):
-        raise RuntimeError("Batch mixes samples with and without coordinates")
-    coordinate_batch = torch.stack(coordinates).to(device) if coordinates else None
     return (
         image_batch,
         labels_to_one_hot(label_batch, torch=torch, config=model_config),
-        coordinate_batch,
     )
 
 
