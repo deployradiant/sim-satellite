@@ -555,7 +555,7 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
 
     patterns = _validation_holdout_patterns(config)
     if not patterns:
-        return dataset.samples
+        return _limit_training_samples(dataset.samples, config.max_train_samples)
 
     samples = tuple(
         sample for sample in dataset.samples if not _sample_matches_any(sample, patterns)
@@ -565,7 +565,16 @@ def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...
             "No training samples remain after applying validation holdout patterns: "
             f"{', '.join(patterns)}"
         )
-    return samples
+    return _limit_training_samples(samples, config.max_train_samples)
+
+
+def _limit_training_samples(
+    samples: tuple[SatelliteSample, ...],
+    max_train_samples: int,
+) -> tuple[SatelliteSample, ...]:
+    if max_train_samples <= 0 or len(samples) <= max_train_samples:
+        return samples
+    return samples[:max_train_samples]
 
 
 def _load_validation_batches(config: TrainingConfig) -> tuple[tuple[SatelliteSample, ...], ...]:
