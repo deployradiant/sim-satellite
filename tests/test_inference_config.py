@@ -91,41 +91,18 @@ def test_inference_rejects_malformed_checkpoints(
 
 
 def test_load_generator_accepts_supported_checkpoint_formats(tmp_path: Path) -> None:
-    expected_coordinate_config = ModelConfig(
+    expected_config = ModelConfig(
         image_size=32,
         image_channels=3,
         mask_channels=2,
         hidden_channels=4,
         seed=99,
     )
-    expected_no_coordinate_config = ModelConfig(
-        image_size=32,
-        image_channels=3,
-        mask_channels=2,
-        hidden_channels=4,
-        seed=99,
-        use_coordinates=False,
-    )
-    cases = (
-        (
-            _write_flow_checkpoint(tmp_path, torch=torch, filename="flow.pt"),
-            expected_coordinate_config,
-        ),
-        (
-            _write_flow_checkpoint(
-                tmp_path,
-                torch=torch,
-                filename="flow-no-coordinates.pt",
-                use_coordinates=False,
-            ),
-            expected_no_coordinate_config,
-        ),
-    )
+    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch, filename="flow.pt")
 
-    for checkpoint_path, expected_config in cases:
-        loaded = infer.load_generator(checkpoint_path, device="cpu")
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
 
-        assert loaded.model_config == expected_config
+    assert loaded.model_config == expected_config
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:
@@ -135,34 +112,6 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
     torch.save(checkpoint, checkpoint_path)
 
     with pytest.raises(RuntimeError, match="incompatible with flow U-Net"):
-        infer.load_generator(checkpoint_path, device="cpu")
-
-
-def test_load_generator_rejects_missing_coordinate_projection(tmp_path: Path) -> None:
-    checkpoint_path = _write_flow_checkpoint(tmp_path, torch=torch)
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    checkpoint["model_state"] = {
-        key: value
-        for key, value in checkpoint["model_state"].items()
-        if not key.startswith("coordinate_projection.")
-    }
-    torch.save(checkpoint, checkpoint_path)
-
-    with pytest.raises(RuntimeError, match="missing coordinate_projection"):
-        infer.load_generator(checkpoint_path, device="cpu")
-
-
-def test_load_generator_rejects_unexpected_coordinate_projection(tmp_path: Path) -> None:
-    checkpoint_path = _write_flow_checkpoint(
-        tmp_path,
-        torch=torch,
-        use_coordinates=False,
-    )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    checkpoint["model_state"]["coordinate_projection.0.weight"] = torch.zeros(4, 3)
-    torch.save(checkpoint, checkpoint_path)
-
-    with pytest.raises(RuntimeError, match="contains coordinate_projection"):
         infer.load_generator(checkpoint_path, device="cpu")
 
 
@@ -188,7 +137,6 @@ def _write_flow_checkpoint(
     *,
     torch: Any,
     filename: str = "flow.pt",
-    use_coordinates: bool = True,
 ) -> Path:
     checkpoint_path = tmp_path / filename
     config = ModelConfig(
@@ -197,7 +145,6 @@ def _write_flow_checkpoint(
         mask_channels=2,
         hidden_channels=4,
         seed=99,
-        use_coordinates=use_coordinates,
     )
     model = build_model(config)
     checkpoint = {
