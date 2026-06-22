@@ -229,25 +229,7 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   Next best hypotheses: benchmark prepared-data loading on Modal with the same
   767-sample manifest, add `torch.compile`/fused Adam/SDPA experiments, and only
   then retune batch size or LR.
-- 2026-06-21 PDT: AutoResearch pass for checkpoint-quality metrics and VAE /
-  latent-flow setup launched a long-run anchor from clean `main` on H100:
-  Modal call `fc-01KVPGS1GXWE3H5GRM241FJKE1`, run
-  `main-branch-20k-metrics-abancay-20260622-detached`, `steps=20000`,
-  `batch_size=10`, `learning_rate=2e-4`, `precision=bf16`,
-  `validation_holdout_patterns=abancay`, `generation_metrics_samples=32`, and
-  `generation_metrics_steps=16`. Read-only metric, VAE, and benchmark agents
-  found that current paired MSE/PSNR/SSIM is too narrow for checkpoint quality;
-  the next metrics should add native mask-aware color, histogram, gradient, and
-  boundary scores before LPIPS/KID/FID. Existing SD VAE reconstruction evidence
-  is color-faithful, while latent-flow samples are muted, so the leading causes
-  are latent normalization, sampling, and model capacity rather than decoder
-  color alone. Decision: continue the long anchor as a main-branch reference,
-  then add VAE reconstruction gates and a fixed 1000/2000-step benchmark before
-  promoting another 20k training run.
 - 2026-06-21 PDT: First AutoResearch follow-up implemented native mask-aware
-  generation metrics and `sim-satellite vae-recon-eval`. Final generation
-  metrics now include per-class RGB mean MAE, RGB histogram JS distance,
-  gradient MAE, and boundary gradient deltas when semantic masks are available.
-  The VAE reconstruction gate reports paired MSE/PSNR/SSIM, RGB/chroma/
-  saturation drift, latent channel mean/std, and pass/fail thresholds before
-  latent-flow training.
+  generation metrics. Final generation metrics now include per-class RGB mean
+  MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
+  when semantic masks are available.

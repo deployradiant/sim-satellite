@@ -15,12 +15,6 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
-[project.optional-dependencies]
-vae = [
-    "accelerate>=0.33",
-    "diffusers>=0.30",
-]
-
 [project.scripts]
 sim-satellite = "sim_satellite.cli:cli"
 
