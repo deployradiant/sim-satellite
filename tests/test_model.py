@@ -25,10 +25,9 @@ def test_conditional_unet_forward_shape_is_deterministic() -> None:
     semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
     semantic_mask[:, 1] = 1.0
     timestep = torch.tensor([0.25, 0.75])
-    coordinates = torch.tensor([[0.0, 0.0], [12.0, 34.0]])
 
     with torch.no_grad():
-        output = model(image, semantic_mask, timestep, coordinates)
+        output = model(image, semantic_mask, timestep)
 
     assert output.shape == image.shape
     assert torch.isfinite(output).all()
@@ -43,11 +42,10 @@ def test_model_output_changes_with_timestep() -> None:
     image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
     semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
     semantic_mask[:, 1] = 1.0
-    coordinates = torch.tensor([[0.0, 0.0], [12.0, 34.0]])
 
     with torch.no_grad():
-        early_output = model(image, semantic_mask, torch.full((2,), 0.1), coordinates)
-        late_output = model(image, semantic_mask, torch.full((2,), 0.9), coordinates)
+        early_output = model(image, semantic_mask, torch.full((2,), 0.1))
+        late_output = model(image, semantic_mask, torch.full((2,), 0.9))
 
     assert early_output.shape == image.shape
     assert late_output.shape == image.shape
@@ -56,82 +54,25 @@ def test_model_output_changes_with_timestep() -> None:
     assert not torch.allclose(early_output, late_output)
 
 
-def test_model_output_changes_with_coordinates() -> None:
+def test_model_forward_uses_semantic_mask() -> None:
     torch.manual_seed(123)
     config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
     model = build_model(config)
     model.eval()
 
     image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
-    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
-    semantic_mask[:, 1] = 1.0
+    empty_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
+    building_mask = empty_mask.clone()
+    building_mask[:, 1] = 1.0
     timestep = torch.full((2,), 0.5)
 
     with torch.no_grad():
-        origin_output = model(image, semantic_mask, timestep, torch.zeros(2, 2))
-        located_output = model(
-            image,
-            semantic_mask,
-            timestep,
-            torch.tensor([[6.0, 50.0], [7.0, 51.0]]),
-        )
+        empty_output = model(image, empty_mask, timestep)
+        building_output = model(image, building_mask, timestep)
 
-    assert origin_output.shape == image.shape
-    assert located_output.shape == image.shape
-    assert not torch.allclose(origin_output, located_output)
-
-
-def test_model_forward_accepts_missing_coordinates() -> None:
-    config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
-    model = build_model(config)
-    model.eval()
-
-    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
-    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
-
-    with torch.no_grad():
-        output = model(image, semantic_mask, torch.full((2,), 0.5))
-
-    assert output.shape == image.shape
-    assert torch.isfinite(output).all()
-
-
-def test_model_can_disable_coordinate_conditioning() -> None:
-    torch.manual_seed(123)
-    config = ModelConfig(
-        image_size=32,
-        mask_channels=4,
-        hidden_channels=8,
-        use_coordinates=False,
-    )
-    model = build_model(config)
-    model.eval()
-
-    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
-    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
-    timestep = torch.full((2,), 0.5)
-
-    with torch.no_grad():
-        missing_output = model(image, semantic_mask, timestep)
-        located_output = model(
-            image,
-            semantic_mask,
-            timestep,
-            torch.tensor([[6.0, 50.0], [7.0, 51.0]]),
-        )
-
-    assert model.coordinate_projection is None
-    assert torch.allclose(missing_output, located_output)
-
-
-def test_model_rejects_coordinate_batch_mismatch() -> None:
-    config = ModelConfig(image_size=32, mask_channels=4, hidden_channels=8)
-    model = build_model(config)
-    image = torch.randn(2, config.image_channels, config.image_size, config.image_size)
-    semantic_mask = torch.zeros(2, config.mask_channels, config.image_size, config.image_size)
-
-    with pytest.raises(ValueError, match="Coordinate batch size"):
-        model(image, semantic_mask, torch.full((2,), 0.5), torch.zeros(1, 2))
+    assert empty_output.shape == image.shape
+    assert building_output.shape == image.shape
+    assert not torch.allclose(empty_output, building_output)
 
 
 def test_semantic_mask_pyramid_downsamples_one_hot_with_area() -> None:

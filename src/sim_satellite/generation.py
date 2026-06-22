@@ -12,7 +12,6 @@ from sim_satellite.model import ModelConfig
 def generate_conditioned_images(
     model: Any,
     semantic_mask: Any,
-    coordinates: Any,
     *,
     torch: Any,
     model_config: ModelConfig,
@@ -42,7 +41,6 @@ def generate_conditioned_images(
                     image,
                     semantic_mask,
                     timestep,
-                    coordinates,
                     guidance_scale=guidance_scale,
                     torch=torch,
                 )
@@ -72,17 +70,16 @@ def guided_prediction(
     image: Any,
     semantic_mask: Any,
     timestep: Any,
-    coordinates: Any,
     *,
     guidance_scale: float,
     torch: Any,
 ) -> Any:
-    conditional = model(image, semantic_mask, timestep, coordinates)
+    conditional = model(image, semantic_mask, timestep)
     if guidance_scale == 1.0:
         return conditional
 
     empty_mask = torch.zeros_like(semantic_mask)
-    unconditional = model(image, empty_mask, timestep, coordinates)
+    unconditional = model(image, empty_mask, timestep)
     return unconditional + guidance_scale * (conditional - unconditional)
 
 

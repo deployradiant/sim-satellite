@@ -23,7 +23,6 @@ class ModelConfig:
     mask_channels: int = 9
     hidden_channels: int = 64
     seed: int = 2026
-    use_coordinates: bool = True
 
     def __post_init__(self) -> None:
         if self.image_size < 8:
@@ -34,8 +33,6 @@ class ModelConfig:
             raise ValueError("mask_channels must be positive")
         if self.hidden_channels < 1:
             raise ValueError("hidden_channels must be positive")
-        if not isinstance(self.use_coordinates, bool):
-            raise ValueError("use_coordinates must be a boolean")
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> ModelConfig:
@@ -162,15 +159,6 @@ class ConditionalUNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_channels, time_channels),
         )
-        self.coordinate_projection = (
-            nn.Sequential(
-                nn.Linear(3, base_channels),
-                nn.SiLU(),
-                nn.Linear(base_channels, base_channels),
-            )
-            if model_config.use_coordinates
-            else None
-        )
         self.input_conv = nn.Conv2d(
             model_config.image_channels + model_config.mask_channels,
             base_channels,
@@ -248,22 +236,10 @@ class ConditionalUNet(nn.Module):
         image: torch.Tensor,
         semantic_mask: torch.Tensor,
         timestep: torch.Tensor,
-        coordinates: torch.Tensor | None = None,
     ) -> torch.Tensor:
         time_embedding = self.time_embedding(timestep)
-        coordinate_bias = None
-        if coordinates is not None and self.coordinate_projection is not None:
-            coordinate_features = _coordinate_features(coordinates)
-            if coordinate_features.shape[0] != image.shape[0]:
-                raise ValueError(
-                    "Coordinate batch size must match image batch size: "
-                    f"{coordinate_features.shape[0]} != {image.shape[0]}"
-                )
-            coordinate_bias = self.coordinate_projection(coordinate_features)
         mask_pyramid = {_spatial_size(semantic_mask): semantic_mask}
         h = self.input_conv(torch.cat([image, semantic_mask], dim=1))
-        if coordinate_bias is not None:
-            h = h + coordinate_bias[:, :, None, None]
         skips: list[torch.Tensor] = [h]
 
         for level_index, level_blocks_module in enumerate(self.down_blocks):
@@ -327,25 +303,6 @@ def _attention_head_count(channels: int) -> int:
 
 def _spatial_size(tensor: torch.Tensor) -> tuple[int, int]:
     return int(tensor.shape[-2]), int(tensor.shape[-1])
-
-
-def _coordinate_features(coordinates: torch.Tensor) -> torch.Tensor:
-    coordinates = coordinates.float()
-    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
-        raise ValueError(
-            f"Expected coordinates with shape (batch, 2), got {tuple(coordinates.shape)}"
-        )
-
-    longitude = coordinates[:, 0] * math.pi / 180.0
-    latitude = coordinates[:, 1] * math.pi / 180.0
-    return torch.stack(
-        [
-            torch.cos(latitude) * torch.cos(longitude),
-            torch.cos(latitude) * torch.sin(longitude),
-            torch.sin(latitude),
-        ],
-        dim=1,
-    )
 
 
 def _semantic_mask_at(

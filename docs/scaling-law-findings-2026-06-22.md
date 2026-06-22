@@ -14,7 +14,8 @@ constraint.
 - Validation: Zanzibar holdout, leaving roughly 2,652 training samples and about
   35 validation samples.
 - Training recipe: 256px tiles, `batch_size=10`, `learning_rate=0.0002`,
-  `precision=bf16`, coordinates enabled, and `mask_drop_probability=0.1`.
+  `precision=bf16`, coordinate conditioning enabled in the recorded sweep, and
+  `mask_drop_probability=0.1`.
 - Generation metrics: 16 held-out samples, 16 generation steps,
   `guidance_scale=1.0`.
 
@@ -71,7 +72,9 @@ paying h128 or h160 costs for routine iteration.
 
 Use `hidden_channels=64` as the default model width for current OpenEarthMap
 training runs. Keep h128 as an optional final-quality probe only when the small
-SSIM lift is worth doubling runtime.
+SSIM lift is worth doubling runtime. The repository has since removed coordinate
+conditioning and inpaint-specific knobs, so the default applies to the simplified
+mask-conditioned model.
 
 Practically, we are close to using the current model architecture to the best of
 its abilities on this data. The next high-leverage work should be better data,

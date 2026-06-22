@@ -36,32 +36,6 @@ Final mask-conditioned generation metrics can be enabled with
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
 
-For checkpoints intended for an inpainting or infinite-canvas workflow, train
-the same model with a small inpaint batch mix:
-
-```json
-{
-  "image_size": 256,
-  "inpaint_probability": 0.2,
-  "inpaint_extension_probability": 0.5,
-  "inpaint_min_size_ratio": 0.125,
-  "inpaint_max_size_ratio": 0.5,
-  "validation_holdout_patterns": "abancay",
-  "validation_every": 1000
-}
-```
-
-When `inpaint_probability` is greater than zero, the same model architecture is
-trained with occasional inpaint batches. Inpaint batches sample interior
-rectangles, multiple disconnected rectangles, brush-like strokes, round masks,
-blobs, and edge strips. Known image context is clamped onto its noised path,
-semantic conditioning is zeroed inside the inpaint region, and loss is computed
-only over that region. Inpaint batches are selected with a deterministic
-schedule that tracks the configured long-run fraction, so `0.2` makes every
-fifth batch an inpaint batch. A 256px context window with inpaint ratios from
-0.125 to 0.5 trains roughly 32px to 128px inpaint areas without changing the
-current model scale.
-
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
 tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
@@ -229,3 +203,7 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   Next best hypotheses: benchmark prepared-data loading on Modal with the same
   767-sample manifest, add `torch.compile`/fused Adam/SDPA experiments, and only
   then retune batch size or LR.
+- 2026-06-21 PDT: First AutoResearch follow-up implemented native mask-aware
+  generation metrics. Final generation metrics now include per-class RGB mean
+  MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
+  when semantic masks are available.

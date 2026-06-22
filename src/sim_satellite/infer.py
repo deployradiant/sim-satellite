@@ -11,11 +11,7 @@ from typing import Any
 import click
 import torch
 
-from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
-from sim_satellite.data.prepared import (
-    load_prepared_sample,
-    prepared_coordinates_tuple,
-)
+from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.generation import generate_conditioned_images
 from sim_satellite.model import ModelConfig, build_model
@@ -60,7 +56,6 @@ class InferenceConfig:
 class GenerationConfig:
     seed: int = 2026
     mask_path: str = ""
-    coordinates: tuple[float, float] | None = None
     steps: int = DEFAULT_INFERENCE_STEPS
     guidance_scale: float = 1.0
 
@@ -85,7 +80,6 @@ class InferenceResult:
 class GenerationResult:
     image: Any
     semantic_mask: Any
-    coordinates: tuple[float, float] | None
     model_config: ModelConfig
     checkpoint_path: Path
     mask_path: Path
@@ -111,7 +105,6 @@ def run_inference(
         GenerationConfig(
             seed=config.seed,
             mask_path=mask_path,
-            coordinates=_coordinates_for_mask_path(Path(mask_path), config),
             steps=config.steps,
             guidance_scale=config.guidance_scale,
         ),
@@ -123,7 +116,6 @@ def run_inference(
         {
             "image": generation.image.detach().cpu(),
             "semantic_mask": generation.semantic_mask.detach().cpu(),
-            "coordinates": generation.coordinates,
             "model_config": asdict(generation.model_config),
             "inference_config": asdict(config),
         },
@@ -147,7 +139,6 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
-    _validate_coordinate_state_matches_config(model_config, model_state, checkpoint_path)
     model = build_model(model_config)
     model = model.to(torch_device)
     _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
@@ -176,17 +167,10 @@ def generate_image_with_model(
     semantic_mask = (
         load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
     )
-    generation_coordinates = config.coordinates if model_config.use_coordinates else None
-    coordinates = (
-        None
-        if generation_coordinates is None
-        else torch.tensor([generation_coordinates], dtype=torch.float32, device=device)
-    )
 
     image = generate_conditioned_images(
         model,
         semantic_mask,
-        coordinates,
         torch=torch,
         model_config=model_config,
         device=device,
@@ -199,11 +183,11 @@ def generate_image_with_model(
     return GenerationResult(
         image=image,
         semantic_mask=semantic_mask,
-        coordinates=generation_coordinates,
         model_config=model_config,
         checkpoint_path=loaded_generator.checkpoint_path,
         mask_path=mask_path,
     )
+
 
 def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -222,28 +206,6 @@ def _load_checkpoint(checkpoint_path: Path, *, torch: Any) -> Mapping[str, Any]:
     if not isinstance(checkpoint["model_state"], Mapping):
         raise RuntimeError(f"Inference checkpoint model_state must be a mapping: {checkpoint_path}")
     return checkpoint
-
-
-def _validate_coordinate_state_matches_config(
-    model_config: ModelConfig,
-    model_state: Mapping[str, Any],
-    checkpoint_path: Path,
-) -> None:
-    has_coordinate_projection = _has_coordinate_projection(model_state)
-    if model_config.use_coordinates and not has_coordinate_projection:
-        raise RuntimeError(
-            "Inference checkpoint model_config.use_coordinates=True but model_state is missing "
-            f"coordinate_projection.*: {checkpoint_path}"
-        )
-    if not model_config.use_coordinates and has_coordinate_projection:
-        raise RuntimeError(
-            "Inference checkpoint model_config.use_coordinates=False but model_state contains "
-            f"coordinate_projection.*: {checkpoint_path}"
-        )
-
-
-def _has_coordinate_projection(model_state: Mapping[str, Any]) -> bool:
-    return any(key.startswith("coordinate_projection.") for key in model_state)
 
 
 def _load_model_state(
@@ -284,30 +246,6 @@ def _default_mask_path(config: InferenceConfig) -> Path:
     if len(dataset) == 0:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
     return dataset[0].mask_path
-
-
-def _coordinates_for_mask_path(
-    mask_path: Path,
-    config: InferenceConfig,
-) -> tuple[float, float] | None:
-    sample = _manifest_sample_for_mask_path(mask_path, config)
-    if sample is None or not sample.prepared_path.exists():
-        return None
-    return prepared_coordinates_tuple(load_prepared_sample(sample.prepared_path, torch=torch))
-
-
-def _manifest_sample_for_mask_path(
-    mask_path: Path,
-    config: InferenceConfig,
-) -> SatelliteSample | None:
-    manifest_path = Path(config.manifest_path)
-    if not manifest_path.exists():
-        return None
-    resolved_mask_path = mask_path.resolve()
-    for sample in SatelliteDataset(manifest_path, split=config.split):
-        if sample.mask_path.resolve() == resolved_mask_path:
-            return sample
-    return None
 
 
 def _with_cli_mask_path(config: InferenceConfig) -> InferenceConfig:
