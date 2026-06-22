@@ -11,12 +11,24 @@ class GenerationMetricAccumulator:
     """Accumulate paired generated-vs-real image metrics over batches."""
 
     sample_count: int = 0
+    mask_histogram_bins: int = 16
     _mse_sum: float = 0.0
     _psnr_sum: float = 0.0
     _psnr_count: int = 0
     _ssim_sum: float = 0.0
+    _mask_sample_count: int = 0
+    _mask_pixel_count: Any | None = None
+    _mask_rgb_generated_sum: Any | None = None
+    _mask_rgb_real_sum: Any | None = None
+    _mask_hist_generated_count: Any | None = None
+    _mask_hist_real_count: Any | None = None
+    _mask_gradient_generated_sum: Any | None = None
+    _mask_gradient_real_sum: Any | None = None
+    _boundary_pixel_count: int = 0
+    _boundary_gradient_generated_sum: float = 0.0
+    _boundary_gradient_real_sum: float = 0.0
 
-    def update(self, generated: Any, real: Any, *, torch: Any) -> None:
+    def update(self, generated: Any, real: Any, *, torch: Any, semantic_mask: Any = None) -> None:
         generated = generated.detach().float().clamp(0.0, 1.0)
         real = real.detach().float().clamp(0.0, 1.0)
         if generated.shape != real.shape:
@@ -40,6 +52,183 @@ class GenerationMetricAccumulator:
             self._psnr_sum += float(psnr.sum().detach().cpu().item())
             self._psnr_count += int(finite_psnr.sum().detach().cpu().item())
         self._ssim_sum += float(batch_ssim.sum().detach().cpu().item())
+        if semantic_mask is not None:
+            self._update_mask_metrics(generated, real, semantic_mask, torch=torch)
+
+    def _update_mask_metrics(
+        self,
+        generated: Any,
+        real: Any,
+        semantic_mask: Any,
+        *,
+        torch: Any,
+    ) -> None:
+        semantic_mask = semantic_mask.detach().float()
+        if semantic_mask.ndim != 4:
+            raise ValueError(
+                f"Expected semantic masks with shape (N, K, H, W), got {semantic_mask.ndim}D"
+            )
+        shape_mismatch = (
+            semantic_mask.shape[0] != generated.shape[0]
+            or semantic_mask.shape[-2:] != generated.shape[-2:]
+        )
+        if shape_mismatch:
+            raise ValueError(
+                "Semantic masks must match generated image batch and spatial shape: "
+                f"{tuple(semantic_mask.shape)} vs {tuple(generated.shape)}"
+            )
+        if semantic_mask.shape[1] < 1:
+            raise ValueError("Semantic masks must contain at least one class channel")
+
+        class_count = int(semantic_mask.shape[1])
+        image_channels = int(generated.shape[1])
+        self._ensure_mask_storage(class_count, image_channels, torch=torch)
+
+        labels = semantic_mask.argmax(dim=1).long()
+        flat_labels = labels.reshape(-1)
+        pixel_count = torch.bincount(flat_labels, minlength=class_count).detach().cpu().double()
+        assert self._mask_pixel_count is not None
+        assert self._mask_rgb_generated_sum is not None
+        assert self._mask_rgb_real_sum is not None
+        self._mask_pixel_count += pixel_count
+        self._mask_sample_count += int(generated.shape[0])
+
+        for channel in range(image_channels):
+            generated_values = generated[:, channel, :, :].reshape(-1)
+            real_values = real[:, channel, :, :].reshape(-1)
+            self._mask_rgb_generated_sum[:, channel] += (
+                torch.bincount(flat_labels, weights=generated_values, minlength=class_count)
+                .detach()
+                .cpu()
+                .double()
+            )
+            self._mask_rgb_real_sum[:, channel] += (
+                torch.bincount(flat_labels, weights=real_values, minlength=class_count)
+                .detach()
+                .cpu()
+                .double()
+            )
+            self._add_histogram_counts(
+                generated_values,
+                flat_labels,
+                class_count=class_count,
+                channel=channel,
+                torch=torch,
+                target="generated",
+            )
+            self._add_histogram_counts(
+                real_values,
+                flat_labels,
+                class_count=class_count,
+                channel=channel,
+                torch=torch,
+                target="real",
+            )
+
+        generated_gradient = _sobel_gradient_magnitude(generated, torch=torch).reshape(-1)
+        real_gradient = _sobel_gradient_magnitude(real, torch=torch).reshape(-1)
+        assert self._mask_gradient_generated_sum is not None
+        assert self._mask_gradient_real_sum is not None
+        self._mask_gradient_generated_sum += (
+            torch.bincount(flat_labels, weights=generated_gradient, minlength=class_count)
+            .detach()
+            .cpu()
+            .double()
+        )
+        self._mask_gradient_real_sum += (
+            torch.bincount(flat_labels, weights=real_gradient, minlength=class_count)
+            .detach()
+            .cpu()
+            .double()
+        )
+
+        boundary_mask = _semantic_boundary_mask(labels, torch=torch).reshape(-1)
+        boundary_count = int(boundary_mask.sum().detach().cpu().item())
+        if boundary_count > 0:
+            self._boundary_pixel_count += boundary_count
+            self._boundary_gradient_generated_sum += float(
+                generated_gradient[boundary_mask].sum().detach().cpu().item()
+            )
+            self._boundary_gradient_real_sum += float(
+                real_gradient[boundary_mask].sum().detach().cpu().item()
+            )
+
+    def _ensure_mask_storage(self, class_count: int, image_channels: int, *, torch: Any) -> None:
+        if self._mask_pixel_count is None:
+            self._mask_pixel_count = torch.zeros(class_count, dtype=torch.float64)
+            self._mask_rgb_generated_sum = torch.zeros(
+                class_count,
+                image_channels,
+                dtype=torch.float64,
+            )
+            self._mask_rgb_real_sum = torch.zeros(
+                class_count,
+                image_channels,
+                dtype=torch.float64,
+            )
+            self._mask_hist_generated_count = torch.zeros(
+                class_count,
+                image_channels,
+                self.mask_histogram_bins,
+                dtype=torch.float64,
+            )
+            self._mask_hist_real_count = torch.zeros(
+                class_count,
+                image_channels,
+                self.mask_histogram_bins,
+                dtype=torch.float64,
+            )
+            self._mask_gradient_generated_sum = torch.zeros(class_count, dtype=torch.float64)
+            self._mask_gradient_real_sum = torch.zeros(class_count, dtype=torch.float64)
+            return
+
+        if int(self._mask_pixel_count.shape[0]) != class_count:
+            raise ValueError(
+                "All semantic mask batches must have the same class count: "
+                f"{int(self._mask_pixel_count.shape[0])} != {class_count}"
+            )
+        assert self._mask_rgb_generated_sum is not None
+        if int(self._mask_rgb_generated_sum.shape[1]) != image_channels:
+            raise ValueError(
+                "All image batches must have the same channel count for mask metrics: "
+                f"{int(self._mask_rgb_generated_sum.shape[1])} != {image_channels}"
+            )
+
+    def _add_histogram_counts(
+        self,
+        values: Any,
+        labels: Any,
+        *,
+        class_count: int,
+        channel: int,
+        torch: Any,
+        target: str,
+    ) -> None:
+        bin_ids = (
+            (values * self.mask_histogram_bins)
+            .long()
+            .clamp(
+                0,
+                self.mask_histogram_bins - 1,
+            )
+        )
+        combined = labels * self.mask_histogram_bins + bin_ids
+        counts = (
+            torch.bincount(
+                combined,
+                minlength=class_count * self.mask_histogram_bins,
+            )
+            .view(class_count, self.mask_histogram_bins)
+            .detach()
+            .cpu()
+            .double()
+        )
+        if target == "generated":
+            assert self._mask_hist_generated_count is not None
+            self._mask_hist_generated_count[:, channel, :] += counts
+        else:
+            assert self._mask_hist_real_count is not None
+            self._mask_hist_real_count[:, channel, :] += counts
 
     def payload(
         self,
@@ -56,12 +245,10 @@ class GenerationMetricAccumulator:
                 "requested_sample_count": requested_sample_count,
             }
 
-        return {
+        payload = {
             "enabled": True,
             "status": (
-                "computed"
-                if self.sample_count == requested_sample_count
-                else "computed_partial"
+                "computed" if self.sample_count == requested_sample_count else "computed_partial"
             ),
             "sample_count": self.sample_count,
             "requested_sample_count": requested_sample_count,
@@ -72,6 +259,68 @@ class GenerationMetricAccumulator:
             "psnr_finite_sample_count": self._psnr_count,
             "psnr_exact_match_count": self.sample_count - self._psnr_count,
             "ssim": self._ssim_sum / self.sample_count,
+        }
+        payload.update(self._mask_payload())
+        return payload
+
+    def _mask_payload(self) -> dict[str, Any]:
+        if self._mask_pixel_count is None:
+            return {}
+
+        assert self._mask_rgb_generated_sum is not None
+        assert self._mask_rgb_real_sum is not None
+        assert self._mask_hist_generated_count is not None
+        assert self._mask_hist_real_count is not None
+        assert self._mask_gradient_generated_sum is not None
+        assert self._mask_gradient_real_sum is not None
+
+        pixel_count = self._mask_pixel_count
+        valid = pixel_count > 0.0
+        safe_count = pixel_count.clamp_min(1.0).view(-1, 1)
+        rgb_generated = self._mask_rgb_generated_sum / safe_count
+        rgb_real = self._mask_rgb_real_sum / safe_count
+        rgb_mae = (rgb_generated - rgb_real).abs().mean(dim=1)
+
+        gradient_generated = self._mask_gradient_generated_sum / pixel_count.clamp_min(1.0)
+        gradient_real = self._mask_gradient_real_sum / pixel_count.clamp_min(1.0)
+        gradient_mae = (gradient_generated - gradient_real).abs()
+
+        hist_js = _histogram_jensen_shannon(
+            self._mask_hist_generated_count,
+            self._mask_hist_real_count,
+        )
+        boundary_generated = (
+            self._boundary_gradient_generated_sum / self._boundary_pixel_count
+            if self._boundary_pixel_count > 0
+            else None
+        )
+        boundary_real = (
+            self._boundary_gradient_real_sum / self._boundary_pixel_count
+            if self._boundary_pixel_count > 0
+            else None
+        )
+        boundary_delta = (
+            abs(boundary_generated - boundary_real)
+            if boundary_generated is not None and boundary_real is not None
+            else None
+        )
+
+        return {
+            "mask_sample_count": self._mask_sample_count,
+            "mask_class_pixel_counts": [int(value) for value in pixel_count.tolist()],
+            "mask_rgb_mean_mae_macro": _macro_average(rgb_mae, valid),
+            "mask_rgb_mean_mae_weighted": _weighted_average(rgb_mae, pixel_count),
+            "mask_rgb_mean_mae_per_class": _per_class_values(rgb_mae, valid),
+            "mask_rgb_hist_js_macro": _macro_average(hist_js, valid),
+            "mask_rgb_hist_js_weighted": _weighted_average(hist_js, pixel_count),
+            "mask_rgb_hist_js_per_class": _per_class_values(hist_js, valid),
+            "mask_gradient_mae_macro": _macro_average(gradient_mae, valid),
+            "mask_gradient_mae_weighted": _weighted_average(gradient_mae, pixel_count),
+            "mask_gradient_mae_per_class": _per_class_values(gradient_mae, valid),
+            "mask_boundary_pixel_count": self._boundary_pixel_count,
+            "mask_boundary_gradient_generated": boundary_generated,
+            "mask_boundary_gradient_real": boundary_real,
+            "mask_boundary_gradient_delta": boundary_delta,
         }
 
 
@@ -106,24 +355,33 @@ def structural_similarity(image_a: Any, image_b: Any, *, torch: Any) -> Any:
     mu_b_sq = mu_b * mu_b
     mu_ab = mu_a * mu_b
 
-    sigma_a = torch.nn.functional.avg_pool2d(
-        image_a * image_a,
-        kernel_size,
-        stride=1,
-        padding=padding,
-    ) - mu_a_sq
-    sigma_b = torch.nn.functional.avg_pool2d(
-        image_b * image_b,
-        kernel_size,
-        stride=1,
-        padding=padding,
-    ) - mu_b_sq
-    sigma_ab = torch.nn.functional.avg_pool2d(
-        image_a * image_b,
-        kernel_size,
-        stride=1,
-        padding=padding,
-    ) - mu_ab
+    sigma_a = (
+        torch.nn.functional.avg_pool2d(
+            image_a * image_a,
+            kernel_size,
+            stride=1,
+            padding=padding,
+        )
+        - mu_a_sq
+    )
+    sigma_b = (
+        torch.nn.functional.avg_pool2d(
+            image_b * image_b,
+            kernel_size,
+            stride=1,
+            padding=padding,
+        )
+        - mu_b_sq
+    )
+    sigma_ab = (
+        torch.nn.functional.avg_pool2d(
+            image_a * image_b,
+            kernel_size,
+            stride=1,
+            padding=padding,
+        )
+        - mu_ab
+    )
 
     c1 = 0.01**2
     c2 = 0.03**2
@@ -140,3 +398,72 @@ def _ssim_kernel_size(height: int, width: int) -> int:
     if size % 2 == 0:
         size -= 1
     return max(size, 1)
+
+
+def _sobel_gradient_magnitude(images: Any, *, torch: Any) -> Any:
+    channels = int(images.shape[1])
+    kernel_x = images.new_tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]).view(
+        1, 1, 3, 3
+    )
+    kernel_y = images.new_tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]).view(
+        1, 1, 3, 3
+    )
+    kernel_x = kernel_x.repeat(channels, 1, 1, 1)
+    kernel_y = kernel_y.repeat(channels, 1, 1, 1)
+    grad_x = torch.nn.functional.conv2d(images, kernel_x, padding=1, groups=channels)
+    grad_y = torch.nn.functional.conv2d(images, kernel_y, padding=1, groups=channels)
+    return torch.sqrt((grad_x * grad_x + grad_y * grad_y).clamp_min(1e-12)).mean(
+        dim=1,
+        keepdim=True,
+    )
+
+
+def _semantic_boundary_mask(labels: Any, *, torch: Any) -> Any:
+    boundary = torch.zeros_like(labels, dtype=torch.bool)
+    boundary[:, :, 1:] |= labels[:, :, 1:] != labels[:, :, :-1]
+    boundary[:, :, :-1] |= labels[:, :, 1:] != labels[:, :, :-1]
+    boundary[:, 1:, :] |= labels[:, 1:, :] != labels[:, :-1, :]
+    boundary[:, :-1, :] |= labels[:, 1:, :] != labels[:, :-1, :]
+    return (
+        torch.nn.functional.max_pool2d(
+            boundary.float().unsqueeze(1),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ).squeeze(1)
+        > 0.0
+    )
+
+
+def _histogram_jensen_shannon(generated_counts: Any, real_counts: Any) -> Any:
+    generated = generated_counts.double()
+    real = real_counts.double()
+    generated = generated / generated.sum(dim=2, keepdim=True).clamp_min(1.0)
+    real = real / real.sum(dim=2, keepdim=True).clamp_min(1.0)
+    midpoint = 0.5 * (generated + real)
+    epsilon = 1e-12
+    generated_kl = (
+        generated * (generated.clamp_min(epsilon) / midpoint.clamp_min(epsilon)).log()
+    ).sum(dim=2)
+    real_kl = (real * (real.clamp_min(epsilon) / midpoint.clamp_min(epsilon)).log()).sum(dim=2)
+    return (0.5 * (generated_kl + real_kl)).mean(dim=1)
+
+
+def _macro_average(values: Any, valid: Any) -> float | None:
+    if not bool(valid.any().item()):
+        return None
+    return float(values[valid].mean().item())
+
+
+def _weighted_average(values: Any, weights: Any) -> float | None:
+    total = float(weights.sum().item())
+    if total <= 0.0:
+        return None
+    return float(((values * weights).sum() / weights.sum().clamp_min(1.0)).item())
+
+
+def _per_class_values(values: Any, valid: Any) -> list[float | None]:
+    return [
+        float(value) if bool(is_valid) else None
+        for value, is_valid in zip(values.tolist(), valid.tolist(), strict=True)
+    ]

@@ -731,7 +731,7 @@ def _evaluate_final_generation_metrics(
                 precision=config.precision,
             )
             real = (clean.float().clamp(-1.0, 1.0) + 1.0) / 2.0
-            accumulator.update(generated, real, torch=torch)
+            accumulator.update(generated, real, semantic_mask=semantic_mask, torch=torch)
 
     if was_training:
         model.train()
