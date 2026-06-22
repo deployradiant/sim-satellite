@@ -36,24 +36,6 @@ Final mask-conditioned generation metrics can be enabled with
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
 
-VAE reconstruction comparisons can be run locally against the same prepared
-samples. Install the optional VAE dependencies and pass one or more labeled
-Diffusers-compatible `AutoencoderKL` model names or local model directories:
-
-```bash
-uv sync --extra vae
-uv run --extra vae sim-satellite vae-compare \
-  --validation-holdout-patterns abancay \
-  --sample-count 32 \
-  --codec sd=stabilityai/sd-vae-ft-mse \
-  --codec custom=artifacts/custom-vae \
-  --output artifacts/vae-compare-abancay.json
-```
-
-The first codec is treated as the comparison baseline. The output reports
-paired reconstruction MSE/PSNR/SSIM, RGB/chroma/saturation drift, latent
-channel mean/std, and deltas for each later codec against the baseline.
-
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
 tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
@@ -131,7 +113,7 @@ Broader semi-automated labeling with SAM, SAM 3, or a mask classifier.
 
 ### Model Architecture
 
-Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based implementation is likely faster for useful first results. The important boundary is that conditioning enters through semantic masks, so the architecture can evolve without changing the dataset format.
+Custom DDPM is easier to understand and debug, but a library-backed implementation is likely faster for useful first results. The important boundary is that conditioning enters through semantic masks, so the architecture can evolve without changing the dataset format.
 
 ### References
 
