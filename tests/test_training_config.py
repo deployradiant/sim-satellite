@@ -72,6 +72,13 @@ def test_training_config_rejects_unknown_fields() -> None:
         TrainingConfig.from_dict({**asdict(config), "future_field": "rejected"})
 
 
+def test_training_config_defaults_to_scaling_law_model_width() -> None:
+    config = TrainingConfig()
+
+    assert config.hidden_channels == 64
+    assert config.model_config().hidden_channels == 64
+
+
 def test_training_config_validates_inpaint_fields() -> None:
     for values in (
         {"inpaint_probability": -0.1},
@@ -273,6 +280,58 @@ def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Pat
         _load_validation_batches(
             TrainingConfig(manifest_path=str(manifest_path), validation_every=1)
         )
+
+
+def test_max_train_samples_limits_seeded_training_samples(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
+                '"prepared": "prepared/abancay/a.pt", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
+                '"prepared": "prepared/tokyo/b.pt", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
+                '"prepared": "prepared/maputo/c.pt", '
+                '"split": "train"}',
+                '{"image": "extracted/OpenEarthMap_wo_xBD/lima/images/d.tif", '
+                '"mask": "extracted/OpenEarthMap_wo_xBD/lima/labels/d.tif", '
+                '"prepared": "prepared/lima/d.pt", '
+                '"split": "train"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    samples = _load_training_samples(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            seed=7,
+            max_train_samples=2,
+            validation_holdout_patterns="abancay",
+        )
+    )
+    expected = _load_training_samples(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            seed=7,
+            validation_holdout_patterns="abancay",
+        )
+    )
+
+    assert samples == expected[:2]
+    assert len(samples) == 2
+
+
+def test_training_config_validates_max_train_samples() -> None:
+    with pytest.raises(ValueError, match="max_train_samples must be non-negative"):
+        load_training_config_values({"max_train_samples": -1})
 
 
 def test_generation_metrics_load_validation_batches_without_periodic_validation(

@@ -21,7 +21,7 @@ class ModelConfig:
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = 9
-    hidden_channels: int = 32
+    hidden_channels: int = 64
     seed: int = 2026
     use_coordinates: bool = True
 

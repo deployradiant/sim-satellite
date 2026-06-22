@@ -39,9 +39,10 @@ class TrainingConfig:
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
-    hidden_channels: int = 32
+    hidden_channels: int = 64
     use_coordinates: bool = True
     mask_drop_probability: float = 0.0
+    max_train_samples: int = 0
     inpaint_probability: float = 0.0
     inpaint_extension_probability: float = 0.5
     inpaint_min_size_ratio: float = 0.12
@@ -102,6 +103,7 @@ def _validate_training_config(config: TrainingConfig) -> None:
         "generation_metrics_samples",
         "timing_sample_every",
         "color_stats_every",
+        "max_train_samples",
     ):
         if getattr(config, name) < 0:
             raise ValueError(f"{name} must be non-negative")

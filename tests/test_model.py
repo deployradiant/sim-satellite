@@ -6,6 +6,10 @@ import torch
 from sim_satellite.model import ModelConfig, _semantic_mask_at, build_model
 
 
+def test_model_config_defaults_to_scaling_law_width() -> None:
+    assert ModelConfig().hidden_channels == 64
+
+
 def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:
     with pytest.raises(ValueError, match="4096 tokens to avoid attention OOM"):
         build_model(ModelConfig(image_size=512))
