@@ -229,3 +229,7 @@ Custom DDPM is easier to understand and debug, but a PyTorch/diffusers-based imp
   Next best hypotheses: benchmark prepared-data loading on Modal with the same
   767-sample manifest, add `torch.compile`/fused Adam/SDPA experiments, and only
   then retune batch size or LR.
+- 2026-06-21 PDT: First AutoResearch follow-up implemented native mask-aware
+  generation metrics. Final generation metrics now include per-class RGB mean
+  MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
+  when semantic masks are available.
