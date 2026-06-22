@@ -9,6 +9,7 @@ from PIL import Image
 
 from sim_satellite.data.loader import read_manifest
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
+from sim_satellite.data.sam_records import read_sam_image_records
 
 
 def test_prepare_openearthmap_writes_manifest_without_classes_sidecar(
@@ -36,6 +37,9 @@ def test_prepare_openearthmap_writes_manifest_without_classes_sidecar(
     assert samples[0].prepared_path.exists()
     assert result.prepared_dir == data_dir / "prepared"
     assert result.prepared_samples == 1
+    assert result.unlabeled_manifest_path == data_dir / "unlabeled-images.jsonl"
+    assert result.unlabeled_images == 0
+    assert read_sam_image_records(result.unlabeled_manifest_path) == ()
     assert not (data_dir / "classes.json").exists()
 
 
@@ -49,11 +53,15 @@ def test_prepare_openearthmap_reports_and_skips_missing_masks(tmp_path: Path) ->
 
     result = download_and_prepare_openearthmap(data_dir, download=False, extract=False)
     samples = read_manifest(result.manifest_path)
+    unlabeled = read_sam_image_records(result.unlabeled_manifest_path)
 
     assert result.scanned_images == 2
     assert result.missing_masks == 1
+    assert result.unlabeled_images == 1
     assert result.samples == 1
     assert [sample.image_path.name for sample in samples] == ["paired.png"]
+    assert [sample.image_path.name for sample in unlabeled] == ["unlabeled.png"]
+    assert unlabeled[0].source == "openearthmap-unlabeled"
 
 
 def test_prepare_openearthmap_rejects_when_no_pairs_are_found(tmp_path: Path) -> None:

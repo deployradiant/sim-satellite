@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sim_satellite.data.loader import SatelliteSample, write_manifest
+from sim_satellite.data.sam_records import (
+    SamImageRecord,
+    image_key,
+    infer_region_key,
+    write_sam_image_records,
+)
 
 OPENEARTHMAP_URL = "https://zenodo.org/records/7223446/files/OpenEarthMap.zip?download=1"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -50,8 +56,10 @@ class OpenEarthMapResult:
     extracted_dir: Path
     prepared_dir: Path
     manifest_path: Path
+    unlabeled_manifest_path: Path
     samples: int
     prepared_samples: int
+    unlabeled_images: int
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
@@ -60,6 +68,7 @@ class OpenEarthMapResult:
 @dataclass(frozen=True)
 class OpenEarthMapScan:
     samples: tuple[_OpenEarthMapPair, ...]
+    unlabeled_images: tuple[_OpenEarthMapUnlabeledImage, ...]
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
@@ -69,6 +78,12 @@ class OpenEarthMapScan:
 class _OpenEarthMapPair:
     image_path: Path
     mask_path: Path
+    split: str
+
+
+@dataclass(frozen=True)
+class _OpenEarthMapUnlabeledImage:
+    image_path: Path
     split: str
 
 
@@ -121,10 +136,16 @@ def download_and_prepare_openearthmap(
     )
     _report(progress, f"Writing manifest to {paths.manifest_path}")
     write_manifest(prepared_samples, paths.manifest_path)
+    _report(progress, f"Writing unlabeled image manifest to {paths.unlabeled_manifest_path}")
+    write_sam_image_records(
+        _unlabeled_image_records(scan.unlabeled_images),
+        paths.unlabeled_manifest_path,
+    )
     _report(
         progress,
         "Done: "
         f"{len(scan.samples)} samples, "
+        f"{len(scan.unlabeled_images)} unlabeled images, "
         f"{scan.scanned_images} images scanned, "
         f"{scan.missing_masks} images skipped without masks",
     )
@@ -135,8 +156,10 @@ def download_and_prepare_openearthmap(
         extracted_dir=paths.extracted_dir,
         prepared_dir=paths.prepared_dir,
         manifest_path=paths.manifest_path,
+        unlabeled_manifest_path=paths.unlabeled_manifest_path,
         samples=len(prepared_samples),
         prepared_samples=len(prepared_samples),
+        unlabeled_images=len(scan.unlabeled_images),
         scanned_images=scan.scanned_images,
         missing_masks=scan.missing_masks,
         image_dirs_without_labels=scan.image_dirs_without_labels,
@@ -150,6 +173,7 @@ def scan_openearthmap(
 ) -> OpenEarthMapScan:
     root = Path(extracted_dir)
     pairs: list[_OpenEarthMapPair] = []
+    unlabeled_images: list[_OpenEarthMapUnlabeledImage] = []
     scanned_images = 0
     missing_masks = 0
     image_dirs_without_labels = 0
@@ -177,6 +201,12 @@ def scan_openearthmap(
             mask_path = _matching_mask(image_path, image_dir, label_dir)
             if mask_path is None:
                 missing_masks += 1
+                unlabeled_images.append(
+                    _OpenEarthMapUnlabeledImage(
+                        image_path=image_path,
+                        split=_split_from_path(image_path),
+                    )
+                )
                 continue
             pairs.append(
                 _OpenEarthMapPair(
@@ -196,6 +226,7 @@ def scan_openearthmap(
 
     return OpenEarthMapScan(
         samples=tuple(pairs),
+        unlabeled_images=tuple(unlabeled_images),
         scanned_images=scanned_images,
         missing_masks=missing_masks,
         image_dirs_without_labels=image_dirs_without_labels,
@@ -250,6 +281,21 @@ def _prepared_path_for_sample(
     except ValueError:
         relative_path = Path(sample.split) / sample.image_path.name
     return prepared_dir / relative_path.with_suffix(".pt")
+
+
+def _unlabeled_image_records(
+    images: tuple[_OpenEarthMapUnlabeledImage, ...],
+) -> tuple[SamImageRecord, ...]:
+    return tuple(
+        SamImageRecord(
+            image_path=image.image_path,
+            split=image.split,
+            source="openearthmap-unlabeled",
+            region_key=infer_region_key(image.image_path),
+            image_key=image_key(image.image_path),
+        )
+        for image in images
+    )
 
 
 def _download(
@@ -509,6 +555,7 @@ class _OpenEarthMapPaths:
     extracted_dir: Path
     prepared_dir: Path
     manifest_path: Path
+    unlabeled_manifest_path: Path
 
 
 def _paths(data_dir: str | Path) -> _OpenEarthMapPaths:
@@ -519,6 +566,7 @@ def _paths(data_dir: str | Path) -> _OpenEarthMapPaths:
         extracted_dir=root / "extracted",
         prepared_dir=root / "prepared",
         manifest_path=root / "manifest.jsonl",
+        unlabeled_manifest_path=root / "unlabeled-images.jsonl",
     )
 
 
@@ -553,9 +601,11 @@ def _build_click_command():
         except OSError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo(f"manifest={result.manifest_path}")
+        click.echo(f"unlabeled_manifest={result.unlabeled_manifest_path}")
         click.echo(f"prepared={result.prepared_dir}")
         click.echo(f"samples={result.samples}")
         click.echo(f"prepared_samples={result.prepared_samples}")
+        click.echo(f"unlabeled_images={result.unlabeled_images}")
         click.echo(f"scanned_images={result.scanned_images}")
 
     return command
