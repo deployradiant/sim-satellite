@@ -244,68 +244,6 @@
         accent-color: var(--blue);
       }
 
-      .status-list {
-        display: grid;
-        gap: 9px;
-      }
-
-      .status-item {
-        display: grid;
-        gap: 4px;
-        padding-bottom: 9px;
-        border-bottom: 1px solid rgba(48, 57, 71, 0.7);
-      }
-
-      .status-item:last-child {
-        padding-bottom: 0;
-        border-bottom: 0;
-      }
-
-      .status-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        font-size: 13px;
-        font-weight: 700;
-      }
-
-      .pill {
-        flex: 0 0 auto;
-        border-radius: 999px;
-        padding: 3px 8px;
-        font-size: 11px;
-        font-weight: 800;
-        color: #07100b;
-        background: var(--green);
-      }
-
-      .pill.missing {
-        background: var(--coral);
-        color: #1b070a;
-      }
-
-      .status-path,
-      .command {
-        color: var(--subtle);
-        font-size: 11px;
-        overflow-wrap: anywhere;
-      }
-
-      .command-list {
-        display: grid;
-        gap: 10px;
-      }
-
-      .command {
-        margin: 0;
-        padding: 10px;
-        border-radius: 6px;
-        background: #111720;
-        border: 1px solid var(--border);
-        white-space: pre-wrap;
-      }
-
       .content {
         display: flex;
         flex-direction: column;
@@ -400,6 +338,10 @@
         text-align: center;
         border: 1px dashed var(--border);
         border-radius: 8px;
+      }
+
+      [hidden] {
+        display: none !important;
       }
 
       @media (max-width: 1040px) {
@@ -497,24 +439,6 @@
               </label>
             </div>
           </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <div class="panel-title">Proposal Files</div>
-            </div>
-            <div class="panel-body">
-              <div class="status-list" id="status-list"></div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <div class="panel-title">Commands</div>
-            </div>
-            <div class="panel-body">
-              <div class="command-list" id="commands"></div>
-            </div>
-          </section>
         </aside>
 
         <section class="content">
@@ -575,8 +499,6 @@
         showLabels: document.getElementById("show-labels"),
         opacity: document.getElementById("opacity"),
         sampleMeta: document.getElementById("sample-meta"),
-        statusList: document.getElementById("status-list"),
-        commands: document.getElementById("commands"),
         metrics: document.getElementById("metrics"),
         viewerGrid: document.getElementById("viewer-grid"),
         emptyState: document.getElementById("empty-state"),
@@ -627,8 +549,6 @@
       function render() {
         renderDatasetButtons();
         renderSamples();
-        renderStatus();
-        renderCommands();
         renderMetrics();
         renderViewer();
       }
@@ -678,47 +598,18 @@
         }
       }
 
-      function renderStatus() {
-        elements.statusList.innerHTML = "";
-        for (const dataset of ["labeled", "unlabeled"]) {
-          for (const source of ["baseline", "trained"]) {
-            const status = proposalSource(dataset, source);
-            const item = document.createElement("div");
-            item.className = "status-item";
-            const head = document.createElement("div");
-            head.className = "status-head";
-            const title = document.createElement("span");
-            title.textContent = `${dataset} ${status.label || source}`;
-            const pill = document.createElement("span");
-            pill.className = `pill${status.available ? "" : " missing"}`;
-            pill.textContent = status.available ? `${status.records} masks` : "missing";
-            head.append(title, pill);
-            const path = document.createElement("div");
-            path.className = "status-path";
-            path.textContent = status.path || "";
-            item.append(head, path);
-            elements.statusList.appendChild(item);
-          }
-        }
-      }
-
-      function renderCommands() {
-        elements.commands.innerHTML = "";
-        for (const [name, command] of Object.entries(appState.data.commands || {})) {
-          const block = document.createElement("pre");
-          block.className = "command";
-          block.textContent = `${name}\n${command}`;
-          elements.commands.appendChild(block);
-        }
-      }
-
       function renderMetrics() {
         const comparison = appState.data.comparison;
         const value = comparison?.value;
         const baseline = value?.baseline;
         const trained = value?.trained;
         const delta = value?.delta;
+        const hasComparison = Boolean(value && (baseline || trained || delta));
+        elements.metrics.hidden = !hasComparison;
         elements.metrics.innerHTML = "";
+        if (!hasComparison) {
+          return;
+        }
         const metrics = [
           ["baseline IoU", formatNumber(baseline?.mean_best_iou)],
           ["trained IoU", formatNumber(trained?.mean_best_iou)],

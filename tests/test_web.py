@@ -118,6 +118,8 @@ def test_web_sam_playground_state_and_overlays(tmp_path: Path) -> None:
     page = _request(app, "GET", "/sam")
     assert page.status_code == 200
     assert b"SAM Playground" in page.content
+    assert b"Proposal Files" not in page.content
+    assert b"Commands" not in page.content
 
     state = _request(app, "GET", "/api/sam/state")
     assert state.status_code == 200
