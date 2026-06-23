@@ -103,6 +103,79 @@ def test_load_generator_accepts_supported_checkpoint_formats(tmp_path: Path) -> 
     loaded = infer.load_generator(checkpoint_path, device="cpu")
 
     assert loaded.model_config == expected_config
+    assert loaded.pixel_model_config == expected_config
+    assert loaded.latent_codec is None
+
+
+def test_load_generator_accepts_native_latent_checkpoint(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "latent.pt"
+    config = ModelConfig(
+        image_size=32,
+        image_channels=3,
+        mask_channels=2,
+        hidden_channels=4,
+        seed=99,
+    )
+    model = build_model(config)
+    torch.save(
+        {
+            "model_config": asdict(config),
+            "model_state": model.state_dict(),
+            "training_config": {
+                "training_space": "latent",
+                "latent_codec": "average_pool_rgb",
+                "latent_downsample_factor": 8,
+                "image_size": 256,
+                "image_channels": 3,
+            },
+        },
+        checkpoint_path,
+    )
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    assert loaded.model_config.image_size == 32
+    assert loaded.pixel_model_config.image_size == 256
+    assert loaded.latent_codec is not None
+    assert loaded.latent_codec.channels == 3
+
+
+def test_generate_conditioned_images_decodes_native_latents() -> None:
+    class ZeroVelocityModel(torch.nn.Module):
+        def forward(
+            self,
+            image: torch.Tensor,
+            semantic_mask: torch.Tensor,
+            timestep: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.zeros_like(image)
+
+    from sim_satellite.generation import generate_conditioned_images
+    from sim_satellite.latent import NativeLatentCodec, NativeLatentCodecConfig
+
+    codec = NativeLatentCodec(
+        NativeLatentCodecConfig(
+            codec="average_pool_rgb",
+            downsample_factor=2,
+            image_channels=3,
+        ),
+        torch=torch,
+    )
+    semantic_mask = torch.zeros(1, 2, 32, 32)
+
+    generated = generate_conditioned_images(
+        ZeroVelocityModel(),
+        semantic_mask,
+        torch=torch,
+        model_config=ModelConfig(image_size=32, image_channels=3, mask_channels=2),
+        device=torch.device("cpu"),
+        seed=123,
+        steps=2,
+        guidance_scale=1.0,
+        latent_codec=codec,
+    )
+
+    assert generated.shape == (1, 3, 64, 64)
 
 
 def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> None:

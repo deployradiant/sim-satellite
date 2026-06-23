@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
+from sim_satellite.latent import (
+    NATIVE_LATENT_CODECS,
+    TRAINING_SPACE_LATENT,
+    TRAINING_SPACE_PIXEL,
+    native_latent_channels,
+    native_latent_size,
+)
 from sim_satellite.model import ModelConfig
 
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
@@ -36,6 +43,9 @@ class TrainingConfig:
     generation_metrics_steps: int = 16
     generation_metrics_guidance_scale: float = 1.0
     device: str = "cuda"
+    training_space: str = TRAINING_SPACE_PIXEL
+    latent_codec: str = "average_pool_rgb"
+    latent_downsample_factor: int = 8
     image_size: int = 32
     image_channels: int = 3
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
@@ -56,6 +66,24 @@ class TrainingConfig:
         return cls(**{name: values[name] for name in names if name in values})
 
     def model_config(self) -> ModelConfig:
+        image_size = self.image_size
+        image_channels = self.image_channels
+        if self.training_space == TRAINING_SPACE_LATENT:
+            image_size = native_latent_size(self.image_size, self.latent_downsample_factor)
+            image_channels = native_latent_channels(
+                self.latent_codec,
+                self.latent_downsample_factor,
+                self.image_channels,
+            )
+        return ModelConfig(
+            image_size=image_size,
+            image_channels=image_channels,
+            mask_channels=self.mask_channels,
+            hidden_channels=self.hidden_channels,
+            seed=self.seed,
+        )
+
+    def pixel_model_config(self) -> ModelConfig:
         return ModelConfig(
             image_size=self.image_size,
             image_channels=self.image_channels,
@@ -110,7 +138,24 @@ def _validate_training_config(config: TrainingConfig) -> None:
         raise ValueError("precision must be one of: bf16, float32")
     if config.device != "cuda" and not config.device.startswith("cuda:"):
         raise ValueError("device must be a CUDA device")
+    if config.training_space not in {TRAINING_SPACE_PIXEL, TRAINING_SPACE_LATENT}:
+        raise ValueError("training_space must be one of: latent, pixel")
+    if config.training_space == TRAINING_SPACE_LATENT:
+        _validate_latent_training_config(config)
 
     for name in ("manifest_path", "split"):
         if not getattr(config, name):
             raise ValueError(f"{name} is required")
+
+
+def _validate_latent_training_config(config: TrainingConfig) -> None:
+    if config.latent_codec not in NATIVE_LATENT_CODECS:
+        codecs = ", ".join(sorted(NATIVE_LATENT_CODECS))
+        raise ValueError(f"latent_codec must be one of: {codecs}")
+    if config.latent_downsample_factor <= 0:
+        raise ValueError("latent_downsample_factor must be positive")
+    if config.image_size % config.latent_downsample_factor != 0:
+        raise ValueError("image_size must be divisible by latent_downsample_factor")
+    latent_size = native_latent_size(config.image_size, config.latent_downsample_factor)
+    if latent_size < 32:
+        raise ValueError("latent model image size must be at least 32")

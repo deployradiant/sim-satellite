@@ -11,6 +11,7 @@ from typing import Any
 import click
 import torch
 
+from sim_satellite import latent
 from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.generation import generate_conditioned_images
@@ -90,6 +91,8 @@ class LoadedGenerator:
     torch: Any
     model: Any
     model_config: ModelConfig
+    pixel_model_config: ModelConfig
+    latent_codec: Any | None
     checkpoint_path: Path
     device: Any
 
@@ -139,6 +142,8 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
+    latent_codec = latent.load_checkpoint_latent_codec(checkpoint, torch=torch)
+    pixel_model_config = latent.checkpoint_pixel_model_config(checkpoint, model_config)
     model = build_model(model_config)
     model = model.to(torch_device)
     _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
@@ -147,6 +152,8 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
         torch=torch,
         model=model,
         model_config=model_config,
+        pixel_model_config=pixel_model_config,
+        latent_codec=latent_codec,
         checkpoint_path=checkpoint_path,
         device=torch_device,
     )
@@ -165,18 +172,26 @@ def generate_image_with_model(
 
     mask_path = _resolve_mask_path(config.mask_path)
     semantic_mask = (
-        load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
+        load_mask_tensor(mask_path, torch=torch, config=loaded_generator.pixel_model_config)
+        .unsqueeze(0)
+        .to(device)
+    )
+    model_semantic_mask = (
+        loaded_generator.latent_codec.semantic_mask_for_model(semantic_mask)
+        if loaded_generator.latent_codec is not None
+        else semantic_mask
     )
 
     image = generate_conditioned_images(
         model,
-        semantic_mask,
+        model_semantic_mask,
         torch=torch,
         model_config=model_config,
         device=device,
         seed=config.seed,
         steps=config.steps,
         guidance_scale=config.guidance_scale,
+        latent_codec=loaded_generator.latent_codec,
         progress=progress,
     )
 

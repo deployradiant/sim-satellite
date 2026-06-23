@@ -19,7 +19,11 @@ from sim_satellite.train import (
     _sample_flow_timesteps,
     _training_device,
 )
-from sim_satellite.training_config import TrainingConfig, load_training_config_values
+from sim_satellite.training_config import (
+    TRAINING_SPACE_LATENT,
+    TrainingConfig,
+    load_training_config_values,
+)
 
 
 def test_training_cli_uses_json_config_file(
@@ -71,6 +75,71 @@ def test_training_config_defaults_to_scaling_law_model_width() -> None:
 
     assert config.hidden_channels == 64
     assert config.model_config().hidden_channels == 64
+    assert config.model_config().image_size == config.image_size
+    assert config.model_config().image_channels == config.image_channels
+
+
+def test_training_config_derives_native_latent_model_shape() -> None:
+    config = load_training_config_values(
+        {
+            "training_space": TRAINING_SPACE_LATENT,
+            "latent_codec": "average_pool_rgb",
+            "latent_downsample_factor": 8,
+            "image_size": 256,
+            "image_channels": 3,
+        }
+    )
+
+    assert config.pixel_model_config().image_size == 256
+    assert config.pixel_model_config().image_channels == 3
+    assert config.model_config().image_size == 32
+    assert config.model_config().image_channels == 3
+
+    unshuffle = load_training_config_values(
+        {
+            "training_space": TRAINING_SPACE_LATENT,
+            "latent_codec": "pixel_unshuffle_rgb",
+            "latent_downsample_factor": 4,
+            "image_size": 256,
+            "image_channels": 3,
+        }
+    )
+
+    assert unshuffle.model_config().image_size == 64
+    assert unshuffle.model_config().image_channels == 48
+
+
+def test_training_config_validates_native_latent_fields() -> None:
+    cases = (
+        (
+            {"training_space": TRAINING_SPACE_LATENT, "latent_codec": "external_codec"},
+            "latent_codec must be one of",
+        ),
+        (
+            {"training_space": TRAINING_SPACE_LATENT, "latent_downsample_factor": 0},
+            "latent_downsample_factor must be positive",
+        ),
+        (
+            {
+                "training_space": TRAINING_SPACE_LATENT,
+                "latent_downsample_factor": 8,
+                "image_size": 250,
+            },
+            "image_size must be divisible by latent_downsample_factor",
+        ),
+        (
+            {
+                "training_space": TRAINING_SPACE_LATENT,
+                "latent_downsample_factor": 8,
+                "image_size": 128,
+            },
+            "latent model image size must be at least 32",
+        ),
+    )
+
+    for values, message in cases:
+        with pytest.raises(ValueError, match=message):
+            load_training_config_values(values)
 
 
 def test_training_config_rejects_removed_training_fields() -> None:

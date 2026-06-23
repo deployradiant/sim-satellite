@@ -20,6 +20,7 @@ def generate_conditioned_images(
     steps: int,
     guidance_scale: float,
     precision: str = "float32",
+    latent_codec: Any | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> Any:
     torch.manual_seed(seed)
@@ -47,6 +48,8 @@ def generate_conditioned_images(
             image = image - velocity * step_size
             if progress is not None:
                 progress(completed_steps, steps)
+    if latent_codec is not None:
+        image = latent_codec.decode(image)
     return (image.clamp(-1.0, 1.0) + 1.0) / 2.0
 
 

@@ -15,7 +15,7 @@ from typing import Any, cast
 import click
 import torch
 
-from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
+from sim_satellite import diagnostics, evaluation_metrics, latent, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
 from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.generation import generate_conditioned_images
@@ -59,6 +59,8 @@ def run_training(
     torch.manual_seed(config.seed)
     device = _training_device(config, torch=torch)
     model_config = config.model_config()
+    pixel_model_config = config.pixel_model_config()
+    latent_codec = latent.load_latent_codec(config, torch=torch)
     model = build_model(model_config).to(device)
     model_parameters = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -141,6 +143,12 @@ def run_training(
         generation_metrics_guidance_scale=config.generation_metrics_guidance_scale,
         model_parameters=model_parameters,
         image_size=config.image_size,
+        model_image_size=model_config.image_size,
+        training_space=config.training_space,
+        latent_codec=config.latent_codec if latent_codec is not None else "",
+        latent_downsample_factor=(
+            config.latent_downsample_factor if latent_codec is not None else 1
+        ),
         device=device,
         torch_device_payload=training_log.torch_device_payload(torch, device),
     )
@@ -156,6 +164,8 @@ def run_training(
             optimizer=optimizer,
             torch=torch,
             model_config=model_config,
+            pixel_model_config=pixel_model_config,
+            latent_codec=latent_codec,
             device=device,
             crop_generator=crop_generator,
             random_generator=random_generator,
@@ -198,6 +208,8 @@ def run_training(
                 validation_batches,
                 torch=torch,
                 model_config=model_config,
+                pixel_model_config=pixel_model_config,
+                latent_codec=latent_codec,
                 device=device,
                 config=config,
                 preloaded_samples=preloaded_samples,
@@ -303,6 +315,8 @@ def run_training(
         validation_batches,
         torch=torch,
         model_config=model_config,
+        pixel_model_config=pixel_model_config,
+        latent_codec=latent_codec,
         device=device,
         config=config,
         preloaded_samples=preloaded_samples,
@@ -409,6 +423,8 @@ def _train_step(
     optimizer: torch.optim.Optimizer,
     torch: ModuleType,
     model_config: ModelConfig,
+    pixel_model_config: ModelConfig,
+    latent_codec: Any | None,
     device: torch.device,
     crop_generator: torch.Generator,
     random_generator: torch.Generator,
@@ -425,7 +441,7 @@ def _train_step(
     crop_boxes = [
         training_data.random_square_crop_box(
             sample,
-            crop_size=model_config.image_size,
+            crop_size=pixel_model_config.image_size,
             torch=torch,
             generator=crop_generator,
             preloaded_samples=preloaded_samples,
@@ -441,7 +457,7 @@ def _train_step(
         samples,
         crop_boxes,
         torch=torch,
-        model_config=model_config,
+        model_config=pixel_model_config,
         device=device,
         preloaded_samples=preloaded_samples,
     )
@@ -450,6 +466,9 @@ def _train_step(
         timing["load_seconds"] = max(0.0, time.monotonic() - load_started_at)
     if log_color_stats:
         timing.update(diagnostics.color_stats_payload(diagnostics.image_batch_color_stats(clean)))
+    if latent_codec is not None:
+        clean = latent_codec.encode(clean)
+        semantic_mask = latent_codec.semantic_mask_for_model(semantic_mask)
 
     random_started_at = time.monotonic()
     noise = torch.randn(clean.shape, generator=random_generator, device=device)
@@ -627,6 +646,8 @@ def _evaluate_validation_loss(
     *,
     torch: Any,
     model_config: ModelConfig,
+    pixel_model_config: ModelConfig,
+    latent_codec: Any | None,
     device: Any,
     config: TrainingConfig,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
@@ -642,7 +663,7 @@ def _evaluate_validation_loss(
             crop_boxes = [
                 training_data.center_square_crop_box(
                     sample,
-                    crop_size=model_config.image_size,
+                    crop_size=pixel_model_config.image_size,
                     preloaded_samples=preloaded_samples,
                 )
                 for sample in samples
@@ -651,12 +672,15 @@ def _evaluate_validation_loss(
                 samples,
                 crop_boxes,
                 torch=torch,
-                model_config=model_config,
+                model_config=pixel_model_config,
                 device=device,
                 preloaded_samples=preloaded_samples,
             )
             if log_color_stats:
                 color_batches.append(clean.detach().cpu())
+            if latent_codec is not None:
+                clean = latent_codec.encode(clean)
+                semantic_mask = latent_codec.semantic_mask_for_model(semantic_mask)
             noise = torch.randn(clean.shape, generator=generator, device=device)
             timestep = _sample_flow_timesteps(
                 clean.shape[0],
@@ -687,6 +711,8 @@ def _evaluate_final_generation_metrics(
     *,
     torch: Any,
     model_config: ModelConfig,
+    pixel_model_config: ModelConfig,
+    latent_codec: Any | None,
     device: Any,
     config: TrainingConfig,
     preloaded_samples: Mapping[SatelliteSample, PreparedSample],
@@ -714,7 +740,7 @@ def _evaluate_final_generation_metrics(
             crop_boxes = [
                 training_data.center_square_crop_box(
                     sample,
-                    crop_size=model_config.image_size,
+                    crop_size=pixel_model_config.image_size,
                     preloaded_samples=preloaded_samples,
                 )
                 for sample in samples
@@ -723,14 +749,19 @@ def _evaluate_final_generation_metrics(
                 samples,
                 crop_boxes,
                 torch=torch,
-                model_config=model_config,
+                model_config=pixel_model_config,
                 device=device,
                 preloaded_samples=preloaded_samples,
+            )
+            model_semantic_mask = (
+                latent_codec.semantic_mask_for_model(semantic_mask)
+                if latent_codec is not None
+                else semantic_mask
             )
 
             generated = generate_conditioned_images(
                 model,
-                semantic_mask,
+                model_semantic_mask,
                 torch=torch,
                 model_config=model_config,
                 device=device,
@@ -738,6 +769,7 @@ def _evaluate_final_generation_metrics(
                 steps=config.generation_metrics_steps,
                 guidance_scale=config.generation_metrics_guidance_scale,
                 precision=config.precision,
+                latent_codec=latent_codec,
             )
             real = (clean.float().clamp(-1.0, 1.0) + 1.0) / 2.0
             accumulator.update(generated, real, semantic_mask=semantic_mask, torch=torch)

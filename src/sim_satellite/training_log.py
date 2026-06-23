@@ -38,6 +38,10 @@ def print_train_start(
     generation_metrics_guidance_scale: float,
     model_parameters: int,
     image_size: int,
+    model_image_size: int,
+    training_space: str,
+    latent_codec: str,
+    latent_downsample_factor: int,
     device: Any,
     torch_device_payload: Mapping[str, int | str | None],
 ) -> None:
@@ -66,6 +70,10 @@ def print_train_start(
             "generation_metrics_guidance_scale": generation_metrics_guidance_scale,
             "model_parameters": model_parameters,
             "image_size": image_size,
+            "model_image_size": model_image_size,
+            "training_space": training_space,
+            "latent_codec": latent_codec,
+            "latent_downsample_factor": latent_downsample_factor,
             "device": str(device),
             **torch_device_payload,
         }

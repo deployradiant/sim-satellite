@@ -36,6 +36,20 @@ Final mask-conditioned generation metrics can be enabled with
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
 
+Latent flow matching can be tested without external model libraries by setting
+`"training_space": "latent"` in a training config. The current branch supports
+native tensor codecs only:
+
+- `average_pool_rgb`: trains on low-resolution RGB latents and decodes with
+  bilinear upsampling.
+- `pixel_unshuffle_rgb`: trains on an exact channel-expanded pixel-unshuffle
+  representation and decodes with pixel-shuffle.
+
+The source crop still uses `image_size`; the U-Net receives
+`image_size / latent_downsample_factor`. For example, the
+`train.openearthmap-h100-b10-latent-averagepool-save1k.json` config trains on
+256px crops as 32x32 RGB latents.
+
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
 tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
