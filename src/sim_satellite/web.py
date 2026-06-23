@@ -15,7 +15,7 @@ from pathlib import Path
 from queue import Queue
 from tempfile import NamedTemporaryFile
 from threading import Thread
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import click
 from fastapi import FastAPI, HTTPException, Query
@@ -27,6 +27,12 @@ from pydantic import BaseModel, Field, model_validator
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
+from sim_satellite.data.sam_records import (
+    SamImageRecord,
+    image_key,
+    read_sam_image_records,
+    records_from_jsonl,
+)
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator
 from sim_satellite.model import ModelConfig
@@ -38,15 +44,41 @@ DEFAULT_DISPLAY_SIZE = 256
 DEFAULT_MAX_SAMPLES = 32
 DEFAULT_WEB_CHECKPOINT_PATH = "artifacts/tiny-sim-satellite-modal.pt"
 DEFAULT_EVALUATION_LOG_PATH = "artifacts/web-evaluation-votes.jsonl"
+DEFAULT_SAM_UNLABELED_MANIFEST_PATH = "data/openearthmap/unlabeled-images.jsonl"
+DEFAULT_SAM_COMPARISON_PATH = "data/sam/compare/comparison.json"
+DEFAULT_SAM_LABELED_BASELINE_PROPOSALS_PATH = "data/sam/compare/baseline/proposals.jsonl"
+DEFAULT_SAM_LABELED_TRAINED_PROPOSALS_PATH = "data/sam/compare/trained/proposals.jsonl"
+DEFAULT_SAM_UNLABELED_BASELINE_PROPOSALS_PATH = (
+    "data/sam/openearthmap-unlabeled-baseline/proposals.jsonl"
+)
+DEFAULT_SAM_UNLABELED_TRAINED_PROPOSALS_PATH = (
+    "data/sam/openearthmap-unlabeled-trained/proposals.jsonl"
+)
 PRIMARY_CHECKPOINT_ID = "primary"
 COMPARISON_CHECKPOINT_ID = "comparison"
 STATIC_DIR = Path(__file__).with_name("web_static")
 INDEX_PATH = STATIC_DIR / "index.html"
+SAM_INDEX_PATH = STATIC_DIR / "sam.html"
 MASK_DATA_URI_PREFIX = "data:image/png;base64,"
 MASK_COLORS = tuple(OPENEARTHMAP_RGB[name] for name in OPENEARTHMAP_CLASSES)
+SAM_LABEL_ALPHA = 132
+SAM_PROPOSAL_ALPHA = 118
+SAM_PROPOSAL_ALPHA_LUT = (0,) + (SAM_PROPOSAL_ALPHA,) * 255
+SAM_PROPOSAL_COLORS = (
+    (0, 192, 255),
+    (255, 86, 124),
+    (94, 226, 148),
+    (255, 186, 73),
+    (172, 124, 255),
+    (39, 214, 196),
+)
 STREAM_MEDIA_TYPE = "application/x-ndjson"
 _STREAM_DONE = object()
 ProgressCallback = Callable[[int, int], None]
+SamDatasetName = Literal["labeled", "unlabeled"]
+SamOverlaySource = Literal["label", "baseline", "trained"]
+SamDatasetQuery = Annotated[SamDatasetName, Query()]
+SamOverlaySourceQuery = Annotated[SamOverlaySource, Query()]
 
 
 @dataclass(frozen=True)
@@ -68,6 +100,12 @@ class WebConfig:
     max_samples: int = DEFAULT_MAX_SAMPLES
     display_size: int = DEFAULT_DISPLAY_SIZE
     evaluation_log_path: str = DEFAULT_EVALUATION_LOG_PATH
+    sam_unlabeled_manifest_path: str = DEFAULT_SAM_UNLABELED_MANIFEST_PATH
+    sam_comparison_path: str = DEFAULT_SAM_COMPARISON_PATH
+    sam_labeled_baseline_proposals_path: str = DEFAULT_SAM_LABELED_BASELINE_PROPOSALS_PATH
+    sam_labeled_trained_proposals_path: str = DEFAULT_SAM_LABELED_TRAINED_PROPOSALS_PATH
+    sam_unlabeled_baseline_proposals_path: str = DEFAULT_SAM_UNLABELED_BASELINE_PROPOSALS_PATH
+    sam_unlabeled_trained_proposals_path: str = DEFAULT_SAM_UNLABELED_TRAINED_PROPOSALS_PATH
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -82,6 +120,10 @@ class WebConfig:
             raise ValueError("display_size must be positive")
         if not self.evaluation_log_path:
             raise ValueError("evaluation_log_path must not be empty")
+        if not self.sam_unlabeled_manifest_path:
+            raise ValueError("sam_unlabeled_manifest_path must not be empty")
+        if not self.sam_comparison_path:
+            raise ValueError("sam_comparison_path must not be empty")
 
 
 class GenerateRequest(BaseModel):
@@ -155,6 +197,7 @@ def create_app(
     config = config or WebConfig()
     _validate_checkpoint_path(config)
     samples = _load_samples(config)
+    sam_unlabeled_images = _load_sam_unlabeled_images(config)
     loaded_generators: dict[str, tuple[tuple[Path, int, int], Any]] = {}
     app = FastAPI(title="Sim Satellite", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -186,6 +229,10 @@ def create_app(
     def index() -> FileResponse:
         return FileResponse(INDEX_PATH)
 
+    @app.get("/sam", include_in_schema=False)
+    def sam_index() -> FileResponse:
+        return FileResponse(SAM_INDEX_PATH)
+
     @app.get("/api/state")
     def state() -> dict[str, Any]:
         return _state_payload(
@@ -212,6 +259,51 @@ def create_app(
             content=_image_preview_png(sample, config),
             media_type="image/png",
         )
+
+    @app.get("/api/sam/state")
+    def sam_state() -> dict[str, Any]:
+        return _sam_state_payload(config, samples, sam_unlabeled_images)
+
+    @app.get("/api/sam/image")
+    def sam_image(
+        dataset: SamDatasetQuery = "labeled",
+        index: int = Query(default=0, ge=0),
+    ) -> Response:
+        image_path, _ = _sam_image_reference(samples, sam_unlabeled_images, dataset, index)
+        return Response(
+            content=_sam_image_preview_png(image_path, config),
+            media_type="image/png",
+        )
+
+    @app.get("/api/sam/overlay")
+    def sam_overlay(
+        dataset: SamDatasetQuery = "labeled",
+        source: SamOverlaySourceQuery = "baseline",
+        index: int = Query(default=0, ge=0),
+    ) -> Response:
+        image_path, image_record_key = _sam_image_reference(
+            samples,
+            sam_unlabeled_images,
+            dataset,
+            index,
+        )
+        if source == "label":
+            if dataset != "labeled":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Label overlays are only available for labeled samples",
+                )
+            sample = _sample_at(samples, index)
+            content = _sam_label_overlay_png(sample, config)
+        else:
+            proposals_path = _sam_proposals_path(config, dataset, source)
+            content = _sam_proposal_overlay_png(
+                proposals_path,
+                image_record_key=image_record_key,
+                image_path=image_path,
+                config=config,
+            )
+        return Response(content=content, media_type="image/png")
 
     @app.post("/api/generate")
     def generate(payload: GenerateRequest) -> dict[str, Any]:
@@ -278,6 +370,8 @@ def _load_samples(config: WebConfig) -> tuple[SatelliteSample, ...]:
         )
     if not INDEX_PATH.exists():
         raise FileNotFoundError(f"Web app HTML not found: {INDEX_PATH}")
+    if not SAM_INDEX_PATH.exists():
+        raise FileNotFoundError(f"SAM web app HTML not found: {SAM_INDEX_PATH}")
 
     samples = tuple(SatelliteDataset(manifest_path, split=config.split))
     if not samples:
@@ -328,6 +422,138 @@ def _state_payload(
     }
 
 
+def _load_sam_unlabeled_images(config: WebConfig) -> tuple[SamImageRecord, ...]:
+    path = Path(config.sam_unlabeled_manifest_path)
+    if not path.exists():
+        return ()
+    records = read_sam_image_records(path)
+    return records[: config.max_samples]
+
+
+def _sam_state_payload(
+    config: WebConfig,
+    samples: Sequence[SatelliteSample],
+    unlabeled_images: Sequence[SamImageRecord],
+) -> dict[str, Any]:
+    return {
+        "displaySize": config.display_size,
+        "datasets": {
+            "labeled": {
+                "label": "Labeled OpenEarthMap",
+                "manifestPath": config.manifest_path,
+                "hasLabels": True,
+                "samples": [_sample_payload(index, sample) for index, sample in enumerate(samples)],
+            },
+            "unlabeled": {
+                "label": "Unlabeled OpenEarthMap",
+                "manifestPath": config.sam_unlabeled_manifest_path,
+                "manifestAvailable": Path(config.sam_unlabeled_manifest_path).exists(),
+                "hasLabels": False,
+                "samples": [
+                    _sam_unlabeled_payload(index, record)
+                    for index, record in enumerate(unlabeled_images)
+                ],
+            },
+        },
+        "proposalSources": {
+            dataset: {
+                source: _sam_proposal_source_payload(
+                    _sam_proposals_path(config, dataset, source),
+                    source=source,
+                )
+                for source in ("baseline", "trained")
+            }
+            for dataset in ("labeled", "unlabeled")
+        },
+        "comparison": _sam_comparison_payload(config),
+        "classes": [
+            {
+                "id": index,
+                "name": name,
+                "rgb": OPENEARTHMAP_RGB[name],
+            }
+            for index, name in enumerate(OPENEARTHMAP_CLASSES)
+        ],
+        "commands": _sam_command_payload(config),
+    }
+
+
+def _sam_unlabeled_payload(index: int, record: SamImageRecord) -> dict[str, Any]:
+    return {
+        "index": index,
+        "name": record.image_path.stem,
+        "imagePath": str(record.image_path),
+        "source": record.source,
+        "split": record.split,
+        "regionKey": record.region_key,
+    }
+
+
+def _sam_proposal_source_payload(path: Path, *, source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "label": "SAM baseline" if source == "baseline" else "Trained SAM",
+        "path": str(path),
+        "available": path.exists(),
+        "records": _jsonl_record_count(path),
+    }
+
+
+def _sam_comparison_payload(config: WebConfig) -> dict[str, Any]:
+    path = Path(config.sam_comparison_path)
+    payload: dict[str, Any] = {
+        "path": str(path),
+        "available": path.exists(),
+    }
+    if not path.exists():
+        return payload
+    try:
+        payload["value"] = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        payload["error"] = f"{path}: invalid JSON: {exc}"
+    return payload
+
+
+def _sam_command_payload(config: WebConfig) -> dict[str, str]:
+    return {
+        "trainingData": (
+            "uv run sim-satellite sam-data "
+            f"--manifest {config.manifest_path} "
+            "--output-dir data/sam/openearthmap"
+        ),
+        "labeledComparison": (
+            "uv run sim-satellite sam-compare-models "
+            f"--manifest {config.manifest_path} "
+            "--trained-model-id <trained-sam-model-or-checkpoint> "
+            "--output-dir data/sam/compare "
+            "--device cuda"
+        ),
+        "unlabeledBaseline": (
+            "uv run sim-satellite sam-propose "
+            f"--images-manifest {config.sam_unlabeled_manifest_path} "
+            "--output-dir data/sam/openearthmap-unlabeled-baseline "
+            "--model-id facebook/sam2.1-hiera-small "
+            "--model-label baseline "
+            "--device cuda"
+        ),
+        "unlabeledTrained": (
+            "uv run sim-satellite sam-propose "
+            f"--images-manifest {config.sam_unlabeled_manifest_path} "
+            "--output-dir data/sam/openearthmap-unlabeled-trained "
+            "--model-id <trained-sam-model-or-checkpoint> "
+            "--model-label trained "
+            "--device cuda"
+        ),
+    }
+
+
+def _jsonl_record_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
 def _checkpoint_payload(slot: CheckpointSlot, checkpoint_path: Path | None) -> dict[str, Any]:
     return {
         "id": slot.checkpoint_id,
@@ -353,6 +579,40 @@ def _sample_at(samples: Sequence[SatelliteSample], index: int) -> SatelliteSampl
     if index < 0 or index >= len(samples):
         raise HTTPException(status_code=400, detail=f"Sample index out of range: {index}")
     return samples[index]
+
+
+def _sam_unlabeled_at(
+    records: Sequence[SamImageRecord],
+    index: int,
+) -> SamImageRecord:
+    if index < 0 or index >= len(records):
+        raise HTTPException(status_code=400, detail=f"Unlabeled sample index out of range: {index}")
+    return records[index]
+
+
+def _sam_image_reference(
+    samples: Sequence[SatelliteSample],
+    unlabeled_images: Sequence[SamImageRecord],
+    dataset: SamDatasetName,
+    index: int,
+) -> tuple[Path, str]:
+    if dataset == "labeled":
+        sample = _sample_at(samples, index)
+        return sample.image_path, image_key(sample.image_path)
+    record = _sam_unlabeled_at(unlabeled_images, index)
+    return record.image_path, image_key(record.image_path)
+
+
+def _sam_proposals_path(config: WebConfig, dataset: str, source: str) -> Path:
+    if dataset == "labeled" and source == "baseline":
+        return Path(config.sam_labeled_baseline_proposals_path)
+    if dataset == "labeled" and source == "trained":
+        return Path(config.sam_labeled_trained_proposals_path)
+    if dataset == "unlabeled" and source == "baseline":
+        return Path(config.sam_unlabeled_baseline_proposals_path)
+    if dataset == "unlabeled" and source == "trained":
+        return Path(config.sam_unlabeled_trained_proposals_path)
+    raise HTTPException(status_code=400, detail=f"Unknown SAM proposal source: {dataset}/{source}")
 
 
 def _checkpoint_slots(config: WebConfig) -> tuple[CheckpointSlot, ...]:
@@ -609,6 +869,88 @@ def _image_preview_png(sample: SatelliteSample, config: WebConfig) -> bytes:
     return _pil_png(preview)
 
 
+def _sam_image_preview_png(image_path: Path, config: WebConfig) -> bytes:
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail=f"SAM image not found: {image_path}")
+    with Image.open(image_path) as image:
+        preview = image.convert("RGB").resize(
+            (config.display_size, config.display_size),
+            Image.Resampling.BILINEAR,
+        )
+    return _pil_png(preview)
+
+
+def _sam_label_overlay_png(sample: SatelliteSample, config: WebConfig) -> bytes:
+    size = (config.display_size, config.display_size)
+    model_config = ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES))
+    with _sample_mask_image(sample) as mask:
+        resized = mask.resize(size, Image.Resampling.NEAREST)
+        labels = mask_to_class_ids(resized, model_config)
+
+    pixels = []
+    for label in labels:
+        if label == 0:
+            pixels.append((0, 0, 0, 0))
+        else:
+            pixels.append((*MASK_COLORS[label], SAM_LABEL_ALPHA))
+
+    overlay = Image.new("RGBA", size)
+    overlay.putdata(pixels)
+    return _pil_png(overlay)
+
+
+def _sam_proposal_overlay_png(
+    proposals_path: Path,
+    *,
+    image_record_key: str,
+    image_path: Path,
+    config: WebConfig,
+) -> bytes:
+    if not proposals_path.exists():
+        raise HTTPException(status_code=404, detail=f"SAM proposals not found: {proposals_path}")
+    overlay = Image.new("RGBA", (config.display_size, config.display_size), (0, 0, 0, 0))
+    records = _sam_proposal_records_for_image(
+        proposals_path,
+        keys={image_record_key, image_key(image_path)},
+    )
+    for proposal_index, record in enumerate(records):
+        mask_path = _sam_record_mask_path(proposals_path.parent, record)
+        if mask_path is None or not mask_path.exists():
+            continue
+        color = SAM_PROPOSAL_COLORS[proposal_index % len(SAM_PROPOSAL_COLORS)]
+        with Image.open(mask_path) as mask:
+            resized_mask = mask.convert("L").resize(
+                (config.display_size, config.display_size),
+                Image.Resampling.NEAREST,
+            )
+        layer = Image.new("RGBA", overlay.size, (*color, 0))
+        layer.putalpha(resized_mask.point(SAM_PROPOSAL_ALPHA_LUT))
+        overlay.alpha_composite(layer)
+    return _pil_png(overlay)
+
+
+def _sam_proposal_records_for_image(
+    proposals_path: Path,
+    *,
+    keys: set[str],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        record
+        for record in records_from_jsonl(proposals_path)
+        if isinstance(record.get("image_key"), str) and record["image_key"] in keys
+    )
+
+
+def _sam_record_mask_path(root: Path, record: Mapping[str, Any]) -> Path | None:
+    value = record.get("mask")
+    if not isinstance(value, str):
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
 def _sample_mask_image(sample: SatelliteSample) -> Image.Image:
     if sample.mask_path.exists():
         return Image.open(sample.mask_path)
@@ -792,6 +1134,32 @@ def _build_click_command() -> click.Command:
         default=WebConfig.evaluation_log_path,
         show_default=True,
     )
+    @click.option(
+        "--sam-unlabeled-manifest-path",
+        default=WebConfig.sam_unlabeled_manifest_path,
+        show_default=True,
+    )
+    @click.option("--sam-comparison-path", default=WebConfig.sam_comparison_path, show_default=True)
+    @click.option(
+        "--sam-labeled-baseline-proposals-path",
+        default=WebConfig.sam_labeled_baseline_proposals_path,
+        show_default=True,
+    )
+    @click.option(
+        "--sam-labeled-trained-proposals-path",
+        default=WebConfig.sam_labeled_trained_proposals_path,
+        show_default=True,
+    )
+    @click.option(
+        "--sam-unlabeled-baseline-proposals-path",
+        default=WebConfig.sam_unlabeled_baseline_proposals_path,
+        show_default=True,
+    )
+    @click.option(
+        "--sam-unlabeled-trained-proposals-path",
+        default=WebConfig.sam_unlabeled_trained_proposals_path,
+        show_default=True,
+    )
     def command(
         checkpoint_path: str,
         checkpoint_glob: str,
@@ -807,6 +1175,12 @@ def _build_click_command() -> click.Command:
         port: int,
         max_samples: int,
         evaluation_log_path: str,
+        sam_unlabeled_manifest_path: str,
+        sam_comparison_path: str,
+        sam_labeled_baseline_proposals_path: str,
+        sam_labeled_trained_proposals_path: str,
+        sam_unlabeled_baseline_proposals_path: str,
+        sam_unlabeled_trained_proposals_path: str,
     ) -> None:
         serve(
             WebConfig(
@@ -824,6 +1198,12 @@ def _build_click_command() -> click.Command:
                 port=port,
                 max_samples=max_samples,
                 evaluation_log_path=evaluation_log_path,
+                sam_unlabeled_manifest_path=sam_unlabeled_manifest_path,
+                sam_comparison_path=sam_comparison_path,
+                sam_labeled_baseline_proposals_path=sam_labeled_baseline_proposals_path,
+                sam_labeled_trained_proposals_path=sam_labeled_trained_proposals_path,
+                sam_unlabeled_baseline_proposals_path=sam_unlabeled_baseline_proposals_path,
+                sam_unlabeled_trained_proposals_path=sam_unlabeled_trained_proposals_path,
             )
         )
 

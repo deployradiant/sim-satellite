@@ -59,6 +59,113 @@ def test_web_state_and_preview_images(tmp_path: Path, monkeypatch: pytest.Monkey
     assert b"createEvaluationController" in asset.content
 
 
+def test_web_sam_playground_state_and_overlays(tmp_path: Path) -> None:
+    config, mask_path = _write_web_fixture(tmp_path)
+    Image.new("RGB", (2, 2), OPENEARTHMAP_RGB["building"]).save(mask_path)
+    data_dir = Path(config.manifest_path).parent
+    labeled_image_path = data_dir / "images" / "tile.png"
+    unlabeled_image_path = data_dir / "unlabeled" / "loose.png"
+    unlabeled_manifest_path = data_dir / "unlabeled-images.jsonl"
+    unlabeled_image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (2, 2), (50, 90, 130)).save(unlabeled_image_path)
+    unlabeled_manifest_path.write_text(
+        json.dumps(
+            {
+                "image": "unlabeled/loose.png",
+                "split": "unlabeled",
+                "source": "openearthmap-unlabeled",
+                "region_key": "loose-region",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    labeled_baseline = tmp_path / "sam" / "labeled-baseline" / "proposals.jsonl"
+    labeled_trained = tmp_path / "sam" / "labeled-trained" / "proposals.jsonl"
+    unlabeled_baseline = tmp_path / "sam" / "unlabeled-baseline" / "proposals.jsonl"
+    unlabeled_trained = tmp_path / "sam" / "unlabeled-trained" / "proposals.jsonl"
+    _write_sam_proposals(labeled_baseline, labeled_image_path, [255, 0, 0, 0])
+    _write_sam_proposals(labeled_trained, labeled_image_path, [255, 255, 0, 0])
+    _write_sam_proposals(unlabeled_baseline, unlabeled_image_path, [0, 255, 0, 0])
+    _write_sam_proposals(unlabeled_trained, unlabeled_image_path, [0, 255, 255, 0])
+    comparison_path = tmp_path / "sam" / "comparison.json"
+    comparison_path.write_text(
+        json.dumps(
+            {
+                "baseline": {"mean_best_iou": 0.25},
+                "trained": {"mean_best_iou": 0.5},
+                "delta": {
+                    "mean_best_iou": 0.25,
+                    "recall_by_threshold": {"0.50": 0.2},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = web.WebConfig(
+        checkpoint_path=config.checkpoint_path,
+        manifest_path=config.manifest_path,
+        display_size=4,
+        sam_unlabeled_manifest_path=str(unlabeled_manifest_path),
+        sam_comparison_path=str(comparison_path),
+        sam_labeled_baseline_proposals_path=str(labeled_baseline),
+        sam_labeled_trained_proposals_path=str(labeled_trained),
+        sam_unlabeled_baseline_proposals_path=str(unlabeled_baseline),
+        sam_unlabeled_trained_proposals_path=str(unlabeled_trained),
+    )
+    app = web.create_app(config)
+
+    page = _request(app, "GET", "/sam")
+    assert page.status_code == 200
+    assert b"SAM Playground" in page.content
+
+    state = _request(app, "GET", "/api/sam/state")
+    assert state.status_code == 200
+    payload = state.json()
+    assert payload["datasets"]["labeled"]["samples"][0]["name"] == "tile"
+    assert payload["datasets"]["unlabeled"]["samples"][0]["name"] == "loose"
+    assert payload["proposalSources"]["labeled"]["baseline"]["available"] is True
+    assert payload["proposalSources"]["unlabeled"]["trained"]["records"] == 1
+    assert payload["comparison"]["value"]["delta"]["mean_best_iou"] == 0.25
+    assert "sam-compare-models" in payload["commands"]["labeledComparison"]
+
+    image = _request(
+        app,
+        "GET",
+        "/api/sam/image",
+        query_string="dataset=unlabeled&index=0",
+    )
+    assert image.status_code == 200
+    with Image.open(BytesIO(image.content)) as preview:
+        assert preview.size == (4, 4)
+
+    label_overlay = _request(
+        app,
+        "GET",
+        "/api/sam/overlay",
+        query_string="dataset=labeled&source=label&index=0",
+    )
+    assert label_overlay.status_code == 200
+    assert _has_nontransparent_pixels(label_overlay.content)
+
+    proposal_overlay = _request(
+        app,
+        "GET",
+        "/api/sam/overlay",
+        query_string="dataset=unlabeled&source=trained&index=0",
+    )
+    assert proposal_overlay.status_code == 200
+    assert _has_nontransparent_pixels(proposal_overlay.content)
+
+    invalid_label = _request(
+        app,
+        "GET",
+        "/api/sam/overlay",
+        query_string="dataset=unlabeled&source=label&index=0",
+    )
+    assert invalid_label.status_code == 400
+
+
 def test_web_create_app_does_not_load_generator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -626,6 +733,30 @@ def _write_web_fixture(tmp_path: Path) -> tuple[web.WebConfig, Path]:
         ),
         mask_path,
     )
+
+
+def _write_sam_proposals(path: Path, image_path: Path, mask_values: list[int]) -> None:
+    mask_path = path.parent / "masks" / f"{image_path.stem}.png"
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    mask = Image.new("L", (2, 2))
+    mask.putdata(mask_values)
+    mask.save(mask_path)
+    path.write_text(
+        json.dumps(
+            {
+                "image_key": web.image_key(image_path),
+                "mask": str(mask_path.relative_to(path.parent)),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _has_nontransparent_pixels(body: bytes) -> bool:
+    with Image.open(BytesIO(body)) as image:
+        rgba = image.convert("RGBA")
+        return any(pixel[3] > 0 for pixel in _image_data(rgba))
 
 
 def _fake_load_generator(checkpoint_path: str, *, device: str) -> object:

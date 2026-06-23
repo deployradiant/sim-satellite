@@ -89,6 +89,10 @@ image = (
         LOCAL_WEB_STATIC_ROOT / "index.html",
         str(MODAL_PACKAGE_ROOT / "web_static" / "index.html"),
     )
+    .add_local_file(
+        LOCAL_WEB_STATIC_ROOT / "sam.html",
+        str(MODAL_PACKAGE_ROOT / "web_static" / "sam.html"),
+    )
 )
 if LOCAL_MODAL_WEB_DATA_ROOT.exists():
     image = image.add_local_dir(
@@ -239,6 +243,31 @@ def _modal_web_config(config: WebConfig) -> WebConfig:
         port=config.port,
         max_samples=config.max_samples,
         display_size=config.display_size,
+        evaluation_log_path=config.evaluation_log_path,
+        sam_unlabeled_manifest_path=_modal_data_path(
+            config.sam_unlabeled_manifest_path,
+            field_name="sam_unlabeled_manifest_path",
+        ),
+        sam_comparison_path=_modal_data_path(
+            config.sam_comparison_path,
+            field_name="sam_comparison_path",
+        ),
+        sam_labeled_baseline_proposals_path=_modal_data_path(
+            config.sam_labeled_baseline_proposals_path,
+            field_name="sam_labeled_baseline_proposals_path",
+        ),
+        sam_labeled_trained_proposals_path=_modal_data_path(
+            config.sam_labeled_trained_proposals_path,
+            field_name="sam_labeled_trained_proposals_path",
+        ),
+        sam_unlabeled_baseline_proposals_path=_modal_data_path(
+            config.sam_unlabeled_baseline_proposals_path,
+            field_name="sam_unlabeled_baseline_proposals_path",
+        ),
+        sam_unlabeled_trained_proposals_path=_modal_data_path(
+            config.sam_unlabeled_trained_proposals_path,
+            field_name="sam_unlabeled_trained_proposals_path",
+        ),
     )
 
 
