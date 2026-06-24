@@ -80,6 +80,8 @@ def test_sam_classifier_trains_and_predicts(tmp_path: Path) -> None:
     assert checkpoint_path.exists()
     assert predict_result.proposals == 3
     assert predict_result.predictions == 3
+    assert Path(str(predictions[0]["mask"])).is_absolute()
+    assert Path(str(predictions[0]["mask"])).exists()
     assert {record["predicted_class_name"] for record in predictions} <= {
         "unlabeled",
         "bareland",

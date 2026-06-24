@@ -303,7 +303,7 @@ def classify_sam_proposals(config: SamClassifierPredictConfig) -> SamClassifierP
             features = features.to(device)
             probabilities = torch.softmax(model(features), dim=1).cpu()
             for row in probabilities:
-                source_record = records[offset]
+                source_record = _resolve_prediction_record(records[offset], proposals_path.parent)
                 class_id = int(row.argmax().item())
                 predictions.append(
                     {
