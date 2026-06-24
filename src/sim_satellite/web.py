@@ -917,7 +917,7 @@ def _sam_proposal_overlay_png(
         mask_path = _sam_record_mask_path(proposals_path.parent, record)
         if mask_path is None or not mask_path.exists():
             continue
-        color = SAM_PROPOSAL_COLORS[proposal_index % len(SAM_PROPOSAL_COLORS)]
+        color = _sam_record_overlay_color(record, fallback_index=proposal_index)
         with Image.open(mask_path) as mask:
             resized_mask = mask.convert("L").resize(
                 (config.display_size, config.display_size),
@@ -927,6 +927,18 @@ def _sam_proposal_overlay_png(
         layer.putalpha(resized_mask.point(SAM_PROPOSAL_ALPHA_LUT))
         overlay.alpha_composite(layer)
     return _pil_png(overlay)
+
+
+def _sam_record_overlay_color(
+    record: Mapping[str, Any],
+    *,
+    fallback_index: int,
+) -> tuple[int, int, int]:
+    for field in ("predicted_class_id", "class_id"):
+        value = record.get(field)
+        if isinstance(value, int) and 0 <= value < len(MASK_COLORS):
+            return MASK_COLORS[value]
+    return SAM_PROPOSAL_COLORS[fallback_index % len(SAM_PROPOSAL_COLORS)]
 
 
 def _sam_proposal_records_for_image(

@@ -6,6 +6,9 @@ from sim_satellite import __version__
 from sim_satellite.data.openearthmap import cli as openearthmap_cli
 from sim_satellite.data.sam_training import cli as sam_data_cli
 from sim_satellite.infer import cli as infer_cli
+from sim_satellite.sam_classifier import label_cli as sam_classifier_label_cli
+from sim_satellite.sam_classifier import predict_cli as sam_classifier_predict_cli
+from sim_satellite.sam_classifier import train_cli as sam_classifier_train_cli
 from sim_satellite.sam_compare import compare_cli as sam_compare_cli
 from sim_satellite.sam_compare import compare_models_cli as sam_compare_models_cli
 from sim_satellite.sam_compare import evaluate_cli as sam_evaluate_cli
@@ -27,6 +30,9 @@ cli.add_command(sam_propose_cli)
 cli.add_command(sam_evaluate_cli)
 cli.add_command(sam_compare_cli)
 cli.add_command(sam_compare_models_cli)
+cli.add_command(sam_classifier_label_cli)
+cli.add_command(sam_classifier_train_cli)
+cli.add_command(sam_classifier_predict_cli)
 cli.add_command(train_cli)
 cli.add_command(infer_cli)
 cli.add_command(vae_compare_cli)
