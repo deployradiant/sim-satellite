@@ -117,6 +117,9 @@ def label_sam_proposals_for_classifier(
     skipped_small = 0
     skipped_unknown = 0
     skipped_low_purity = 0
+    import numpy as np
+
+    target_label_cache: dict[tuple[str, tuple[int, int]], Any] = {}
 
     for index, proposal in enumerate(proposal_records):
         key = proposal.get("image_key")
@@ -132,30 +135,36 @@ def label_sam_proposals_for_classifier(
         with Image.open(mask_path) as proposal_mask_image:
             proposal_mask = proposal_mask_image.convert("L")
             mask_size = proposal_mask.size
-            binary = [value > 0 for value in _image_data(proposal_mask)]
+            binary = np.asarray(proposal_mask, dtype=np.uint8) > 0
 
-        area = sum(1 for value in binary if value)
+        area = int(binary.sum())
         if area < config.min_mask_pixels:
             skipped_small += 1
             continue
 
-        with Image.open(sample.mask_path) as target_mask:
-            labels = target_mask.resize(mask_size, Image.Resampling.NEAREST)
-            class_ids = mask_to_class_ids(
-                labels,
-                ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),
-            )
+        cache_key = (key, mask_size)
+        class_ids = target_label_cache.get(cache_key)
+        if class_ids is None:
+            with Image.open(sample.mask_path) as target_mask:
+                labels = target_mask.resize(mask_size, Image.Resampling.NEAREST)
+                class_ids = mask_to_class_ids(
+                    labels,
+                    ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),
+                )
+                width, height = mask_size
+                class_ids = np.asarray(class_ids, dtype=np.int64).reshape((height, width))
+            target_label_cache[cache_key] = class_ids
 
-        counts: Counter[int] = Counter(
-            class_id for class_id, selected in zip(class_ids, binary, strict=True) if selected
-        )
+        selected_class_ids = class_ids[binary]
         if not config.include_unlabeled:
-            counts.pop(0, None)
-        if not counts:
+            selected_class_ids = selected_class_ids[selected_class_ids != 0]
+        if selected_class_ids.size == 0:
             skipped_low_purity += 1
             continue
 
-        class_id, class_pixels = counts.most_common(1)[0]
+        counts = np.bincount(selected_class_ids, minlength=len(OPENEARTHMAP_CLASSES))
+        class_id = int(counts.argmax())
+        class_pixels = int(counts[class_id])
         class_fraction = class_pixels / area
         if class_fraction < config.min_class_fraction:
             skipped_low_purity += 1
@@ -353,17 +362,23 @@ class _SamProposalClassificationDataset:
         self.records = tuple(records)
         self.input_size = input_size
         self.torch = torch
+        self._cache: dict[int, tuple[Any, Any]] = {}
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int) -> tuple[Any, Any]:
+        cached = self._cache.get(index)
+        if cached is not None:
+            return cached
         record = self.records[index]
         features = _proposal_features(record, input_size=self.input_size, torch=self.torch)
         class_id = record.get("class_id")
         if not isinstance(class_id, int):
             raise RuntimeError("Classifier record is missing integer class_id")
-        return features, self.torch.tensor(class_id, dtype=self.torch.long)
+        item = features, self.torch.tensor(class_id, dtype=self.torch.long)
+        self._cache[index] = item
+        return item
 
 
 class _SamProposalPredictionDataset:
@@ -471,23 +486,21 @@ def _required_path(record: Mapping[str, Any], field: str) -> Path:
 def _bbox_from_record_or_mask(
     record: Mapping[str, Any],
     *,
-    binary: Sequence[bool],
+    binary: Any,
     size: tuple[int, int],
 ) -> tuple[int, int, int, int]:
     value = record.get("bbox_xyxy")
     if isinstance(value, list) and len(value) == 4:
         return tuple(int(item) for item in value)  # type: ignore[return-value]
 
+    import numpy as np
+
     width, height = size
-    xs: list[int] = []
-    ys: list[int] = []
-    for index, selected in enumerate(binary):
-        if selected:
-            ys.append(index // width)
-            xs.append(index % width)
-    if not xs:
+    selected = np.asarray(binary, dtype=bool).reshape((height, width))
+    ys, xs = np.nonzero(selected)
+    if xs.size == 0:
         return 0, 0, width - 1, height - 1
-    return min(xs), min(ys), max(xs), max(ys)
+    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
 
 def _pil_crop_box(bbox_xyxy: tuple[int, int, int, int]) -> tuple[int, int, int, int]:

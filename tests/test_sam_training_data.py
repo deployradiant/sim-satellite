@@ -8,6 +8,7 @@ from PIL import Image
 
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.prepared import write_prepared_sample
+from sim_satellite.data.sam_records import infer_region_key
 from sim_satellite.data.sam_training import build_sam_training_data
 from sim_satellite.model import ModelConfig
 
@@ -70,6 +71,15 @@ def test_build_sam_training_data_balances_record_limit(tmp_path: Path) -> None:
     ]
     assert result.records == 2
     assert len({record["region_key"] for record in records}) == 2
+
+
+def test_infer_region_key_handles_openearthmap_city_image_layout() -> None:
+    assert (
+        infer_region_key(
+            Path("/data/openearthmap/extracted/OpenEarthMap_wo_xBD/aachen/images/aachen_1.tif")
+        )
+        == "aachen"
+    )
 
 
 def _write_sample(root: Path, *, split: str) -> SatelliteSample:

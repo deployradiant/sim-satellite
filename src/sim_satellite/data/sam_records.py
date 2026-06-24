@@ -202,6 +202,8 @@ def balanced_sam_records(
 
 
 def infer_region_key(path: Path) -> str:
+    if path.parent.name.lower() in {"image", "images", "img", "imgs", "label", "labels"}:
+        return path.parent.parent.name
     parts = path.parts
     for index, part in enumerate(parts):
         if part.lower() in {"train", "val", "valid", "validation", "test"} and index + 1 < len(
