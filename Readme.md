@@ -38,6 +38,23 @@ Final mask-conditioned generation metrics can be enabled with
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
 
+Native satellite VAE training is available as a separate reconstruction audit
+step before latent flow-matching experiments. The 50% OpenEarthMap config trains
+a 4x, 8-channel convolutional VAE on half of the prepared training images,
+evaluates on held-out images from the other half, and optionally compares the
+same crops against the Stable Diffusion VAE baseline:
+
+```bash
+uv run sim-satellite train-vae train.openearthmap-vae-f4-c8-half.json
+```
+
+This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
+`artifacts/`. A local 5k-step MPS smoke run on the prepared OpenEarthMap cache
+used 1,343 train images and 32 held-out validation images. It beat
+`stabilityai/sd-vae-ft-mse` on held-out MSE, PSNR, SSIM, and edge MAE while SD
+still had better mean RGB calibration. Treat this as support for the custom VAE
+direction, not as a final production codec.
+
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
 tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
