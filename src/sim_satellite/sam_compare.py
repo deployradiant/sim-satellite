@@ -399,6 +399,18 @@ def _load_sam2_generator(config: SamProposalConfig) -> Any:
             "SAM 2 is not installed. Install Meta's sam2 package before running SAM proposals."
         ) from exc
 
+    model_path = Path(config.model_id)
+    if model_path.exists():
+        model = _load_sam2_model_from_checkpoint(model_path, device=config.device)
+        return module.SAM2AutomaticMaskGenerator(
+            model,
+            points_per_side=config.points_per_side,
+            pred_iou_thresh=config.pred_iou_thresh,
+            stability_score_thresh=config.stability_score_thresh,
+            crop_n_layers=config.crop_n_layers,
+            min_mask_region_area=config.min_mask_region_area,
+        )
+
     return module.SAM2AutomaticMaskGenerator.from_pretrained(
         config.model_id,
         device=config.device,
@@ -407,6 +419,27 @@ def _load_sam2_generator(config: SamProposalConfig) -> Any:
         stability_score_thresh=config.stability_score_thresh,
         crop_n_layers=config.crop_n_layers,
         min_mask_region_area=config.min_mask_region_area,
+    )
+
+
+def _load_sam2_model_from_checkpoint(checkpoint_path: Path, *, device: str) -> Any:
+    try:
+        import torch
+        from sam2.build_sam import build_sam2
+    except ImportError as exc:
+        raise RuntimeError(
+            "SAM 2 is not installed. Install Meta's sam2 package before loading checkpoints."
+        ) from exc
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    config_file = checkpoint.get("sam2_config_file", "configs/sam2.1/sam2.1_hiera_s.yaml")
+    if not isinstance(config_file, str):
+        raise RuntimeError(f"SAM2 checkpoint has invalid sam2_config_file: {checkpoint_path}")
+    return build_sam2(
+        config_file=config_file,
+        ckpt_path=str(checkpoint_path),
+        device=device,
+        mode="eval",
     )
 
 
