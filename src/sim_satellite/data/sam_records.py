@@ -71,8 +71,13 @@ class SamMaskRecord:
     class_name: str | None = None
     prepared_path: Path | None = None
     source_mask_path: Path | None = None
+    parent_image_path: Path | None = None
     positive_points_xy: tuple[tuple[int, int], ...] = ()
     negative_points_xy: tuple[tuple[int, int], ...] = ()
+    tile_row: int | None = None
+    tile_col: int | None = None
+    tile_grid: int | None = None
+    tile_xyxy: tuple[int, int, int, int] | None = None
     predicted_iou: float | None = None
     stability_score: float | None = None
     crop_box_xywh: tuple[float, float, float, float] | None = None
@@ -103,10 +108,20 @@ class SamMaskRecord:
             value["prepared"] = _relative_or_absolute(self.prepared_path, root)
         if self.source_mask_path is not None:
             value["source_mask"] = _relative_or_absolute(self.source_mask_path, root)
+        if self.parent_image_path is not None:
+            value["parent_image"] = _relative_or_absolute(self.parent_image_path, root)
         if self.positive_points_xy:
             value["positive_points_xy"] = [list(point) for point in self.positive_points_xy]
         if self.negative_points_xy:
             value["negative_points_xy"] = [list(point) for point in self.negative_points_xy]
+        if self.tile_row is not None:
+            value["tile_row"] = self.tile_row
+        if self.tile_col is not None:
+            value["tile_col"] = self.tile_col
+        if self.tile_grid is not None:
+            value["tile_grid"] = self.tile_grid
+        if self.tile_xyxy is not None:
+            value["tile_xyxy"] = list(self.tile_xyxy)
         if self.predicted_iou is not None:
             value["predicted_iou"] = self.predicted_iou
         if self.stability_score is not None:

@@ -28,6 +28,7 @@ def test_build_sam_training_data_writes_binary_class_records(tmp_path: Path) -> 
     )
 
     assert result.records == 2
+    assert result.tile_images == 0
     assert result.mask_files == 2
     assert result.skipped_empty_or_small_masks == 6
 
@@ -71,6 +72,38 @@ def test_build_sam_training_data_balances_record_limit(tmp_path: Path) -> None:
     ]
     assert result.records == 2
     assert len({record["region_key"] for record in records}) == 2
+
+
+def test_build_sam_training_data_can_split_images_into_tiles(tmp_path: Path) -> None:
+    sample = _write_sample(tmp_path / "OpenEarthMap" / "train" / "abancay", split="train")
+    manifest_path = tmp_path / "source" / "manifest.jsonl"
+    output_dir = tmp_path / "sam"
+    write_manifest((sample,), manifest_path)
+
+    result = build_sam_training_data(
+        manifest_path,
+        output_dir,
+        min_mask_pixels=1,
+        tile_grid=2,
+    )
+
+    records = [
+        json.loads(line)
+        for line in (output_dir / "records.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert result.records == 2
+    assert result.tile_images == 4
+    assert {record["tile_grid"] for record in records} == {2}
+    assert {record["tile_row"] for record in records} == {0}
+    assert {record["tile_col"] for record in records} == {0}
+    assert records[0]["tile_xyxy"] == [0, 0, 4, 4]
+    assert records[0]["parent_image"].endswith("images/tile.png")
+    assert records[0]["label_source"] == "openearthmap-ground-truth-tile"
+
+    tile_image = Image.open(output_dir / records[0]["image"])
+    tile_mask = Image.open(output_dir / records[0]["mask"])
+    assert tile_image.size == (4, 4)
+    assert tile_mask.size == (4, 4)
 
 
 def test_infer_region_key_handles_openearthmap_city_image_layout() -> None:
