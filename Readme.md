@@ -1,6 +1,8 @@
 # Sim Satellite
 
 This project is intended to be an end-to-end exploration of diffusion models and steering.
+It is a proof-of-concept research project, not a commercial product or commercial
+dataset pipeline.
 
 The output is a simple diffusion model that has been trained on satellite images. The satellite images have been labelled to indicate where a house, tree, road etc is. This allows us to create fully fictious satellite landscapes from the diffusion model.
 
@@ -103,6 +105,13 @@ under `data/openearthmap/` for local inspection and debugging. Modal runs prepar
 their own copy under `/data/openearthmap` on remote local scratch disk. Prepared
 samples track the source dataset, split, image path, mask path, and preparation
 metadata.
+
+Dataset licenses vary by source and may restrict commercial use. OpenEarthMap
+label data follows the license of each source image, with some source regions
+under non-commercial Creative Commons terms. Any future dataset import should
+document the source license, preserve attribution metadata, and be treated as
+proof-of-concept/non-commercial unless every included source is explicitly
+compatible with broader use.
 
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.
