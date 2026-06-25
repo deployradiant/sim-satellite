@@ -14,6 +14,7 @@ from sim_satellite.sam_compare import compare_models_cli as sam_compare_models_c
 from sim_satellite.sam_compare import evaluate_cli as sam_evaluate_cli
 from sim_satellite.sam_compare import propose_cli as sam_propose_cli
 from sim_satellite.sam_finetune import cli as sam_finetune_cli
+from sim_satellite.segmentation_compare import cli as segmentation_compare_cli
 from sim_satellite.train import cli as train_cli
 from sim_satellite.vae_compare import cli as vae_compare_cli
 from sim_satellite.web import cli as web_cli
@@ -35,6 +36,7 @@ cli.add_command(sam_finetune_cli)
 cli.add_command(sam_classifier_label_cli)
 cli.add_command(sam_classifier_train_cli)
 cli.add_command(sam_classifier_predict_cli)
+cli.add_command(segmentation_compare_cli)
 cli.add_command(train_cli)
 cli.add_command(infer_cli)
 cli.add_command(vae_compare_cli)
