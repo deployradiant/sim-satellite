@@ -3,6 +3,7 @@
 import click
 
 from sim_satellite import __version__
+from sim_satellite.data.loveda import cli as loveda_cli
 from sim_satellite.data.openearthmap import cli as openearthmap_cli
 from sim_satellite.infer import cli as infer_cli
 from sim_satellite.train import cli as train_cli
@@ -15,6 +16,7 @@ def cli() -> None:
     """Explore conditional satellite-image diffusion workflows."""
 
 
+cli.add_command(loveda_cli)
 cli.add_command(openearthmap_cli)
 cli.add_command(train_cli)
 cli.add_command(infer_cli)
