@@ -20,7 +20,7 @@ from torch.nn import functional as F
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.prepared import load_prepared_sample
-from sim_satellite.image_metrics import edge_map, reconstruction_metrics
+from sim_satellite.image_metrics import reconstruction_metrics
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
 
@@ -44,7 +44,8 @@ class VAETrainingConfig:
     downsample_factor: int = 4
     kl_weight: float = 1e-6
     mse_weight: float = 0.2
-    edge_weight: float = 0.1
+    reconstruction_exponential_weight: float = 0.5
+    reconstruction_exponential_scale: float = 12.0
     device: str = "auto"
     cache_images: int = 128
     log_every: int = 250
@@ -258,9 +259,11 @@ def _validate_config(config: VAETrainingConfig) -> None:
             raise ValueError(f"{name} must be positive")
     if config.train_fraction <= 0.0 or config.train_fraction >= 1.0:
         raise ValueError("train_fraction must be greater than 0 and less than 1")
-    for name in ("kl_weight", "mse_weight", "edge_weight"):
+    for name in ("kl_weight", "mse_weight", "reconstruction_exponential_weight"):
         if getattr(config, name) < 0.0:
             raise ValueError(f"{name} must be non-negative")
+    if config.reconstruction_exponential_scale <= 0.0:
+        raise ValueError("reconstruction_exponential_scale must be positive")
     if config.downsample_factor != 4:
         raise ValueError("downsample_factor must be 4")
     if config.image_size % config.downsample_factor != 0:
@@ -347,10 +350,37 @@ def _vae_losses(
 ) -> dict[str, torch.Tensor]:
     l1 = F.l1_loss(recon, real)
     mse = F.mse_loss(recon, real)
-    edge = F.l1_loss(edge_map(_to_unit(recon), torch=torch), edge_map(_to_unit(real), torch=torch))
+    recon_unit = _to_unit(recon)
+    real_unit = _to_unit(real)
+    reconstruction_exponential = _reconstruction_exponential_loss(
+        real_unit,
+        recon_unit,
+        scale=config.reconstruction_exponential_scale,
+    )
     kl = -0.5 * torch.mean(1 + logvar - mu.square() - logvar.exp())
-    loss = l1 + config.mse_weight * mse + config.edge_weight * edge + config.kl_weight * kl
-    return {"loss": loss, "l1": l1, "mse": mse, "edge": edge, "kl": kl}
+    loss = (
+        l1
+        + config.mse_weight * mse
+        + config.reconstruction_exponential_weight * reconstruction_exponential
+        + config.kl_weight * kl
+    )
+    return {
+        "loss": loss,
+        "l1": l1,
+        "mse": mse,
+        "reconstruction_exponential": reconstruction_exponential,
+        "kl": kl,
+    }
+
+
+def _reconstruction_exponential_loss(
+    real_unit: torch.Tensor,
+    recon_unit: torch.Tensor,
+    *,
+    scale: float,
+) -> torch.Tensor:
+    per_sample_mae = (real_unit - recon_unit).abs().mean(dim=(1, 2, 3))
+    return torch.expm1(per_sample_mae * scale).mean() / scale
 
 
 def _custom_reconstruct(
@@ -501,13 +531,26 @@ def _error_to_pil(real: torch.Tensor, reconstructed: torch.Tensor) -> Image.Imag
 
 
 @click.command("train-vae", help="Train the native satellite VAE from a JSON config file.")
+@click.option(
+    "--target",
+    type=click.Choice(["local", "modal"]),
+    default="local",
+    show_default=True,
+    help="Execution target.",
+)
 @click.argument(
     "config_path",
     type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
 )
-def cli(config_path: Path) -> None:
+def cli(target: str, config_path: Path) -> None:
     try:
         config = load_vae_training_config_file(config_path)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise click.ClickException(str(error)) from error
-    click.echo(json.dumps(asdict(run_vae_training(config)), indent=2))
+    if target == "modal":
+        from sim_satellite.modal_app import run_vae_training_target
+
+        result = run_vae_training_target(config)
+    else:
+        result = asdict(run_vae_training(config))
+    click.echo(json.dumps(result, indent=2))

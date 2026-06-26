@@ -43,6 +43,32 @@ def test_vae_training_config_validates_split_bounds() -> None:
         load_vae_training_config_values({"train_fraction": 1.0})
 
 
+def test_vae_training_config_validates_exponential_reconstruction_settings() -> None:
+    with pytest.raises(ValueError, match="reconstruction_exponential_weight"):
+        load_vae_training_config_values({"reconstruction_exponential_weight": -0.1})
+    with pytest.raises(ValueError, match="reconstruction_exponential_scale"):
+        load_vae_training_config_values({"reconstruction_exponential_scale": 0.0})
+
+
+def test_exponential_reconstruction_loss_rewards_near_exact_reconstruction() -> None:
+    real = torch.zeros(2, 3, 8, 8)
+    one_percent_error = torch.full_like(real[:1], 0.01)
+    five_percent_error = torch.full_like(real[1:], 0.05)
+
+    small = vae_training._reconstruction_exponential_loss(
+        real[:1],
+        one_percent_error,
+        scale=12.0,
+    )
+    large = vae_training._reconstruction_exponential_loss(
+        real[1:],
+        five_percent_error,
+        scale=12.0,
+    )
+
+    assert large > small * 5.0
+
+
 def test_sd_vae_comparison_reports_missing_optional_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

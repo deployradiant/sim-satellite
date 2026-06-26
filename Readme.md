@@ -47,13 +47,24 @@ evaluates on held-out images from the other half:
 uv run sim-satellite train-vae train.openearthmap-vae-f4-c16-half.json
 ```
 
+For longer VAE runs, use the Modal/H100 target:
+
+```bash
+uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c16-half.json
+```
+
 This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
 `artifacts/`. Local sweeps on the prepared OpenEarthMap cache used 1,343 train
-images and up to 96 held-out validation images. The best current candidate uses
-16 latent channels, 32 hidden channels, `kl_weight=1e-6`, `edge_weight=0.1`, and
-`learning_rate=1.5e-4`. Treat this as support for the custom VAE direction, not
+images and up to 96 held-out validation images. The current config uses 16
+latent channels, 32 hidden channels, `kl_weight=1e-6`,
+`reconstruction_exponential_weight=0.5`, `reconstruction_exponential_scale=12.0`,
+and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction, not
 as a final production codec. Stable Diffusion VAE comparison remains an optional
 audit path when `diffusers` is installed separately and `compare_sd_vae=true`.
+`reconstruction_exponential_weight` and `reconstruction_exponential_scale`
+control a nonlinear reconstruction term that makes 99% reconstructions worth
+disproportionately more than merely acceptable reconstructions, without adding a
+separate hand-tuned sharpness loss.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared

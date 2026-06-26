@@ -9,6 +9,7 @@ import pytest
 from sim_satellite import modal_app
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
+from sim_satellite.vae_training import VAETrainingConfig
 from sim_satellite.web import WebConfig
 
 
@@ -190,6 +191,46 @@ def test_modal_inference_enters_app_run_with_valid_data(
     }
 
 
+def test_modal_vae_training_enters_app_run_with_valid_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
+    fake_app = _FakeApp()
+    fake_train_vae_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, train_vae_remote=fake_train_vae_remote)
+
+    result = modal_app.run_vae_training_target(
+        VAETrainingConfig(
+            manifest_path="data/openearthmap/manifest.jsonl",
+            checkpoint_path="artifacts/vae/custom.pt",
+            metrics_path="artifacts/vae/metrics.json",
+            grid_path="artifacts/vae/grid.png",
+        )
+    )
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_app.enter_calls == 1
+    assert fake_app.exit_calls == 1
+    assert fake_train_vae_remote.received == {
+        **asdict(
+            VAETrainingConfig(
+                manifest_path="data/openearthmap/manifest.jsonl",
+                checkpoint_path="artifacts/vae/custom.pt",
+                metrics_path="artifacts/vae/metrics.json",
+                grid_path="artifacts/vae/grid.png",
+            )
+        ),
+        "device": "cuda",
+        "checkpoint_path": "/artifacts/vae/custom.pt",
+        "manifest_path": "/data/openearthmap/manifest.jsonl",
+        "metrics_path": "/artifacts/vae/metrics.json",
+        "grid_path": "/artifacts/vae/grid.png",
+    }
+
+
 def test_modal_web_config_uses_artifact_checkpoint_and_remote_local_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -245,12 +286,15 @@ def _install_modal_fakes(
     fake_app: _FakeApp,
     *,
     train_remote: object | None = None,
+    train_vae_remote: object | None = None,
     infer_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
+    train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
     infer_remote = infer_remote if infer_remote is not None else object()
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
+    monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
 
 
@@ -280,13 +324,27 @@ class _FakeApp:
 
 
 class _FakeRemote:
-    def __init__(self, app: _FakeApp, result: dict[str, str]) -> None:
+    def __init__(self, app: _FakeApp, result: dict[str, object]) -> None:
         self.app = app
         self.result = result
         self.received: dict[str, object] | None = None
 
-    def remote(self, config: dict[str, object]) -> dict[str, str]:
+    def remote(self, config: dict[str, object]) -> dict[str, object]:
         assert self.app.enter_calls == 1
         assert self.app.exit_calls == 0
         self.received = config
+        return self.result
+
+    def spawn(self, config: dict[str, object]) -> _FakeFunctionCall:
+        assert self.app.enter_calls == 1
+        assert self.app.exit_calls == 0
+        self.received = config
+        return _FakeFunctionCall(self.result)
+
+
+class _FakeFunctionCall:
+    def __init__(self, result: dict[str, object]) -> None:
+        self.result = result
+
+    def get(self) -> dict[str, object]:
         return self.result
