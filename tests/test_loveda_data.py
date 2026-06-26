@@ -79,15 +79,20 @@ def test_prepare_loveda_reports_missing_masks(tmp_path: Path) -> None:
     assert result.samples == 1
 
 
-def test_prepare_loveda_rejects_unknown_mask_values(tmp_path: Path) -> None:
+def test_prepare_loveda_maps_unknown_mask_values_to_unlabeled(tmp_path: Path) -> None:
     data_dir = tmp_path / "loveda"
     image_path = data_dir / "extracted" / "Train" / "Urban" / "images_png" / "tile.png"
     mask_path = data_dir / "extracted" / "Train" / "Urban" / "masks_png" / "tile.png"
     _write_rgb_image(image_path)
     _write_loveda_mask(mask_path, [2, 3, 7, 8])
 
-    with pytest.raises(ValueError, match="unexpected class ids"):
-        download_and_prepare_loveda(data_dir, download=False, extract=False)
+    result = download_and_prepare_loveda(data_dir, download=False, extract=False)
+    samples = read_manifest(result.manifest_path)
+
+    assert result.unknown_mask_pixels == 1
+    assert result.unknown_mask_values == {8: 1}
+    with Image.open(samples[0].mask_path) as remapped:
+        assert mask_to_class_ids(remapped, ModelConfig(mask_channels=9)) == [8, 4, 7, 0]
 
 
 def test_prepare_loveda_rejects_image_dirs_without_masks(tmp_path: Path) -> None:

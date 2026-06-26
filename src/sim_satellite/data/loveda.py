@@ -62,6 +62,8 @@ class LoveDAResult:
     scanned_images: int
     missing_masks: int
     image_dirs_without_masks: int
+    unknown_mask_pixels: int
+    unknown_mask_values: dict[int, int]
     split_counts: dict[str, int]
 
 
@@ -89,6 +91,12 @@ class _LoveDAPaths:
     remapped_dir: Path
     prepared_dir: Path
     manifest_path: Path
+
+
+@dataclass(frozen=True)
+class _LoveDAPrepare:
+    samples: tuple[SatelliteSample, ...]
+    unknown_mask_values: dict[int, int]
 
 
 def download_and_prepare_loveda(
@@ -140,7 +148,7 @@ def download_and_prepare_loveda(
     if validate_official_counts:
         _validate_official_counts(scan.split_counts)
 
-    prepared_samples = _prepare_sample_data(
+    prepared = _prepare_sample_data(
         scan.samples,
         remapped_dir=paths.remapped_dir,
         prepared_dir=paths.prepared_dir,
@@ -148,13 +156,21 @@ def download_and_prepare_loveda(
         force=force_prepared,
         progress=progress,
     )
-    write_manifest(prepared_samples, paths.manifest_path)
+    write_manifest(prepared.samples, paths.manifest_path)
+    unknown_mask_pixels = sum(prepared.unknown_mask_values.values())
+    if prepared.unknown_mask_values:
+        _report(
+            progress,
+            "Mapped unexpected LoveDA mask ids to unlabeled: "
+            f"{_format_counts(prepared.unknown_mask_values)}",
+        )
     _report(
         progress,
         "Done: "
-        f"{len(prepared_samples)} samples, "
+        f"{len(prepared.samples)} samples, "
         f"{scan.scanned_images} images scanned, "
-        f"{scan.missing_masks} images skipped without masks",
+        f"{scan.missing_masks} images skipped without masks, "
+        f"{unknown_mask_pixels} unexpected mask pixels mapped to unlabeled",
     )
 
     return LoveDAResult(
@@ -163,11 +179,13 @@ def download_and_prepare_loveda(
         remapped_dir=paths.remapped_dir,
         prepared_dir=paths.prepared_dir,
         manifest_path=paths.manifest_path,
-        samples=len(prepared_samples),
-        prepared_samples=len(prepared_samples),
+        samples=len(prepared.samples),
+        prepared_samples=len(prepared.samples),
         scanned_images=scan.scanned_images,
         missing_masks=scan.missing_masks,
         image_dirs_without_masks=scan.image_dirs_without_masks,
+        unknown_mask_pixels=unknown_mask_pixels,
+        unknown_mask_values=prepared.unknown_mask_values,
         split_counts=scan.split_counts,
     )
 
@@ -210,19 +228,34 @@ def scan_loveda(
     )
 
 
-def remap_loveda_mask(mask_path: Path, output_path: Path, *, force: bool = False) -> Path:
+def remap_loveda_mask(
+    mask_path: Path,
+    output_path: Path,
+    *,
+    force: bool = False,
+    unknown_counts: Counter[int] | None = None,
+) -> Path:
     if output_path.exists() and not force:
         return output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     table = [LOVEDA_TO_OPENEARTHMAP.get(value, 0) for value in range(256)]
     with Image.open(mask_path) as mask:
-        class_id_mask = _loveda_class_id_mask(mask, mask_path=mask_path)
+        class_id_mask = _loveda_class_id_mask(
+            mask,
+            mask_path=mask_path,
+            unknown_counts=unknown_counts,
+        )
         remapped = class_id_mask.point(table, mode="L")
         remapped.save(output_path)
     return output_path
 
 
-def _loveda_class_id_mask(mask: Image.Image, *, mask_path: Path) -> Image.Image:
+def _loveda_class_id_mask(
+    mask: Image.Image,
+    *,
+    mask_path: Path,
+    unknown_counts: Counter[int] | None,
+) -> Image.Image:
     if mask.mode == "L":
         class_id_mask = mask.copy()
     elif mask.mode == "P":
@@ -233,21 +266,19 @@ def _loveda_class_id_mask(mask: Image.Image, *, mask_path: Path) -> Image.Image:
             f"LoveDA mask must store class ids in L or P mode: {mask_path} has mode {mask.mode!r}"
         )
 
-    unexpected = _unexpected_loveda_values(class_id_mask)
-    if unexpected:
-        values = ", ".join(str(value) for value in unexpected[:8])
-        suffix = "" if len(unexpected) <= 8 else ", ..."
-        raise ValueError(
-            f"LoveDA mask contains unexpected class ids in {mask_path}: {values}{suffix}"
-        )
+    unexpected = _unexpected_loveda_value_counts(class_id_mask)
+    if unexpected and unknown_counts is not None:
+        unknown_counts.update(unexpected)
     return class_id_mask
 
 
-def _unexpected_loveda_values(mask: Image.Image) -> list[int]:
+def _unexpected_loveda_value_counts(mask: Image.Image) -> dict[int, int]:
     histogram = mask.histogram()[:256]
-    return [
-        value for value, count in enumerate(histogram) if count and value not in LOVEDA_MASK_VALUES
-    ]
+    return {
+        value: count
+        for value, count in enumerate(histogram)
+        if count and value not in LOVEDA_MASK_VALUES
+    }
 
 
 def _prepare_sample_data(
@@ -258,7 +289,7 @@ def _prepare_sample_data(
     extracted_dir: Path,
     force: bool,
     progress: ProgressReporter | None,
-) -> tuple[SatelliteSample, ...]:
+) -> _LoveDAPrepare:
     import torch
 
     from sim_satellite.data.prepared import write_prepared_sample
@@ -266,11 +297,13 @@ def _prepare_sample_data(
 
     config = ModelConfig(mask_channels=len(OPENEARTHMAP_CLASS_IDS))
     prepared_samples: list[SatelliteSample] = []
+    unknown_counts: Counter[int] = Counter()
     for index, sample in enumerate(samples, start=1):
         remapped_mask = remap_loveda_mask(
             sample.mask_path,
             _derived_path(sample.mask_path, source_dir=extracted_dir, target_dir=remapped_dir),
             force=force,
+            unknown_counts=unknown_counts,
         )
         prepared = SatelliteSample(
             image_path=sample.image_path,
@@ -285,7 +318,10 @@ def _prepare_sample_data(
         prepared_samples.append(prepared)
         if _should_report(index, len(samples)):
             _report(progress, f"Prepared {index}/{len(samples)} LoveDA samples")
-    return tuple(prepared_samples)
+    return _LoveDAPrepare(
+        samples=tuple(prepared_samples),
+        unknown_mask_values=dict(sorted(unknown_counts.items())),
+    )
 
 
 def _download(
@@ -472,6 +508,10 @@ def _report(progress: ProgressReporter | None, message: str) -> None:
         progress(message)
 
 
+def _format_counts(counts: dict[int, int]) -> str:
+    return ", ".join(f"{value}={count}" for value, count in sorted(counts.items()))
+
+
 def _build_click_command():
     import click
 
@@ -519,6 +559,8 @@ def _build_click_command():
         click.echo(f"prepared_samples={result.prepared_samples}")
         click.echo(f"scanned_images={result.scanned_images}")
         click.echo(f"missing_masks={result.missing_masks}")
+        click.echo(f"unknown_mask_pixels={result.unknown_mask_pixels}")
+        click.echo(f"unknown_mask_values={result.unknown_mask_values}")
         click.echo(f"split_counts={result.split_counts}")
 
     return command
