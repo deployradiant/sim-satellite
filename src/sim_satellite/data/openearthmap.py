@@ -10,34 +10,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from sim_satellite.data.classes import OPENEARTHMAP_CLASSES
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 
 OPENEARTHMAP_URL = "https://zenodo.org/records/7223446/files/OpenEarthMap.zip?download=1"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 MASK_SUFFIXES = {".png", ".tif", ".tiff"}
-OPENEARTHMAP_CLASSES = (
-    "unlabeled",
-    "bareland",
-    "rangeland",
-    "developed space",
-    "road",
-    "tree",
-    "water",
-    "agriculture land",
-    "building",
-)
-OPENEARTHMAP_CLASS_IDS = {name: index for index, name in enumerate(OPENEARTHMAP_CLASSES)}
-OPENEARTHMAP_RGB = {
-    "unlabeled": (0, 0, 0),
-    "bareland": (128, 0, 0),
-    "rangeland": (0, 255, 36),
-    "developed space": (148, 148, 148),
-    "road": (255, 255, 255),
-    "tree": (34, 97, 38),
-    "water": (0, 69, 255),
-    "agriculture land": (75, 181, 73),
-    "building": (222, 31, 7),
-}
 EXTRACT_COMPLETE_MARKER = ".openearthmap-extract-complete.json"
 EXTRACT_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 ProgressReporter = Callable[[str], None]

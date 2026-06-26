@@ -12,8 +12,8 @@ import torch
 from PIL import Image
 
 from sim_satellite import web
+from sim_satellite.data.classes import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.loader import SatelliteSample
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.prepared import write_prepared_sample
 from sim_satellite.infer import GenerationConfig
 from sim_satellite.model import ModelConfig

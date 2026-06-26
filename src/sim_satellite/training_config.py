@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
+from sim_satellite.data.classes import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.model import ModelConfig
 
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"

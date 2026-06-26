@@ -79,6 +79,41 @@ def test_prepare_loveda_reports_missing_masks(tmp_path: Path) -> None:
     assert result.samples == 1
 
 
+def test_prepare_loveda_rejects_unknown_mask_values(tmp_path: Path) -> None:
+    data_dir = tmp_path / "loveda"
+    image_path = data_dir / "extracted" / "Train" / "Urban" / "images_png" / "tile.png"
+    mask_path = data_dir / "extracted" / "Train" / "Urban" / "masks_png" / "tile.png"
+    _write_rgb_image(image_path)
+    _write_loveda_mask(mask_path, [2, 3, 7, 8])
+
+    with pytest.raises(ValueError, match="unexpected class ids"):
+        download_and_prepare_loveda(data_dir, download=False, extract=False)
+
+
+def test_prepare_loveda_rejects_image_dirs_without_masks(tmp_path: Path) -> None:
+    data_dir = tmp_path / "loveda"
+    _write_rgb_image(data_dir / "extracted" / "Train" / "Urban" / "images_png" / "tile.png")
+
+    with pytest.raises(RuntimeError, match="image directories without matching masks"):
+        download_and_prepare_loveda(data_dir, download=False, extract=False)
+
+
+def test_prepare_loveda_can_require_official_counts(tmp_path: Path) -> None:
+    data_dir = tmp_path / "loveda"
+    image_path = data_dir / "extracted" / "Train" / "Urban" / "images_png" / "tile.png"
+    mask_path = data_dir / "extracted" / "Train" / "Urban" / "masks_png" / "tile.png"
+    _write_rgb_image(image_path)
+    _write_loveda_mask(mask_path, [2, 3, 6, 7])
+
+    with pytest.raises(RuntimeError, match="official train\\+val layout"):
+        download_and_prepare_loveda(
+            data_dir,
+            download=False,
+            extract=False,
+            validate_official_counts=True,
+        )
+
+
 def test_prepare_loveda_rejects_when_no_pairs_are_found(tmp_path: Path) -> None:
     data_dir = tmp_path / "loveda"
     (data_dir / "extracted" / "Train" / "Urban" / "images_png").mkdir(parents=True)
@@ -101,6 +136,34 @@ def test_prepare_loveda_rejects_unsafe_zip_members(tmp_path: Path) -> None:
         download_and_prepare_loveda(data_dir, download=False, extract=True)
 
     assert not (data_dir.parent / "escape.txt").exists()
+
+
+def test_prepare_loveda_replaces_partial_extraction_cache(tmp_path: Path) -> None:
+    data_dir = tmp_path / "loveda"
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    with zipfile.ZipFile(raw_dir / "Train.zip", "w") as archive:
+        archive.writestr("Train/Urban/images_png/tile.png", _png_bytes("RGB", (1, 2, 3)))
+        archive.writestr("Train/Urban/masks_png/tile.png", _png_bytes("L", 2))
+    with zipfile.ZipFile(raw_dir / "Val.zip", "w") as archive:
+        archive.writestr("Val/Rural/images_png/tile.png", _png_bytes("RGB", (4, 5, 6)))
+        archive.writestr("Val/Rural/masks_png/tile.png", _png_bytes("L", 6))
+
+    stale_path = data_dir / "extracted" / "stale.txt"
+    _touch(stale_path)
+
+    result = download_and_prepare_loveda(data_dir, download=False, extract=True)
+    samples = read_manifest(result.manifest_path)
+
+    assert not stale_path.exists()
+    assert result.samples == 2
+    assert {sample.split for sample in samples} == {"train", "val"}
+    assert (data_dir / "extracted" / ".loveda-extract-complete.json").exists()
+
+
+def _touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fixture")
 
 
 def _write_rgb_image(path: Path) -> None:

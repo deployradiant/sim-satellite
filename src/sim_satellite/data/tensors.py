@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image
 
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS, OPENEARTHMAP_RGB
+from sim_satellite.data.classes import OPENEARTHMAP_CLASS_IDS, OPENEARTHMAP_RGB
 from sim_satellite.model import ModelConfig
 
 _RGB_CLASS_IDS = {rgb: OPENEARTHMAP_CLASS_IDS[name] for name, rgb in OPENEARTHMAP_RGB.items()}

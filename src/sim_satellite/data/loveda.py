@@ -7,31 +7,34 @@ extracted images, remapped masks, and prepared tensors under ``data/loveda/``.
 
 from __future__ import annotations
 
+import json
 import shutil
 import urllib.request
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
 
+from sim_satellite.data.classes import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.loader import SatelliteSample, write_manifest
-from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 
 LOVEDA_URLS = {
     "train": "https://zenodo.org/records/5706578/files/Train.zip?download=1",
     "val": "https://zenodo.org/records/5706578/files/Val.zip?download=1",
 }
 LOVEDA_EXPECTED_LABELED_SAMPLES = 4191
-LOVEDA_TOTAL_IMAGES = 5987
+LOVEDA_EXPECTED_SPLIT_COUNTS = {"train": 2522, "val": 1669}
 LOVEDA_LICENSE = (
     "Academic-only/non-commercial; Zenodo description states CC BY-NC-SA 4.0 "
     "and Google Earth terms apply to source imagery."
 )
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 MASK_SUFFIXES = {".png", ".tif", ".tiff"}
+EXTRACT_COMPLETE_MARKER = ".loveda-extract-complete.json"
 ProgressReporter = Callable[[str], None]
 
 LOVEDA_TO_OPENEARTHMAP = {
@@ -44,16 +47,7 @@ LOVEDA_TO_OPENEARTHMAP = {
     6: OPENEARTHMAP_CLASS_IDS["tree"],
     7: OPENEARTHMAP_CLASS_IDS["agriculture land"],
 }
-LOVEDA_CLASS_MAP = {
-    "no-data": "unlabeled",
-    "background": "unlabeled",
-    "building": "building",
-    "road": "road",
-    "water": "water",
-    "barren": "bareland",
-    "forest": "tree",
-    "agriculture": "agriculture land",
-}
+LOVEDA_MASK_VALUES = frozenset(LOVEDA_TO_OPENEARTHMAP)
 
 
 @dataclass(frozen=True)
@@ -67,6 +61,7 @@ class LoveDAResult:
     prepared_samples: int
     scanned_images: int
     missing_masks: int
+    image_dirs_without_masks: int
     split_counts: dict[str, int]
 
 
@@ -75,6 +70,7 @@ class LoveDAScan:
     samples: tuple[_LoveDAPair, ...]
     scanned_images: int
     missing_masks: int
+    image_dirs_without_masks: int
     split_counts: dict[str, int]
 
 
@@ -103,6 +99,7 @@ def download_and_prepare_loveda(
     force_download: bool = False,
     force_extract: bool = False,
     force_prepared: bool = False,
+    validate_official_counts: bool = False,
     progress: ProgressReporter | None = None,
 ) -> LoveDAResult:
     paths = _paths(data_dir)
@@ -133,8 +130,15 @@ def download_and_prepare_loveda(
         _report(progress, f"Skipping extraction; using {paths.extracted_dir}")
 
     scan = scan_loveda(paths.extracted_dir, progress=progress)
+    if scan.image_dirs_without_masks:
+        raise RuntimeError(
+            "LoveDA scan found image directories without matching masks: "
+            f"{scan.image_dirs_without_masks}"
+        )
     if not scan.samples:
         raise RuntimeError(f"No LoveDA image/mask pairs found under {paths.extracted_dir}")
+    if validate_official_counts:
+        _validate_official_counts(scan.split_counts)
 
     prepared_samples = _prepare_sample_data(
         scan.samples,
@@ -163,6 +167,7 @@ def download_and_prepare_loveda(
         prepared_samples=len(prepared_samples),
         scanned_images=scan.scanned_images,
         missing_masks=scan.missing_masks,
+        image_dirs_without_masks=scan.image_dirs_without_masks,
         split_counts=scan.split_counts,
     )
 
@@ -177,12 +182,14 @@ def scan_loveda(
     split_counts: Counter[str] = Counter()
     scanned_images = 0
     missing_masks = 0
+    image_dirs_without_masks = 0
 
     image_dirs = sorted(path for path in root.rglob("*") if _is_image_dir(path))
     _report(progress, f"Found {len(image_dirs)} LoveDA image directories")
     for image_dir in image_dirs:
         mask_dir = _matching_mask_dir(image_dir)
         if mask_dir is None:
+            image_dirs_without_masks += 1
             continue
         for image_path in sorted(_iter_files(image_dir, IMAGE_SUFFIXES)):
             scanned_images += 1
@@ -198,6 +205,7 @@ def scan_loveda(
         samples=tuple(pairs),
         scanned_images=scanned_images,
         missing_masks=missing_masks,
+        image_dirs_without_masks=image_dirs_without_masks,
         split_counts=dict(sorted(split_counts.items())),
     )
 
@@ -206,14 +214,40 @@ def remap_loveda_mask(mask_path: Path, output_path: Path, *, force: bool = False
     if output_path.exists() and not force:
         return output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    table = [
-        LOVEDA_TO_OPENEARTHMAP.get(value, OPENEARTHMAP_CLASS_IDS["unlabeled"])
-        for value in range(256)
-    ]
+    table = [LOVEDA_TO_OPENEARTHMAP.get(value, 0) for value in range(256)]
     with Image.open(mask_path) as mask:
-        remapped = mask.convert("L").point(table, mode="L")
+        class_id_mask = _loveda_class_id_mask(mask, mask_path=mask_path)
+        remapped = class_id_mask.point(table, mode="L")
         remapped.save(output_path)
     return output_path
+
+
+def _loveda_class_id_mask(mask: Image.Image, *, mask_path: Path) -> Image.Image:
+    if mask.mode == "L":
+        class_id_mask = mask.copy()
+    elif mask.mode == "P":
+        class_id_mask = Image.new("L", mask.size)
+        class_id_mask.putdata(mask.getdata())
+    else:
+        raise ValueError(
+            f"LoveDA mask must store class ids in L or P mode: {mask_path} has mode {mask.mode!r}"
+        )
+
+    unexpected = _unexpected_loveda_values(class_id_mask)
+    if unexpected:
+        values = ", ".join(str(value) for value in unexpected[:8])
+        suffix = "" if len(unexpected) <= 8 else ", ..."
+        raise ValueError(
+            f"LoveDA mask contains unexpected class ids in {mask_path}: {values}{suffix}"
+        )
+    return class_id_mask
+
+
+def _unexpected_loveda_values(mask: Image.Image) -> list[int]:
+    histogram = mask.histogram()[:256]
+    return [
+        value for value, count in enumerate(histogram) if count and value not in LOVEDA_MASK_VALUES
+    ]
 
 
 def _prepare_sample_data(
@@ -279,13 +313,25 @@ def _extract(
     force: bool,
     progress: ProgressReporter | None,
 ) -> None:
-    if extracted_dir.exists() and force:
-        shutil.rmtree(extracted_dir)
-    extracted_dir.mkdir(parents=True, exist_ok=True)
-    for archive_path in archive_paths:
-        _report(progress, f"Extracting {archive_path} to {extracted_dir}")
-        with zipfile.ZipFile(archive_path) as archive:
+    archive_path_tuple = tuple(archive_paths)
+    replace_existing = extracted_dir.exists() and any(extracted_dir.iterdir())
+    with ExitStack() as stack:
+        archives = tuple(stack.enter_context(zipfile.ZipFile(path)) for path in archive_path_tuple)
+        if replace_existing and not force:
+            if _extraction_complete(extracted_dir, archives):
+                _report(progress, f"Using cached extracted data {extracted_dir}")
+                return
+            _report(progress, f"Cached extracted data is incomplete; replacing {extracted_dir}")
+        elif force and extracted_dir.exists():
+            _report(progress, f"Replacing extracted data {extracted_dir}")
+
+        if replace_existing:
+            shutil.rmtree(extracted_dir)
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        for archive in archives:
+            _report(progress, f"Extracting {archive.filename} to {extracted_dir}")
             _safe_extract(archive, extracted_dir)
+        _write_extraction_marker(extracted_dir, archives)
 
 
 def _safe_extract(archive: zipfile.ZipFile, extracted_dir: Path) -> None:
@@ -295,6 +341,54 @@ def _safe_extract(archive: zipfile.ZipFile, extracted_dir: Path) -> None:
         if not target.is_relative_to(destination):
             raise RuntimeError(f"Refusing to extract unsafe zip member: {member.filename}")
     archive.extractall(destination)
+
+
+def _extraction_complete(
+    extracted_dir: Path,
+    archives: tuple[zipfile.ZipFile, ...],
+) -> bool:
+    marker_path = extracted_dir / EXTRACT_COMPLETE_MARKER
+    if not marker_path.exists():
+        return False
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload != _archive_marker_payload(archives):
+        return False
+    return all(
+        (extracted_dir / member.filename).exists()
+        for archive in archives
+        for member in archive.infolist()
+        if not member.is_dir()
+    )
+
+
+def _write_extraction_marker(
+    extracted_dir: Path,
+    archives: tuple[zipfile.ZipFile, ...],
+) -> None:
+    marker_path = extracted_dir / EXTRACT_COMPLETE_MARKER
+    marker_path.write_text(
+        json.dumps(_archive_marker_payload(archives), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _archive_marker_payload(archives: tuple[zipfile.ZipFile, ...]) -> dict[str, object]:
+    archive_payloads = []
+    for archive in archives:
+        if archive.filename is None:
+            raise RuntimeError("Archive filename is unavailable")
+        archive_path = Path(archive.filename)
+        archive_payloads.append(
+            {
+                "archive": archive_path.name,
+                "archive_size": archive_path.stat().st_size,
+                "member_count": len(archive.infolist()),
+            }
+        )
+    return {"archives": archive_payloads}
 
 
 def _paths(data_dir: str | Path) -> _LoveDAPaths:
@@ -310,6 +404,19 @@ def _paths(data_dir: str | Path) -> _LoveDAPaths:
         prepared_dir=root / "prepared",
         manifest_path=root / "manifest.jsonl",
     )
+
+
+def _validate_official_counts(split_counts: dict[str, int]) -> None:
+    if sum(split_counts.values()) != LOVEDA_EXPECTED_LABELED_SAMPLES:
+        raise RuntimeError(
+            "LoveDA labeled sample count does not match the official train+val layout: "
+            f"expected {LOVEDA_EXPECTED_LABELED_SAMPLES}, got {sum(split_counts.values())}"
+        )
+    if split_counts != LOVEDA_EXPECTED_SPLIT_COUNTS:
+        raise RuntimeError(
+            "LoveDA split counts do not match the official train/val layout: "
+            f"expected {LOVEDA_EXPECTED_SPLIT_COUNTS}, got {split_counts}"
+        )
 
 
 def _is_image_dir(path: Path) -> bool:
@@ -379,6 +486,11 @@ def _build_click_command():
     @click.option(
         "--force-prepared", is_flag=True, help="Rewrite remapped masks and prepared tensors."
     )
+    @click.option(
+        "--validate-official-counts",
+        is_flag=True,
+        help="Require the official 2,522 train and 1,669 val labeled sample counts.",
+    )
     def command(
         data_dir: Path,
         skip_download: bool,
@@ -386,6 +498,7 @@ def _build_click_command():
         force_download: bool,
         force_extract: bool,
         force_prepared: bool,
+        validate_official_counts: bool,
     ) -> None:
         try:
             result = download_and_prepare_loveda(
@@ -395,6 +508,7 @@ def _build_click_command():
                 force_download=force_download,
                 force_extract=force_extract,
                 force_prepared=force_prepared,
+                validate_official_counts=validate_official_counts,
                 progress=click.echo,
             )
         except OSError as exc:
