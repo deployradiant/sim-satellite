@@ -5,9 +5,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+import torch
 
 from sim_satellite import modal_app
 from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.web import WebConfig
@@ -349,6 +351,46 @@ def test_modal_writes_deterministic_landcoverai_mix_manifest(tmp_path: Path) -> 
     }
 
 
+def test_modal_landcoverai_mix_uses_openearthmap_train_samples_only(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=5,
+        split="val",
+        append=True,
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.5,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    assert _source_split_counts(read_manifest(output_manifest)) == {
+        ("landcoverai", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
 def test_modal_writes_baseline_mix_manifest_without_landcoverai(tmp_path: Path) -> None:
     openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
     landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
@@ -374,6 +416,22 @@ def test_modal_writes_baseline_mix_manifest_without_landcoverai(tmp_path: Path) 
         ("openearthmap", "train"): 8,
         ("openearthmap", "val"): 2,
     }
+
+
+def test_modal_manifest_data_ready_requires_all_prepared_files(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_manifest_samples(
+        manifest_path,
+        source="openearthmap",
+        count=2,
+        split="train",
+        create_prepared=True,
+    )
+
+    samples = read_manifest(manifest_path)
+    samples[1].prepared_path.unlink()
+
+    assert modal_app._modal_manifest_data_ready(manifest_path) is False
 
 
 def _install_modal_fakes(
@@ -403,14 +461,20 @@ def _write_manifest_samples(
     source: str,
     count: int,
     split: str,
+    append: bool = False,
+    create_prepared: bool = False,
 ) -> None:
-    samples = []
+    samples = read_manifest(manifest_path) if append and manifest_path.exists() else []
     for index in range(count):
+        prepared_path = manifest_path.parent / source / split / "prepared" / f"{index}.pt"
+        if create_prepared:
+            prepared_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"version": PREPARED_DATA_VERSION}, prepared_path)
         samples.append(
             SatelliteSample(
-                image_path=manifest_path.parent / source / "images" / f"{index}.png",
-                mask_path=manifest_path.parent / source / "masks" / f"{index}.png",
-                prepared_path=manifest_path.parent / source / "prepared" / f"{index}.pt",
+                image_path=manifest_path.parent / source / split / "images" / f"{index}.png",
+                mask_path=manifest_path.parent / source / split / "masks" / f"{index}.png",
+                prepared_path=prepared_path,
                 split=split,
                 source=source,
             )

@@ -104,6 +104,38 @@ def test_prepare_landcoverai_reports_missing_scene_tiles(tmp_path: Path) -> None
         )
 
 
+def test_prepare_landcoverai_rejects_duplicate_split_tiles(tmp_path: Path) -> None:
+    data_dir = tmp_path / "landcoverai"
+    scene = "N-00-00-A-a-0-0"
+    _write_scene(data_dir / "extracted", scene=scene, mask_values=[1, 2, 3, 4])
+    (data_dir / "extracted" / "train.txt").write_text(
+        f"{scene}_0\n{scene}_0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Duplicate LandCover.ai split tile ids"):
+        download_and_prepare_landcoverai(
+            data_dir,
+            download=False,
+            extract=False,
+            validate_official_counts=False,
+        )
+
+
+def test_prepare_landcoverai_rejects_invalid_split_tile_ids(tmp_path: Path) -> None:
+    data_dir = tmp_path / "landcoverai"
+    (data_dir / "extracted").mkdir(parents=True)
+    (data_dir / "extracted" / "train.txt").write_text("not-a-tile-id\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid LandCover.ai split tile id"):
+        download_and_prepare_landcoverai(
+            data_dir,
+            download=False,
+            extract=False,
+            validate_official_counts=False,
+        )
+
+
 def test_prepare_landcoverai_rejects_non_official_split_counts(tmp_path: Path) -> None:
     data_dir = tmp_path / "landcoverai"
     scene = "N-00-00-A-a-0-0"

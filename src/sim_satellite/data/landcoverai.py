@@ -104,6 +104,10 @@ def download_and_prepare_landcoverai(
 ) -> LandCoverAIResult:
     if not 0.0 <= min_labeled_fraction <= 1.0:
         raise ValueError("min_labeled_fraction must be between 0 and 1")
+    if force_download:
+        force_extract = True
+    if force_extract:
+        force_prepared = True
 
     paths = _paths(data_dir)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
@@ -192,6 +196,7 @@ def scan_landcoverai(
     }
     if validate_official_counts:
         _validate_official_split_counts(split_ids_by_split)
+    _validate_split_ids(split_ids_by_split)
     expected_total_tiles = sum(len(tile_ids) for tile_ids in split_ids_by_split.values())
 
     for split, tile_ids in split_ids_by_split.items():
@@ -358,7 +363,29 @@ def _download(
     partial_path = archive_path.with_suffix(f"{archive_path.suffix}.part")
     _report(progress, f"Downloading LandCover.ai archive to {archive_path}")
     with urllib.request.urlopen(LANDCOVERAI_URL) as response, partial_path.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
+        total_bytes = _content_length(response)
+        downloaded_bytes = 0
+        last_percent = -5
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+            downloaded_bytes += len(chunk)
+            if total_bytes is None:
+                if downloaded_bytes % (512 * 1024 * 1024) < len(chunk):
+                    _report(progress, f"Downloaded {_format_bytes(downloaded_bytes)}")
+                continue
+            percent = int(downloaded_bytes * 100 / total_bytes)
+            if percent >= last_percent + 5 or downloaded_bytes == total_bytes:
+                last_percent = percent
+                _report(
+                    progress,
+                    "Downloaded "
+                    f"{_format_bytes(downloaded_bytes)} / {_format_bytes(total_bytes)} "
+                    f"({percent}%)",
+                )
+    _report(progress, f"Download complete: {archive_path}")
     partial_path.replace(archive_path)
 
 
@@ -486,9 +513,51 @@ def _validate_official_split_counts(split_ids_by_split: dict[str, list[str]]) ->
         )
 
 
+def _validate_split_ids(split_ids_by_split: dict[str, list[str]]) -> None:
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    for split, tile_ids in split_ids_by_split.items():
+        for tile_id in tile_ids:
+            _parse_tile_id(tile_id)
+            if tile_id in seen:
+                duplicates.append(f"{tile_id} in {seen[tile_id]} and {split}")
+            else:
+                seen[tile_id] = split
+    if duplicates:
+        raise RuntimeError(f"Duplicate LandCover.ai split tile ids: {duplicates}")
+
+
 def _parse_tile_id(tile_id: str) -> tuple[str, int]:
-    scene, index = tile_id.rsplit("_", 1)
-    return scene, int(index)
+    try:
+        scene, index = tile_id.rsplit("_", 1)
+    except ValueError:
+        raise ValueError(f"Invalid LandCover.ai split tile id: {tile_id!r}") from None
+    try:
+        tile_index = int(index)
+    except ValueError:
+        raise ValueError(f"Invalid LandCover.ai split tile id: {tile_id!r}") from None
+    if not scene or tile_index < 0:
+        raise ValueError(f"Invalid LandCover.ai split tile id: {tile_id!r}")
+    return scene, tile_index
+
+
+def _content_length(response: object) -> int | None:
+    header = response.headers.get("Content-Length")
+    if header is None:
+        return None
+    try:
+        return int(header)
+    except ValueError:
+        return None
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{value} B"
+        size /= 1024
+    return f"{value} B"
 
 
 def _crop_box_for_tile(size: tuple[int, int], tile_index: int) -> tuple[int, int, int, int]:

@@ -520,7 +520,11 @@ def _write_landcoverai_mix_manifest(
     validation_samples: int,
     seed: int,
 ) -> None:
-    openearthmap_samples = read_manifest(openearthmap_manifest)
+    openearthmap_samples = [
+        sample for sample in read_manifest(openearthmap_manifest) if sample.split == "train"
+    ]
+    if not openearthmap_samples:
+        raise RuntimeError(f"OpenEarthMap manifest has no train samples: {openearthmap_manifest}")
     if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
         raise RuntimeError(
             f"validation_samples must be between 1 and {len(openearthmap_samples) - 1}"
@@ -618,7 +622,7 @@ def _modal_manifest_data_ready(manifest_path: Path) -> bool:
     if not samples:
         return False
     first_prepared = samples[0].prepared_path
-    if not first_prepared.exists():
+    if any(not sample.prepared_path.exists() for sample in samples):
         return False
     try:
         import torch
