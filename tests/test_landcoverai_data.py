@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from sim_satellite.data.landcoverai import (
     _crop_box_for_tile,
     download_and_prepare_landcoverai,
     remap_landcoverai_mask,
+    scan_landcoverai,
 )
 from sim_satellite.data.loader import read_manifest
 from sim_satellite.data.prepared import load_prepared_sample
@@ -129,6 +131,40 @@ def test_prepare_landcoverai_rejects_out_of_bounds_split_tiles(tmp_path: Path) -
         )
 
 
+def test_scan_landcoverai_opens_each_scene_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extracted_dir = tmp_path / "extracted"
+    scene = "N-00-00-A-a-0-0"
+    _write_scene(
+        extracted_dir,
+        scene=scene,
+        mask_values=[1, 2, 3, 4],
+        size=(1024, 512),
+    )
+    (extracted_dir / "train.txt").write_text(f"{scene}_0\n{scene}_1\n", encoding="utf-8")
+
+    opened_tifs: Counter[tuple[str, str]] = Counter()
+    original_open = Image.open
+
+    def counted_open(path: str | Path, *args: object, **kwargs: object) -> Image.Image:
+        path = Path(path)
+        if path.suffix == ".tif":
+            opened_tifs[(path.parent.name, path.name)] += 1
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("sim_satellite.data.landcoverai.Image.open", counted_open)
+
+    scan = scan_landcoverai(
+        extracted_dir,
+        tile_dir=tmp_path / "tiles",
+        validate_official_counts=False,
+    )
+
+    assert scan.total_tiles == 2
+    assert opened_tifs == Counter({("images", f"{scene}.tif"): 1, ("masks", f"{scene}.tif"): 1})
+
+
 def test_landcoverai_crop_box_uses_width_based_columns() -> None:
     assert _crop_box_for_tile((1024, 1024), 0) == (0, 0, 512, 512)
     assert _crop_box_for_tile((1024, 1024), 1) == (512, 0, 1024, 512)
@@ -172,13 +208,19 @@ def test_prepare_landcoverai_rejects_unmarked_cached_extraction(tmp_path: Path) 
         download_and_prepare_landcoverai(data_dir, download=False, extract=True)
 
 
-def _write_scene(root: Path, *, scene: str, mask_values: list[int]) -> None:
+def _write_scene(
+    root: Path,
+    *,
+    scene: str,
+    mask_values: list[int],
+    size: tuple[int, int] = (512, 512),
+) -> None:
     image_path = root / "images" / f"{scene}.tif"
     mask_path = root / "masks" / f"{scene}.tif"
     image_path.parent.mkdir(parents=True, exist_ok=True)
     mask_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (512, 512), (1, 2, 3)).save(image_path)
-    mask = Image.new("L", (512, 512), mask_values[0])
+    Image.new("RGB", size, (1, 2, 3)).save(image_path)
+    mask = Image.new("L", size, mask_values[0])
     pixels = mask.load()
     quadrant_values = {
         (0, 0): mask_values[0],
@@ -186,7 +228,9 @@ def _write_scene(root: Path, *, scene: str, mask_values: list[int]) -> None:
         (0, 1): mask_values[2],
         (1, 1): mask_values[3],
     }
-    for y in range(512):
-        for x in range(512):
-            pixels[x, y] = quadrant_values[(x // 256, y // 256)]
+    half_width = size[0] // 2
+    half_height = size[1] // 2
+    for y in range(size[1]):
+        for x in range(size[0]):
+            pixels[x, y] = quadrant_values[(x // half_width, y // half_height)]
     mask.save(mask_path)

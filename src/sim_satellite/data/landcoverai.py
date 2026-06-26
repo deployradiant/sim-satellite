@@ -195,8 +195,8 @@ def scan_landcoverai(
     expected_total_tiles = sum(len(tile_ids) for tile_ids in split_ids_by_split.values())
 
     for split, tile_ids in split_ids_by_split.items():
+        tiles_by_scene: dict[str, list[tuple[str, int, Path, Path]]] = {}
         for tile_id in tile_ids:
-            total_tiles += 1
             scene, tile_index = _parse_tile_id(tile_id)
             image_path = root / "images" / f"{scene}.tif"
             mask_path = root / "masks" / f"{scene}.tif"
@@ -205,28 +205,48 @@ def scan_landcoverai(
                     f"LandCover.ai split references missing source files for {tile_id}: "
                     f"{image_path} / {mask_path}"
                 )
-            tile = _write_tile(
-                tile_id,
-                split=split,
-                image_path=image_path,
-                mask_path=mask_path,
-                tile_index=tile_index,
-                output_root=output_root,
-                force=force,
+            tiles_by_scene.setdefault(scene, []).append(
+                (tile_id, tile_index, image_path, mask_path)
             )
-            if tile.labeled_fraction > 0:
-                supervised_tiles += 1
-            if tile.labeled_fraction < min_labeled_fraction:
-                skipped_tiles += 1
-                continue
-            samples.append(tile)
-            split_counts[split] += 1
-            if _should_report(total_tiles, expected_total_tiles):
-                _report(
-                    progress,
-                    f"Scanned {total_tiles}/{expected_total_tiles} LandCover.ai split tiles; "
-                    f"kept {len(samples)}",
-                )
+
+        for scene_index, (scene, scene_tiles) in enumerate(tiles_by_scene.items(), start=1):
+            _report(
+                progress,
+                f"Tiling LandCover.ai {split} scene {scene_index}/{len(tiles_by_scene)}: "
+                f"{scene} ({len(scene_tiles)} tiles)",
+            )
+            image_path = scene_tiles[0][2]
+            mask_path = scene_tiles[0][3]
+            with Image.open(image_path) as image, Image.open(mask_path) as mask:
+                if image.size != mask.size:
+                    raise RuntimeError(
+                        f"LandCover.ai source image/mask size mismatch for {scene}: "
+                        f"image={image.size}, mask={mask.size}"
+                    )
+                for tile_id, tile_index, _image_path, _mask_path in scene_tiles:
+                    total_tiles += 1
+                    tile = _write_tile(
+                        tile_id,
+                        split=split,
+                        image=image,
+                        mask=mask,
+                        tile_index=tile_index,
+                        output_root=output_root,
+                        force=force,
+                    )
+                    if tile.labeled_fraction > 0:
+                        supervised_tiles += 1
+                    if tile.labeled_fraction < min_labeled_fraction:
+                        skipped_tiles += 1
+                        continue
+                    samples.append(tile)
+                    split_counts[split] += 1
+                    if _should_report(total_tiles, expected_total_tiles):
+                        _report(
+                            progress,
+                            f"Scanned {total_tiles}/{expected_total_tiles} "
+                            f"LandCover.ai split tiles; kept {len(samples)}",
+                        )
 
     return LandCoverAIScan(
         samples=tuple(samples),
@@ -249,8 +269,8 @@ def _write_tile(
     tile_id: str,
     *,
     split: str,
-    image_path: Path,
-    mask_path: Path,
+    image: Image.Image,
+    mask: Image.Image,
     tile_index: int,
     output_root: Path,
     force: bool,
@@ -268,22 +288,21 @@ def _write_tile(
             labeled_fraction=labeled_fraction,
         )
 
-    with Image.open(image_path) as image, Image.open(mask_path) as mask:
-        crop_box = _crop_box_for_tile(image.size, tile_index)
-        if crop_box[2] > image.width or crop_box[3] > image.height:
-            raise RuntimeError(
-                f"LandCover.ai split tile {tile_id} is outside source image bounds: "
-                f"crop={crop_box}, image={image.size}"
-            )
-        image_tile = image.crop(crop_box).convert("RGB")
-        mask_tile = mask.crop(crop_box)
-        remapped_mask = remap_landcoverai_mask(mask_tile)
-        labeled_fraction = _labeled_fraction(remapped_mask)
+    crop_box = _crop_box_for_tile(image.size, tile_index)
+    if crop_box[2] > image.width or crop_box[3] > image.height:
+        raise RuntimeError(
+            f"LandCover.ai split tile {tile_id} is outside source image bounds: "
+            f"crop={crop_box}, image={image.size}"
+        )
+    image_tile = image.crop(crop_box).convert("RGB")
+    mask_tile = mask.crop(crop_box)
+    remapped_mask = remap_landcoverai_mask(mask_tile)
+    labeled_fraction = _labeled_fraction(remapped_mask)
 
-        image_output.parent.mkdir(parents=True, exist_ok=True)
-        mask_output.parent.mkdir(parents=True, exist_ok=True)
-        image_tile.save(image_output)
-        remapped_mask.save(mask_output)
+    image_output.parent.mkdir(parents=True, exist_ok=True)
+    mask_output.parent.mkdir(parents=True, exist_ok=True)
+    image_tile.save(image_output)
+    remapped_mask.save(mask_output)
 
     return _LandCoverAITile(
         tile_id=tile_id,
