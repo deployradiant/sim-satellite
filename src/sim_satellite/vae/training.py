@@ -20,9 +20,9 @@ from torch.nn import functional as F
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.prepared import load_prepared_sample
-from sim_satellite.image_metrics import reconstruction_metrics
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
-from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
+from sim_satellite.vae.metrics import reconstruction_metrics
+from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
 DEFAULT_SD_VAE_MODEL = "stabilityai/sd-vae-ft-mse"
 

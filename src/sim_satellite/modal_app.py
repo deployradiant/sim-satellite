@@ -26,7 +26,7 @@ from sim_satellite.training_config import (
     TrainingConfig,
     load_training_config_values,
 )
-from sim_satellite.vae_training import (
+from sim_satellite.vae.training import (
     VAETrainingConfig,
     load_vae_training_config_values,
     run_vae_training,

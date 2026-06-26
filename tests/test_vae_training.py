@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from sim_satellite import vae_training
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
-from sim_satellite.image_metrics import reconstruction_metrics
 from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
-from sim_satellite.vae_training import (
+from sim_satellite.vae import training as vae_training
+from sim_satellite.vae.metrics import reconstruction_metrics
+from sim_satellite.vae.training import (
     VAETrainingConfig,
     load_vae_training_config_values,
     run_vae_training,
