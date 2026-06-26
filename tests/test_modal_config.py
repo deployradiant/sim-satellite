@@ -169,6 +169,41 @@ def test_modal_training_enters_app_run_with_valid_data(
     }
 
 
+def test_modal_training_sweep_enters_app_run_with_valid_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_train_many_remote = _FakeRemote(fake_app, [{"execution_target": "modal"}])
+    monkeypatch.setattr(modal_app, "app", fake_app)
+    monkeypatch.setattr(modal_app, "train_many_remote", fake_train_many_remote)
+
+    result = modal_app.run_training_sweep_target(
+        [
+            TrainingConfig(
+                manifest_path="data/landcoverai-mix/baseline/manifest.jsonl",
+                checkpoint_path="artifacts/mix/baseline.pt",
+            ),
+            TrainingConfig(
+                manifest_path="data/landcoverai-mix/ratio-10/manifest.jsonl",
+                checkpoint_path="artifacts/mix/ratio-10.pt",
+            ),
+        ]
+    )
+
+    assert result == [{"execution_target": "modal"}]
+    assert fake_train_many_remote.received is not None
+    assert [config["manifest_path"] for config in fake_train_many_remote.received] == [
+        "/data/landcoverai-mix/baseline/manifest.jsonl",
+        "/data/landcoverai-mix/ratio-10/manifest.jsonl",
+    ]
+    assert [config["checkpoint_path"] for config in fake_train_many_remote.received] == [
+        "/artifacts/mix/baseline.pt",
+        "/artifacts/mix/ratio-10.pt",
+    ]
+
+
 def test_modal_inference_enters_app_run_with_valid_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -410,12 +445,12 @@ class _FakeApp:
 
 
 class _FakeRemote:
-    def __init__(self, app: _FakeApp, result: dict[str, str]) -> None:
+    def __init__(self, app: _FakeApp, result: object) -> None:
         self.app = app
         self.result = result
-        self.received: dict[str, object] | None = None
+        self.received: object | None = None
 
-    def remote(self, config: dict[str, object]) -> dict[str, str]:
+    def remote(self, config: object) -> object:
         assert self.app.enter_calls == 1
         assert self.app.exit_calls == 0
         self.received = config
