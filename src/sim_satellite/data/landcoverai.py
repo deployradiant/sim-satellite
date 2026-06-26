@@ -7,6 +7,7 @@ it as negative supervision for the other OpenEarthMap classes.
 
 from __future__ import annotations
 
+import json
 import shutil
 import urllib.request
 import zipfile
@@ -25,6 +26,8 @@ LANDCOVERAI_LICENSE = "CC BY-NC-SA 4.0; proof-of-concept/non-commercial use only
 LANDCOVERAI_TILE_SIZE = 512
 LANDCOVERAI_EXPECTED_SPLIT_COUNTS = {"train": 7470, "val": 1602, "test": 1602}
 LANDCOVERAI_EXPECTED_TOTAL_TILES = sum(LANDCOVERAI_EXPECTED_SPLIT_COUNTS.values())
+LANDCOVERAI_EXPECTED_SOURCE_SCENES = 41
+_EXTRACT_MARKER = ".landcoverai-extract-complete.json"
 ProgressReporter = Callable[[str], None]
 
 LANDCOVERAI_TO_OPENEARTHMAP = {
@@ -96,6 +99,7 @@ def download_and_prepare_landcoverai(
     force_extract: bool = False,
     force_prepared: bool = False,
     min_labeled_fraction: float = 0.0,
+    validate_official_counts: bool = True,
     progress: ProgressReporter | None = None,
 ) -> LandCoverAIResult:
     if not 0.0 <= min_labeled_fraction <= 1.0:
@@ -127,6 +131,7 @@ def download_and_prepare_landcoverai(
         tile_dir=paths.tile_dir,
         force=force_prepared,
         min_labeled_fraction=min_labeled_fraction,
+        validate_official_counts=validate_official_counts,
         progress=progress,
     )
     if not scan.samples:
@@ -171,6 +176,7 @@ def scan_landcoverai(
     tile_dir: str | Path,
     force: bool = False,
     min_labeled_fraction: float = 0.0,
+    validate_official_counts: bool = True,
     progress: ProgressReporter | None = None,
 ) -> LandCoverAIScan:
     root = Path(extracted_dir)
@@ -180,16 +186,25 @@ def scan_landcoverai(
     total_tiles = 0
     skipped_tiles = 0
     supervised_tiles = 0
+    split_ids_by_split = {
+        split: _read_split_ids(root / f"{split}.txt", required=validate_official_counts)
+        for split in ("train", "val", "test")
+    }
+    if validate_official_counts:
+        _validate_official_split_counts(split_ids_by_split)
+    expected_total_tiles = sum(len(tile_ids) for tile_ids in split_ids_by_split.values())
 
-    for split in ("train", "val", "test"):
-        for tile_id in _read_split_ids(root / f"{split}.txt"):
+    for split, tile_ids in split_ids_by_split.items():
+        for tile_id in tile_ids:
             total_tiles += 1
             scene, tile_index = _parse_tile_id(tile_id)
             image_path = root / "images" / f"{scene}.tif"
             mask_path = root / "masks" / f"{scene}.tif"
             if not image_path.exists() or not mask_path.exists():
-                skipped_tiles += 1
-                continue
+                raise FileNotFoundError(
+                    f"LandCover.ai split references missing source files for {tile_id}: "
+                    f"{image_path} / {mask_path}"
+                )
             tile = _write_tile(
                 tile_id,
                 split=split,
@@ -199,9 +214,6 @@ def scan_landcoverai(
                 output_root=output_root,
                 force=force,
             )
-            if tile is None:
-                skipped_tiles += 1
-                continue
             if tile.labeled_fraction > 0:
                 supervised_tiles += 1
             if tile.labeled_fraction < min_labeled_fraction:
@@ -209,8 +221,12 @@ def scan_landcoverai(
                 continue
             samples.append(tile)
             split_counts[split] += 1
-            if _should_report(len(samples), total_tiles):
-                _report(progress, f"Prepared {len(samples)} kept LandCover.ai tiles")
+            if _should_report(total_tiles, expected_total_tiles):
+                _report(
+                    progress,
+                    f"Scanned {total_tiles}/{expected_total_tiles} LandCover.ai split tiles; "
+                    f"kept {len(samples)}",
+                )
 
     return LandCoverAIScan(
         samples=tuple(samples),
@@ -238,7 +254,7 @@ def _write_tile(
     tile_index: int,
     output_root: Path,
     force: bool,
-) -> _LandCoverAITile | None:
+) -> _LandCoverAITile:
     image_output = output_root / split / "images" / f"{tile_id}.png"
     mask_output = output_root / split / "masks" / f"{tile_id}.png"
     if image_output.exists() and mask_output.exists() and not force:
@@ -255,7 +271,10 @@ def _write_tile(
     with Image.open(image_path) as image, Image.open(mask_path) as mask:
         crop_box = _crop_box_for_tile(image.size, tile_index)
         if crop_box[2] > image.width or crop_box[3] > image.height:
-            return None
+            raise RuntimeError(
+                f"LandCover.ai split tile {tile_id} is outside source image bounds: "
+                f"crop={crop_box}, image={image.size}"
+            )
         image_tile = image.crop(crop_box).convert("RGB")
         mask_tile = mask.crop(crop_box)
         remapped_mask = remap_landcoverai_mask(mask_tile)
@@ -331,23 +350,92 @@ def _extract(
     force: bool,
     progress: ProgressReporter | None,
 ) -> None:
+    marker_path = extracted_dir / _EXTRACT_MARKER
     if extracted_dir.exists() and force:
         shutil.rmtree(extracted_dir)
-    if extracted_dir.exists() and any(extracted_dir.iterdir()) and not force:
+    if marker_path.exists() and not force:
+        _validate_extract_marker(marker_path, archive_path)
         _report(progress, f"Using cached extracted data {extracted_dir}")
         return
+    if extracted_dir.exists() and any(extracted_dir.iterdir()) and not force:
+        raise RuntimeError(
+            f"LandCover.ai extracted directory exists without a valid completion marker: "
+            f"{extracted_dir}. Re-run with --force-extract."
+        )
     with zipfile.ZipFile(archive_path) as archive:
+        _assert_safe_zip_members(archive, extracted_dir)
+        _validate_archive_members(archive)
         extracted_dir.mkdir(parents=True, exist_ok=True)
-        _safe_extract(archive, extracted_dir)
+        archive.extractall(extracted_dir.resolve())
+    _write_extract_marker(marker_path, archive_path)
 
 
-def _safe_extract(archive: zipfile.ZipFile, extracted_dir: Path) -> None:
+def _assert_safe_zip_members(archive: zipfile.ZipFile, extracted_dir: Path) -> None:
     destination = extracted_dir.resolve()
     for member in archive.infolist():
         target = (destination / member.filename).resolve()
         if not target.is_relative_to(destination):
             raise RuntimeError(f"Refusing to extract unsafe zip member: {member.filename}")
-    archive.extractall(destination)
+
+
+def _validate_archive_members(archive: zipfile.ZipFile) -> None:
+    names = {member.filename for member in archive.infolist()}
+    missing = sorted(
+        f"{split}.txt" for split in ("train", "val", "test") if f"{split}.txt" not in names
+    )
+    if missing:
+        raise RuntimeError(f"LandCover.ai archive is missing required split files: {missing}")
+
+    images = {
+        Path(name).stem for name in names if name.startswith("images/") and name.endswith(".tif")
+    }
+    masks = {
+        Path(name).stem for name in names if name.startswith("masks/") and name.endswith(".tif")
+    }
+    if len(images) != LANDCOVERAI_EXPECTED_SOURCE_SCENES:
+        raise RuntimeError(
+            f"Expected {LANDCOVERAI_EXPECTED_SOURCE_SCENES} LandCover.ai source images, "
+            f"found {len(images)}"
+        )
+    if len(masks) != LANDCOVERAI_EXPECTED_SOURCE_SCENES:
+        raise RuntimeError(
+            f"Expected {LANDCOVERAI_EXPECTED_SOURCE_SCENES} LandCover.ai source masks, "
+            f"found {len(masks)}"
+        )
+    if images != masks:
+        missing_masks = sorted(images - masks)
+        missing_images = sorted(masks - images)
+        raise RuntimeError(
+            "LandCover.ai archive image/mask scenes do not match: "
+            f"missing_masks={missing_masks}, missing_images={missing_images}"
+        )
+
+
+def _write_extract_marker(marker_path: Path, archive_path: Path) -> None:
+    payload = {
+        "archive": archive_path.name,
+        "archive_size": archive_path.stat().st_size,
+        "dataset": "landcoverai-v1",
+    }
+    marker_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _validate_extract_marker(marker_path: Path, archive_path: Path) -> None:
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid LandCover.ai extraction marker: {marker_path}") from exc
+
+    expected = {
+        "archive": archive_path.name,
+        "archive_size": archive_path.stat().st_size,
+        "dataset": "landcoverai-v1",
+    }
+    if payload != expected:
+        raise RuntimeError(
+            f"LandCover.ai extraction marker does not match {archive_path}. "
+            "Re-run with --force-extract."
+        )
 
 
 def _paths(data_dir: str | Path) -> _LandCoverAIPaths:
@@ -362,10 +450,21 @@ def _paths(data_dir: str | Path) -> _LandCoverAIPaths:
     )
 
 
-def _read_split_ids(path: Path) -> list[str]:
+def _read_split_ids(path: Path, *, required: bool) -> list[str]:
     if not path.exists():
+        if required:
+            raise FileNotFoundError(f"LandCover.ai split file not found: {path}")
         return []
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _validate_official_split_counts(split_ids_by_split: dict[str, list[str]]) -> None:
+    counts = {split: len(tile_ids) for split, tile_ids in split_ids_by_split.items()}
+    if counts != LANDCOVERAI_EXPECTED_SPLIT_COUNTS:
+        raise RuntimeError(
+            "Unexpected LandCover.ai split counts. "
+            f"expected={LANDCOVERAI_EXPECTED_SPLIT_COUNTS}, found={counts}"
+        )
 
 
 def _parse_tile_id(tile_id: str) -> tuple[str, int]:
@@ -432,6 +531,11 @@ def _build_click_command():
         show_default=True,
         help="Skip tiles below this supervised-pixel fraction.",
     )
+    @click.option(
+        "--skip-official-count-validation",
+        is_flag=True,
+        help="Allow non-official miniature fixtures or custom split counts.",
+    )
     def command(
         data_dir: Path,
         skip_download: bool,
@@ -440,6 +544,7 @@ def _build_click_command():
         force_extract: bool,
         force_prepared: bool,
         min_labeled_fraction: float,
+        skip_official_count_validation: bool,
     ) -> None:
         try:
             result = download_and_prepare_landcoverai(
@@ -450,6 +555,7 @@ def _build_click_command():
                 force_extract=force_extract,
                 force_prepared=force_prepared,
                 min_labeled_fraction=min_labeled_fraction,
+                validate_official_counts=not skip_official_count_validation,
                 progress=click.echo,
             )
         except OSError as exc:

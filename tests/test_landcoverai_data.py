@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from sim_satellite.data.landcoverai import (
+    _crop_box_for_tile,
     download_and_prepare_landcoverai,
     remap_landcoverai_mask,
 )
@@ -27,7 +28,12 @@ def test_prepare_landcoverai_tiles_remaps_and_writes_manifest(tmp_path: Path) ->
     )
     (data_dir / "extracted" / "train.txt").write_text(f"{scene}_0\n", encoding="utf-8")
 
-    result = download_and_prepare_landcoverai(data_dir, download=False, extract=False)
+    result = download_and_prepare_landcoverai(
+        data_dir,
+        download=False,
+        extract=False,
+        validate_official_counts=False,
+    )
 
     assert result.samples == 1
     assert result.prepared_samples == 1
@@ -72,6 +78,7 @@ def test_prepare_landcoverai_can_filter_sparse_tiles(tmp_path: Path) -> None:
         download=False,
         extract=False,
         min_labeled_fraction=0.5,
+        validate_official_counts=False,
     )
 
     samples = read_manifest(result.manifest_path)
@@ -86,8 +93,47 @@ def test_prepare_landcoverai_reports_missing_scene_tiles(tmp_path: Path) -> None
     (data_dir / "extracted").mkdir(parents=True)
     (data_dir / "extracted" / "train.txt").write_text("missing_0\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="No LandCover.ai tiles"):
+    with pytest.raises(FileNotFoundError, match="missing source files"):
+        download_and_prepare_landcoverai(
+            data_dir,
+            download=False,
+            extract=False,
+            validate_official_counts=False,
+        )
+
+
+def test_prepare_landcoverai_rejects_non_official_split_counts(tmp_path: Path) -> None:
+    data_dir = tmp_path / "landcoverai"
+    scene = "N-00-00-A-a-0-0"
+    _write_scene(data_dir / "extracted", scene=scene, mask_values=[1, 2, 3, 4])
+    (data_dir / "extracted" / "train.txt").write_text(f"{scene}_0\n", encoding="utf-8")
+    (data_dir / "extracted" / "val.txt").write_text("", encoding="utf-8")
+    (data_dir / "extracted" / "test.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Unexpected LandCover.ai split counts"):
         download_and_prepare_landcoverai(data_dir, download=False, extract=False)
+
+
+def test_prepare_landcoverai_rejects_out_of_bounds_split_tiles(tmp_path: Path) -> None:
+    data_dir = tmp_path / "landcoverai"
+    scene = "N-00-00-A-a-0-0"
+    _write_scene(data_dir / "extracted", scene=scene, mask_values=[1, 2, 3, 4])
+    (data_dir / "extracted" / "train.txt").write_text(f"{scene}_1\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="outside source image bounds"):
+        download_and_prepare_landcoverai(
+            data_dir,
+            download=False,
+            extract=False,
+            validate_official_counts=False,
+        )
+
+
+def test_landcoverai_crop_box_uses_width_based_columns() -> None:
+    assert _crop_box_for_tile((1024, 1024), 0) == (0, 0, 512, 512)
+    assert _crop_box_for_tile((1024, 1024), 1) == (512, 0, 1024, 512)
+    assert _crop_box_for_tile((1024, 1024), 2) == (0, 512, 512, 1024)
+    assert _crop_box_for_tile((1024, 1024), 3) == (512, 512, 1024, 1024)
 
 
 def test_remap_landcoverai_background_stays_unlabeled() -> None:
@@ -110,6 +156,20 @@ def test_prepare_landcoverai_rejects_unsafe_zip_members(tmp_path: Path) -> None:
         download_and_prepare_landcoverai(data_dir, download=False, extract=True)
 
     assert not (data_dir.parent / "escape.txt").exists()
+
+
+def test_prepare_landcoverai_rejects_unmarked_cached_extraction(tmp_path: Path) -> None:
+    data_dir = tmp_path / "landcoverai"
+    archive_path = data_dir / "raw" / "landcover.ai.v1.zip"
+    archive_path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("train.txt", "")
+    extracted_dir = data_dir / "extracted"
+    extracted_dir.mkdir(parents=True)
+    (extracted_dir / "train.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="without a valid completion marker"):
+        download_and_prepare_landcoverai(data_dir, download=False, extract=True)
 
 
 def _write_scene(root: Path, *, scene: str, mask_values: list[int]) -> None:
