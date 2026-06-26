@@ -20,6 +20,7 @@ from torch.nn import functional as F
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.prepared import load_prepared_sample
+from sim_satellite.image_metrics import edge_map, reconstruction_metrics
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
 
@@ -37,21 +38,21 @@ class VAETrainingConfig:
     eval_size: int = 256
     batch_size: int = 4
     steps: int = 5000
-    learning_rate: float = 2e-4
-    latent_channels: int = 8
+    learning_rate: float = 1.5e-4
+    latent_channels: int = 16
     hidden_channels: int = 32
     downsample_factor: int = 4
-    kl_weight: float = 1e-7
+    kl_weight: float = 1e-6
     mse_weight: float = 0.2
     edge_weight: float = 0.1
     device: str = "auto"
     cache_images: int = 128
     log_every: int = 250
     grid_samples: int = 8
-    checkpoint_path: str = "artifacts/openearthmap-custom-vae-f4-c8-half.pt"
-    metrics_path: str = "artifacts/openearthmap-custom-vae-f4-c8-half-metrics.json"
-    grid_path: str = "artifacts/openearthmap-custom-vae-f4-c8-half-grid.png"
-    compare_sd_vae: bool = True
+    checkpoint_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half.pt"
+    metrics_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half-metrics.json"
+    grid_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half-grid.png"
+    compare_sd_vae: bool = False
     sd_vae_model: str = DEFAULT_SD_VAE_MODEL
 
     @classmethod
@@ -180,13 +181,21 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
     )
     model.eval()
     custom_recon = _custom_reconstruct(model, validation_real, device=device)
-    custom_metrics = reconstruction_metrics(validation_real, custom_recon)
+    custom_metrics = reconstruction_metrics(
+        _to_unit(validation_real),
+        _to_unit(custom_recon),
+        torch=torch,
+    )
 
     sd_recon: torch.Tensor | None = None
     sd_metrics: dict[str, float] | None = None
     if config.compare_sd_vae:
         sd_recon = _sd_reconstruct(config.sd_vae_model, validation_real, device=device)
-        sd_metrics = reconstruction_metrics(validation_real, sd_recon)
+        sd_metrics = reconstruction_metrics(
+            _to_unit(validation_real),
+            _to_unit(sd_recon),
+            torch=torch,
+        )
 
     checkpoint_path = Path(config.checkpoint_path)
     metrics_path = Path(config.metrics_path)
@@ -228,22 +237,6 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         custom_vae=custom_metrics,
         sd_vae=sd_metrics,
     )
-
-
-def reconstruction_metrics(real: torch.Tensor, reconstructed: torch.Tensor) -> dict[str, float]:
-    real_unit = _to_unit(real)
-    recon_unit = _to_unit(reconstructed)
-    mse = (real_unit - recon_unit).square().mean(dim=(1, 2, 3))
-    psnr = -10.0 * torch.log10(mse.clamp_min(1e-12))
-    edge_mae = (_edge_map(real_unit) - _edge_map(recon_unit)).abs().mean(dim=(1, 2, 3))
-    mean_rgb_mae = (real_unit.mean(dim=(2, 3)) - recon_unit.mean(dim=(2, 3))).abs().mean(dim=1)
-    return {
-        "mse": float(mse.mean().item()),
-        "psnr": float(psnr.mean().item()),
-        "ssim": float(_ssim_batch(real, reconstructed).mean().item()),
-        "edge_mae": float(edge_mae.mean().item()),
-        "mean_rgb_mae": float(mean_rgb_mae.mean().item()),
-    }
 
 
 def _validate_config(config: VAETrainingConfig) -> None:
@@ -354,7 +347,7 @@ def _vae_losses(
 ) -> dict[str, torch.Tensor]:
     l1 = F.l1_loss(recon, real)
     mse = F.mse_loss(recon, real)
-    edge = F.l1_loss(_edge_map(_to_unit(recon)), _edge_map(_to_unit(real)))
+    edge = F.l1_loss(edge_map(_to_unit(recon), torch=torch), edge_map(_to_unit(real), torch=torch))
     kl = -0.5 * torch.mean(1 + logvar - mu.square() - logvar.exp())
     loss = l1 + config.mse_weight * mse + config.edge_weight * edge + config.kl_weight * kl
     return {"loss": loss, "l1": l1, "mse": mse, "edge": edge, "kl": kl}
@@ -374,7 +367,13 @@ def _custom_reconstruct(
 
 
 def _sd_reconstruct(model_name: str, images: torch.Tensor, *, device: torch.device) -> torch.Tensor:
-    diffusers: Any = import_module("diffusers")
+    try:
+        diffusers: Any = import_module("diffusers")
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "compare_sd_vae requires the optional `diffusers` package. "
+            "Install it separately or set compare_sd_vae=false."
+        ) from error
     sd_vae = diffusers.AutoencoderKL.from_pretrained(model_name).to(device)
     sd_vae.requires_grad_(False)
     sd_vae.eval()
@@ -479,35 +478,8 @@ def _write_grid(
     canvas.save(output_path)
 
 
-def _edge_map(image: torch.Tensor) -> torch.Tensor:
-    dx = image[:, :, :, 1:] - image[:, :, :, :-1]
-    dy = image[:, :, 1:, :] - image[:, :, :-1, :]
-    return F.pad(dx.abs(), (0, 1, 0, 0)) + F.pad(dy.abs(), (0, 0, 0, 1))
-
-
 def _to_unit(image: torch.Tensor) -> torch.Tensor:
     return ((image.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
-
-
-def _ssim_batch(image_a: torch.Tensor, image_b: torch.Tensor) -> torch.Tensor:
-    image_a = _to_unit(image_a)
-    image_b = _to_unit(image_b)
-    kernel_size = 11 if min(image_a.shape[-2:]) >= 11 else 3
-    padding = kernel_size // 2
-    c1 = 0.01**2
-    c2 = 0.03**2
-    mu_a = F.avg_pool2d(image_a, kernel_size, stride=1, padding=padding)
-    mu_b = F.avg_pool2d(image_b, kernel_size, stride=1, padding=padding)
-    mu_a2 = mu_a.square()
-    mu_b2 = mu_b.square()
-    mu_ab = mu_a * mu_b
-    sigma_a = F.avg_pool2d(image_a.square(), kernel_size, stride=1, padding=padding) - mu_a2
-    sigma_b = F.avg_pool2d(image_b.square(), kernel_size, stride=1, padding=padding) - mu_b2
-    sigma_ab = F.avg_pool2d(image_a * image_b, kernel_size, stride=1, padding=padding) - mu_ab
-    ssim = ((2 * mu_ab + c1) * (2 * sigma_ab + c2)) / (
-        (mu_a2 + mu_b2 + c1) * (sigma_a + sigma_b + c2)
-    ).clamp_min(1e-12)
-    return ssim.mean(dim=(1, 2, 3)).clamp(-1.0, 1.0)
 
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:

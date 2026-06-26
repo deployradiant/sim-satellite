@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 import torch
 
+from sim_satellite import vae_training
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
+from sim_satellite.image_metrics import reconstruction_metrics
 from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
 from sim_satellite.vae_training import (
     VAETrainingConfig,
     load_vae_training_config_values,
-    reconstruction_metrics,
     run_vae_training,
     split_vae_samples,
 )
@@ -42,6 +43,22 @@ def test_vae_training_config_validates_split_bounds() -> None:
         load_vae_training_config_values({"train_fraction": 1.0})
 
 
+def test_sd_vae_comparison_reports_missing_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_import(_: str) -> None:
+        raise ModuleNotFoundError("diffusers")
+
+    monkeypatch.setattr(vae_training, "import_module", fail_import)
+
+    with pytest.raises(RuntimeError, match="compare_sd_vae requires the optional"):
+        vae_training._sd_reconstruct(
+            "stabilityai/sd-vae-ft-mse",
+            torch.zeros(1, 3, 8, 8),
+            device=torch.device("cpu"),
+        )
+
+
 def test_split_vae_samples_is_deterministic(tmp_path: Path) -> None:
     manifest_path = _write_manifest_with_prepared_samples(tmp_path, count=10)
     config = VAETrainingConfig(
@@ -67,7 +84,7 @@ def test_split_vae_samples_is_deterministic(tmp_path: Path) -> None:
 def test_reconstruction_metrics_identical_images_are_strong() -> None:
     images = torch.rand(2, 3, 16, 16) * 2.0 - 1.0
 
-    metrics = reconstruction_metrics(images, images)
+    metrics = reconstruction_metrics(images, images, torch=torch)
 
     assert metrics["mse"] == pytest.approx(0.0)
     assert metrics["psnr"] > 100.0

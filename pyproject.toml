@@ -6,7 +6,6 @@ readme = "Readme.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
-    "diffusers>=0.34",
     "fastapi>=0.115",
     "matplotlib>=3.9",
     "modal>=1.0",
