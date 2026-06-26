@@ -47,10 +47,11 @@ evaluates on held-out images from the other half:
 uv run sim-satellite train-vae train.openearthmap-vae-f4-c24-half.json
 ```
 
-For longer VAE runs, use the Modal/H100 target:
+For longer VAE runs, use the Modal/H100 target. The 20k candidate config trains
+on 88% of the prepared training images and validates on 320 held-out images:
 
 ```bash
-uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-half.json
+uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json
 ```
 
 This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
@@ -268,3 +269,12 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   artifact volume as `/artifacts/openearthmap-custom-vae-f4-c24-half.*`.
   Decision: keep c24/h32 for the custom VAE direction; the next risk to inspect
   is mild color drift, not structural capacity.
+- 2026-06-26 PDT: A longer c24/h32 Modal/H100 run trained for 20,000 steps with
+  `train_fraction=0.88`, 2,364 train samples, and 320 validation samples:
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-20k-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json`.
+  Final validation metrics improved to MSE `0.000245`, PSNR `37.456`, SSIM
+  `0.9864`, edge MAE `0.01709`, and RGB MAE `0.00453`. The checkpoint, metrics,
+  and grid were written to `/artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val320-20k.*`.
+  Decision: this is the current best validated custom VAE checkpoint. The next
+  comparison should be latent flow matching with this encoder versus pixel flow
+  matching, not more sharpness-loss tuning.
