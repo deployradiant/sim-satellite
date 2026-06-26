@@ -39,7 +39,7 @@ class VAETrainingConfig:
     batch_size: int = 4
     steps: int = 5000
     learning_rate: float = 1.5e-4
-    latent_channels: int = 16
+    latent_channels: int = 24
     hidden_channels: int = 32
     downsample_factor: int = 4
     kl_weight: float = 1e-6
@@ -50,9 +50,9 @@ class VAETrainingConfig:
     cache_images: int = 128
     log_every: int = 250
     grid_samples: int = 8
-    checkpoint_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half.pt"
-    metrics_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half-metrics.json"
-    grid_path: str = "artifacts/openearthmap-custom-vae-f4-c16-half-grid.png"
+    checkpoint_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half.pt"
+    metrics_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half-metrics.json"
+    grid_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half-grid.png"
     compare_sd_vae: bool = False
     sd_vae_model: str = DEFAULT_SD_VAE_MODEL
 

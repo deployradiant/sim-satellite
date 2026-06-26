@@ -40,27 +40,28 @@ and SSIM.
 
 Native satellite VAE training is available as a separate reconstruction audit
 step before latent flow-matching experiments. The 50% OpenEarthMap config trains
-a 4x, 16-channel convolutional VAE on half of the prepared training images and
+a 4x, 24-channel convolutional VAE on half of the prepared training images and
 evaluates on held-out images from the other half:
 
 ```bash
-uv run sim-satellite train-vae train.openearthmap-vae-f4-c16-half.json
+uv run sim-satellite train-vae train.openearthmap-vae-f4-c24-half.json
 ```
 
 For longer VAE runs, use the Modal/H100 target:
 
 ```bash
-uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c16-half.json
+uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-half.json
 ```
 
 This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
 `artifacts/`. Local sweeps on the prepared OpenEarthMap cache used 1,343 train
-images and up to 96 held-out validation images. The current config uses 16
+images and up to 96 held-out validation images. The current config uses 24
 latent channels, 32 hidden channels, `kl_weight=1e-6`,
 `reconstruction_exponential_weight=0.5`, `reconstruction_exponential_scale=12.0`,
-and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction, not
-as a final production codec. Stable Diffusion VAE comparison remains an optional
-audit path when `diffusers` is installed separately and `compare_sd_vae=true`.
+and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction,
+not as a final production codec. Stable Diffusion VAE comparison remains an
+optional audit path when `diffusers` is installed separately and
+`compare_sd_vae=true`.
 `reconstruction_exponential_weight` and `reconstruction_exponential_scale`
 control a nonlinear reconstruction term that makes 99% reconstructions worth
 disproportionately more than merely acceptable reconstructions, without adding a
@@ -244,3 +245,16 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   generation metrics. Final generation metrics now include per-class RGB mean
   MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
   when semantic masks are available.
+- 2026-06-26 PDT: AutoResearch VAE follow-up kept the exponential reconstruction
+  loss fixed and tested training mechanics/capacity on 1,343 train and 96
+  validation OpenEarthMap samples for 1,500 local steps. Baseline c16/h32 reached
+  MSE `0.002373`, PSNR `27.117`, SSIM `0.8529`, edge MAE `0.04639`, and RGB MAE
+  `0.00817`. Deterministic mean-latent training and `weight_decay=0.0` were
+  rejected because they worsened the fixed-seed validation metrics. Wider
+  c24/h48 improved SSIM/edge but introduced color drift. Latent-bandwidth-only
+  c24/h32 improved every tracked metric on the same seed: MSE `0.002359`, PSNR
+  `27.262`, SSIM `0.8560`, edge MAE `0.04587`, and RGB MAE `0.00738`. Decision:
+  update the custom VAE config/default to 24 latent channels while keeping hidden
+  width and the loss unchanged. Next best hypotheses: run the c24/h32 config
+  longer on H100, then retest c32/h32 and learning-rate schedule only if c24/h32
+  plateaus blurry.
