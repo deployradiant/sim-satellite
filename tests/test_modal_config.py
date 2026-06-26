@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from sim_satellite import modal_app
+from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.web import WebConfig
@@ -46,6 +47,25 @@ def test_modal_training_maps_relative_manifest_to_remote_data_root(
         assert fake_app.run_calls == 1
         assert fake_train_remote.received is not None
         assert fake_train_remote.received["manifest_path"] == remote_manifest_path
+
+
+def test_modal_training_maps_landcoverai_mix_manifest_to_remote_data_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
+
+    modal_app.run_training_target(
+        TrainingConfig(manifest_path="data/landcoverai-mix/ratio-10/manifest.jsonl"),
+    )
+
+    assert fake_train_remote.received is not None
+    assert fake_train_remote.received["manifest_path"] == (
+        "/data/landcoverai-mix/ratio-10/manifest.jsonl"
+    )
 
 
 def test_modal_training_rejects_invalid_artifact_paths_before_app_run(
@@ -240,6 +260,87 @@ def test_modal_data_path_maps_inside_modal_container(
         modal_app._modal_data_path("/tmp/manifest.jsonl", field_name="manifest_path")
 
 
+def test_modal_landcoverai_mix_ratio_parses_manifest_parent() -> None:
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/baseline/manifest.jsonl")
+        )
+        == 0.0
+    )
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/ratio-33/manifest.jsonl")
+        )
+        == 0.33
+    )
+    with pytest.raises(ValueError, match="baseline.*ratio-N"):
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/nope/manifest.jsonl")
+        )
+
+
+def test_modal_writes_deterministic_landcoverai_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.5,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    source_counts = _source_split_counts(samples)
+    assert source_counts == {
+        ("landcoverai", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_baseline_mix_manifest_without_landcoverai(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "baseline" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.0,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
 def _install_modal_fakes(
     monkeypatch: pytest.MonkeyPatch,
     fake_app: _FakeApp,
@@ -259,6 +360,35 @@ def _write_data_file(tmp_path: Path, relative_path: str, *, content: bytes = b""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path
+
+
+def _write_manifest_samples(
+    manifest_path: Path,
+    *,
+    source: str,
+    count: int,
+    split: str,
+) -> None:
+    samples = []
+    for index in range(count):
+        samples.append(
+            SatelliteSample(
+                image_path=manifest_path.parent / source / "images" / f"{index}.png",
+                mask_path=manifest_path.parent / source / "masks" / f"{index}.png",
+                prepared_path=manifest_path.parent / source / "prepared" / f"{index}.pt",
+                split=split,
+                source=source,
+            )
+        )
+    write_manifest(samples, manifest_path)
+
+
+def _source_split_counts(samples: list[SatelliteSample]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for sample in samples:
+        key = (sample.source, sample.split)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 class _FakeApp:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Any
 
 import modal
 
+from sim_satellite.data.landcoverai import download_and_prepare_landcoverai
+from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import (
@@ -48,6 +51,18 @@ MODAL_WEB_DATA_ROOT = Path(
     )
 )
 MODAL_WEB_MANIFEST_PATH = MODAL_WEB_DATA_ROOT / "manifest.jsonl"
+MODAL_OPENEARTHMAP_DATA_DIR = MODAL_DATA_ROOT / "openearthmap"
+MODAL_LANDCOVERAI_DATA_DIR = MODAL_DATA_ROOT / "landcoverai"
+MODAL_LANDCOVERAI_MIX_ROOT = MODAL_DATA_ROOT / "landcoverai-mix"
+MODAL_LANDCOVERAI_MIX_SEED = int(
+    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_SEED", "20260626")
+)
+MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES = int(
+    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_VALIDATION_SAMPLES", "256")
+)
+MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION = float(
+    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_MIN_LABELED_FRACTION", "0.10")
+)
 DEFAULT_MODAL_TRAINING_GPU = "H100!"
 DEFAULT_MODAL_INFERENCE_GPU = "T4"
 MODAL_TRAINING_GPU = os.environ.get(
@@ -107,7 +122,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
-    _ensure_modal_openearthmap_data(config["manifest_path"])
+    _ensure_modal_training_data(config["manifest_path"])
     result = run_training(
         load_training_config_values(config),
         after_save=artifact_volume.commit,
@@ -126,7 +141,7 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
-    _ensure_modal_openearthmap_data(config["manifest_path"])
+    _ensure_modal_training_data(config["manifest_path"])
     artifact_volume.reload()
     result = asdict(run_inference(InferenceConfig.from_dict(config)))
     artifact_volume.commit()
@@ -326,6 +341,180 @@ def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
     )
 
 
+def _ensure_modal_training_data(manifest_path: str) -> None:
+    manifest = Path(manifest_path)
+    if _is_modal_landcoverai_mix_manifest(manifest):
+        _ensure_modal_landcoverai_mix_data(manifest)
+        return
+    _ensure_modal_openearthmap_data(manifest_path)
+
+
+def _is_modal_landcoverai_mix_manifest(manifest_path: Path) -> bool:
+    try:
+        manifest_path.relative_to(MODAL_LANDCOVERAI_MIX_ROOT)
+    except ValueError:
+        return False
+    return manifest_path.name == "manifest.jsonl"
+
+
+def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
+    if _modal_manifest_data_ready(manifest_path):
+        _print_modal_data_event("modal_landcoverai_mix_ready", manifest_path=str(manifest_path))
+        return
+
+    ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
+    _print_modal_data_event(
+        "modal_landcoverai_mix_setup_start",
+        manifest_path=str(manifest_path),
+        landcoverai_ratio=ratio,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    )
+    _ensure_modal_openearthmap_data(str(MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl"))
+    if ratio > 0.0:
+        _ensure_modal_landcoverai_data()
+    _write_landcoverai_mix_manifest(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        landcoverai_manifest=MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl",
+        landcoverai_ratio=ratio,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        seed=MODAL_LANDCOVERAI_MIX_SEED,
+    )
+    _print_modal_data_event(
+        "modal_landcoverai_mix_setup_done",
+        manifest_path=str(manifest_path),
+        landcoverai_ratio=ratio,
+    )
+
+
+def _ensure_modal_landcoverai_data() -> None:
+    manifest_path = MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl"
+    if _modal_manifest_data_ready(manifest_path):
+        _print_modal_data_event(
+            "modal_landcoverai_data_ready",
+            data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        )
+        return
+
+    _print_modal_data_event(
+        "modal_landcoverai_data_setup_start",
+        data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    )
+    result = download_and_prepare_landcoverai(
+        MODAL_LANDCOVERAI_DATA_DIR,
+        force_prepared=True,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+        progress=lambda message: _print_modal_data_event(
+            "modal_landcoverai_data_setup_progress",
+            data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+            message=message,
+        ),
+    )
+    _print_modal_data_event(
+        "modal_landcoverai_data_setup_done",
+        data_dir=str(result.data_dir),
+        manifest_path=str(result.manifest_path),
+        prepared_dir=str(result.prepared_dir),
+        samples=result.samples,
+        prepared_samples=result.prepared_samples,
+        total_tiles=result.total_tiles,
+        supervised_tiles=result.supervised_tiles,
+        skipped_tiles=result.skipped_tiles,
+        split_counts=result.split_counts,
+    )
+
+
+def _landcoverai_mix_ratio_from_manifest(manifest_path: Path) -> float:
+    name = manifest_path.parent.name
+    if name == "baseline":
+        return 0.0
+    prefix = "ratio-"
+    if not name.startswith(prefix):
+        raise ValueError(
+            "LandCover.ai mix manifest parent must be `baseline` or `ratio-N`: "
+            f"{manifest_path}"
+        )
+    try:
+        percent = int(name.removeprefix(prefix))
+    except ValueError:
+        raise ValueError(
+            f"Invalid LandCover.ai mix ratio in manifest path: {manifest_path}"
+        ) from None
+    if percent < 0:
+        raise ValueError(f"LandCover.ai mix ratio must be non-negative: {manifest_path}")
+    return percent / 100.0
+
+
+def _write_landcoverai_mix_manifest(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float,
+    validation_samples: int,
+    seed: int,
+) -> None:
+    openearthmap_samples = read_manifest(openearthmap_manifest)
+    if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+        raise RuntimeError(
+            f"validation_samples must be between 1 and {len(openearthmap_samples) - 1}"
+        )
+
+    shuffled_openearthmap = list(openearthmap_samples)
+    random.Random(seed).shuffle(shuffled_openearthmap)
+    openearthmap_val = shuffled_openearthmap[:validation_samples]
+    openearthmap_train = shuffled_openearthmap[validation_samples:]
+
+    mixed_samples = [
+        _with_split(sample, "train")
+        for sample in sorted(openearthmap_train, key=lambda item: str(item.image_path))
+    ]
+    landcoverai_count = int(len(openearthmap_train) * landcoverai_ratio)
+    if landcoverai_count > 0:
+        landcoverai_samples = [
+            sample for sample in read_manifest(landcoverai_manifest) if sample.split == "train"
+        ]
+        if len(landcoverai_samples) < landcoverai_count:
+            raise RuntimeError(
+                f"LandCover.ai manifest only has {len(landcoverai_samples)} train samples; "
+                f"need {landcoverai_count}"
+            )
+        random.Random(seed + int(landcoverai_ratio * 10_000)).shuffle(landcoverai_samples)
+        mixed_samples.extend(
+            _with_split(sample, "train")
+            for sample in sorted(
+                landcoverai_samples[:landcoverai_count],
+                key=lambda item: str(item.image_path),
+            )
+        )
+    mixed_samples.extend(
+        _with_split(sample, "val")
+        for sample in sorted(openearthmap_val, key=lambda item: str(item.image_path))
+    )
+    write_manifest(mixed_samples, manifest_path)
+    _print_modal_data_event(
+        "modal_landcoverai_mix_manifest_written",
+        manifest_path=str(manifest_path),
+        openearthmap_train=len(openearthmap_train),
+        openearthmap_val=len(openearthmap_val),
+        landcoverai_train=landcoverai_count,
+        train_samples=len(mixed_samples) - len(openearthmap_val),
+        total_samples=len(mixed_samples),
+    )
+
+
+def _with_split(sample: SatelliteSample, split: str) -> SatelliteSample:
+    return SatelliteSample(
+        image_path=sample.image_path,
+        mask_path=sample.mask_path,
+        prepared_path=sample.prepared_path,
+        split=split,
+        source=sample.source,
+    )
+
+
 def _modal_data_dir_for_manifest(manifest_path: str) -> Path:
     manifest = Path(manifest_path)
     if not manifest.is_absolute():
@@ -345,6 +534,27 @@ def _modal_openearthmap_data_ready(data_dir: Path, manifest_path: Path) -> bool:
         return False
     first_prepared = next(prepared_dir.rglob("*.pt"), None)
     if first_prepared is None:
+        return False
+    try:
+        import torch
+
+        payload = torch.load(first_prepared, map_location="cpu")
+    except (EOFError, OSError, RuntimeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("version") == PREPARED_DATA_VERSION
+
+
+def _modal_manifest_data_ready(manifest_path: Path) -> bool:
+    if not manifest_path.exists():
+        return False
+    try:
+        samples = read_manifest(manifest_path)
+    except (OSError, ValueError):
+        return False
+    if not samples:
+        return False
+    first_prepared = samples[0].prepared_path
+    if not first_prepared.exists():
         return False
     try:
         import torch
