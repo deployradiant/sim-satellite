@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -54,6 +55,8 @@ MODAL_WEB_MANIFEST_PATH = MODAL_WEB_DATA_ROOT / "manifest.jsonl"
 MODAL_OPENEARTHMAP_DATA_DIR = MODAL_DATA_ROOT / "openearthmap"
 MODAL_LANDCOVERAI_DATA_DIR = MODAL_DATA_ROOT / "landcoverai"
 MODAL_LANDCOVERAI_MIX_ROOT = MODAL_DATA_ROOT / "landcoverai-mix"
+LOCAL_LANDCOVERAI_ARCHIVE_PATH = os.environ.get("SIM_SATELLITE_LOCAL_LANDCOVERAI_ARCHIVE_PATH")
+MODAL_PACKAGED_LANDCOVERAI_ARCHIVE = MODAL_PACKAGE_ROOT / "landcover.ai.v1.zip"
 MODAL_LANDCOVERAI_MIX_SEED = int(
     os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_SEED", "20260626")
 )
@@ -86,6 +89,10 @@ MODAL_IMAGE_ENV = {
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
     "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
 }
+if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
+    MODAL_IMAGE_ENV["SIM_SATELLITE_MODAL_LANDCOVERAI_ARCHIVE_PATH"] = str(
+        MODAL_PACKAGED_LANDCOVERAI_ARCHIVE
+    )
 MODAL_WEB_ENV: dict[str, str | None] = {
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
     "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
@@ -109,6 +116,11 @@ if LOCAL_MODAL_WEB_DATA_ROOT.exists():
     image = image.add_local_dir(
         LOCAL_MODAL_WEB_DATA_ROOT,
         str(MODAL_WEB_DATA_ROOT),
+    )
+if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
+    image = image.add_local_file(
+        Path(LOCAL_LANDCOVERAI_ARCHIVE_PATH),
+        str(MODAL_PACKAGED_LANDCOVERAI_ARCHIVE),
     )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
@@ -433,6 +445,7 @@ def _ensure_modal_landcoverai_data() -> None:
         data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
         min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
     )
+    _seed_modal_landcoverai_archive()
     result = download_and_prepare_landcoverai(
         MODAL_LANDCOVERAI_DATA_DIR,
         force_prepared=True,
@@ -454,6 +467,26 @@ def _ensure_modal_landcoverai_data() -> None:
         supervised_tiles=result.supervised_tiles,
         skipped_tiles=result.skipped_tiles,
         split_counts=result.split_counts,
+    )
+
+
+def _seed_modal_landcoverai_archive() -> None:
+    packaged_archive = os.environ.get("SIM_SATELLITE_MODAL_LANDCOVERAI_ARCHIVE_PATH")
+    if not packaged_archive:
+        return
+    source_path = Path(packaged_archive)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Packaged LandCover.ai archive not found: {source_path}")
+    archive_path = MODAL_LANDCOVERAI_DATA_DIR / "raw" / "landcover.ai.v1.zip"
+    if archive_path.exists():
+        return
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, archive_path)
+    _print_modal_data_event(
+        "modal_landcoverai_archive_seeded",
+        data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        source_path=str(source_path),
+        archive_path=str(archive_path),
     )
 
 
