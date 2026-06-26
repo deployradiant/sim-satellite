@@ -258,3 +258,13 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   width and the loss unchanged. Next best hypotheses: run the c24/h32 config
   longer on H100, then retest c32/h32 and learning-rate schedule only if c24/h32
   plateaus blurry.
+- 2026-06-26 PDT: The c24/h32 VAE was then trained for the longer 5,000-step
+  Modal/H100 config with
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-long-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-half.json`.
+  The run prepared 2,687 OpenEarthMap samples on remote `/data/openearthmap`
+  scratch and trained on 1,343 of them. Final 64-sample validation metrics were
+  MSE `0.001522`, PSNR `29.512`, SSIM `0.9211`, edge MAE `0.03701`, and RGB MAE
+  `0.00932`. The checkpoint, metrics, and grid were written to the Modal
+  artifact volume as `/artifacts/openearthmap-custom-vae-f4-c24-half.*`.
+  Decision: keep c24/h32 for the custom VAE direction; the next risk to inspect
+  is mild color drift, not structural capacity.
