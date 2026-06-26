@@ -300,6 +300,12 @@ def test_modal_data_path_maps_inside_modal_container(
 def test_modal_landcoverai_mix_ratio_parses_manifest_parent() -> None:
     assert (
         modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/all/manifest.jsonl")
+        )
+        is None
+    )
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
             Path("/data/landcoverai-mix/baseline/manifest.jsonl")
         )
         == 0.0
@@ -310,7 +316,7 @@ def test_modal_landcoverai_mix_ratio_parses_manifest_parent() -> None:
         )
         == 0.33
     )
-    with pytest.raises(ValueError, match="baseline.*ratio-N"):
+    with pytest.raises(ValueError, match="baseline.*all.*ratio-N"):
         modal_app._landcoverai_mix_ratio_from_manifest(
             Path("/data/landcoverai-mix/nope/manifest.jsonl")
         )
@@ -413,6 +419,40 @@ def test_modal_writes_baseline_mix_manifest_without_landcoverai(tmp_path: Path) 
 
     samples = read_manifest(output_manifest)
     assert _source_split_counts(samples) == {
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_all_landcoverai_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "all" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=None,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("landcoverai", "train"): 20,
         ("openearthmap", "train"): 8,
         ("openearthmap", "val"): 2,
     }

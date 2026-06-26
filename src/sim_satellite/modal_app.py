@@ -406,15 +406,16 @@ def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
         return
 
     ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
+    ratio_label: str | float = "all" if ratio is None else ratio
     _print_modal_data_event(
         "modal_landcoverai_mix_setup_start",
         manifest_path=str(manifest_path),
-        landcoverai_ratio=ratio,
+        landcoverai_ratio=ratio_label,
         validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
         min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
     )
     _ensure_modal_openearthmap_data(str(MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl"))
-    if ratio > 0.0:
+    if ratio is None or ratio > 0.0:
         _ensure_modal_landcoverai_data()
     _write_landcoverai_mix_manifest(
         manifest_path,
@@ -427,7 +428,7 @@ def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
     _print_modal_data_event(
         "modal_landcoverai_mix_setup_done",
         manifest_path=str(manifest_path),
-        landcoverai_ratio=ratio,
+        landcoverai_ratio=ratio_label,
     )
 
 
@@ -490,14 +491,16 @@ def _seed_modal_landcoverai_archive() -> None:
     )
 
 
-def _landcoverai_mix_ratio_from_manifest(manifest_path: Path) -> float:
+def _landcoverai_mix_ratio_from_manifest(manifest_path: Path) -> float | None:
     name = manifest_path.parent.name
+    if name == "all":
+        return None
     if name == "baseline":
         return 0.0
     prefix = "ratio-"
     if not name.startswith(prefix):
         raise ValueError(
-            "LandCover.ai mix manifest parent must be `baseline` or `ratio-N`: "
+            "LandCover.ai mix manifest parent must be `baseline`, `all`, or `ratio-N`: "
             f"{manifest_path}"
         )
     try:
@@ -516,7 +519,7 @@ def _write_landcoverai_mix_manifest(
     *,
     openearthmap_manifest: Path,
     landcoverai_manifest: Path,
-    landcoverai_ratio: float,
+    landcoverai_ratio: float | None,
     validation_samples: int,
     seed: int,
 ) -> None:
@@ -539,17 +542,26 @@ def _write_landcoverai_mix_manifest(
         _with_split(sample, "train")
         for sample in sorted(openearthmap_train, key=lambda item: str(item.image_path))
     ]
-    landcoverai_count = int(len(openearthmap_train) * landcoverai_ratio)
-    if landcoverai_count > 0:
+    landcoverai_count = 0
+    landcoverai_ratio_label: str | float = "all" if landcoverai_ratio is None else landcoverai_ratio
+    if landcoverai_ratio is None or landcoverai_ratio > 0.0:
         landcoverai_samples = [
             sample for sample in read_manifest(landcoverai_manifest) if sample.split == "train"
         ]
+        landcoverai_count = (
+            len(landcoverai_samples)
+            if landcoverai_ratio is None
+            else int(len(openearthmap_train) * landcoverai_ratio)
+        )
         if len(landcoverai_samples) < landcoverai_count:
             raise RuntimeError(
                 f"LandCover.ai manifest only has {len(landcoverai_samples)} train samples; "
                 f"need {landcoverai_count}"
             )
-        random.Random(seed + int(landcoverai_ratio * 10_000)).shuffle(landcoverai_samples)
+        ratio_seed_offset = (
+            1_000_000 if landcoverai_ratio is None else int(landcoverai_ratio * 10_000)
+        )
+        random.Random(seed + ratio_seed_offset).shuffle(landcoverai_samples)
         mixed_samples.extend(
             _with_split(sample, "train")
             for sample in sorted(
@@ -567,6 +579,7 @@ def _write_landcoverai_mix_manifest(
         manifest_path=str(manifest_path),
         openearthmap_train=len(openearthmap_train),
         openearthmap_val=len(openearthmap_val),
+        landcoverai_ratio=landcoverai_ratio_label,
         landcoverai_train=landcoverai_count,
         train_samples=len(mixed_samples) - len(openearthmap_val),
         total_samples=len(mixed_samples),
