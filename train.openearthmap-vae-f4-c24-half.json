@@ -3,6 +3,7 @@
   "manifest_path": "data/openearthmap/manifest.jsonl",
   "split": "train",
   "train_fraction": 0.5,
+  "validation_split": "city",
   "validation_samples": 64,
   "image_size": 256,
   "eval_size": 256,
@@ -22,7 +23,5 @@
   "grid_samples": 8,
   "checkpoint_path": "artifacts/openearthmap-custom-vae-f4-c24-half.pt",
   "metrics_path": "artifacts/openearthmap-custom-vae-f4-c24-half-metrics.json",
-  "grid_path": "artifacts/openearthmap-custom-vae-f4-c24-half-grid.png",
-  "compare_sd_vae": false,
-  "sd_vae_model": "stabilityai/sd-vae-ft-mse"
+  "grid_path": "artifacts/openearthmap-custom-vae-f4-c24-half-grid.png"
 }

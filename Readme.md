@@ -41,28 +41,30 @@ and SSIM.
 Native satellite VAE training is available as a separate reconstruction audit
 step before latent flow-matching experiments. The 50% OpenEarthMap config trains
 a 4x, 24-channel convolutional VAE on half of the prepared training images and
-evaluates on held-out images from the other half:
+evaluates on images from held-out city groups:
 
 ```bash
 uv run sim-satellite train-vae train.openearthmap-vae-f4-c24-half.json
 ```
 
 For longer VAE runs, use the Modal/H100 target. The 20k candidate config trains
-on 88% of the prepared training images and validates on 320 held-out images:
+on roughly 88% of the prepared training images and validates on 320 images from
+held-out city groups:
 
 ```bash
 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json
 ```
 
 This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
-`artifacts/`. Local sweeps on the prepared OpenEarthMap cache used 1,343 train
-images and up to 96 held-out validation images. The current config uses 24
-latent channels, 32 hidden channels, `kl_weight=1e-6`,
+`artifacts/`. The checkpoint and metrics JSON include per-channel train-latent
+mean/std values for the encoder `mu` distribution, which is the normalization
+contract expected by later latent flow-matching experiments.
+Local sweeps on the prepared OpenEarthMap cache used 1,343 train images and up
+to 96 held-out validation images. The current config uses 24 latent channels,
+32 hidden channels, `kl_weight=1e-6`,
 `reconstruction_exponential_weight=0.5`, `reconstruction_exponential_scale=12.0`,
 and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction,
-not as a final production codec. Stable Diffusion VAE comparison remains an
-optional audit path when `diffusers` is installed separately and
-`compare_sd_vae=true`.
+not as a final production codec.
 `reconstruction_exponential_weight` and `reconstruction_exponential_scale`
 control a nonlinear reconstruction term that makes 99% reconstructions worth
 disproportionately more than merely acceptable reconstructions, without adding a

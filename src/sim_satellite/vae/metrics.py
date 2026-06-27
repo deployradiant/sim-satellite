@@ -19,8 +19,10 @@ def reconstruction_metrics(real: Any, reconstructed: Any, *, torch: Any) -> dict
 
     mse = (real - reconstructed).square().mean(dim=(1, 2, 3))
     psnr = -10.0 * torch.log10(mse.clamp_min(1e-12))
-    edge_mae = (edge_map(real, torch=torch) - edge_map(reconstructed, torch=torch)).abs().mean(
-        dim=(1, 2, 3)
+    edge_mae = (
+        (edge_map(real, torch=torch) - edge_map(reconstructed, torch=torch))
+        .abs()
+        .mean(dim=(1, 2, 3))
     )
     mean_rgb_mae = (real.mean(dim=(2, 3)) - reconstructed.mean(dim=(2, 3))).abs().mean(dim=1)
     return {

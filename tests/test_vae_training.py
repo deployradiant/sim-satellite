@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 import torch
 
+import sim_satellite.vae.training as vae_training
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
-from sim_satellite.vae import SatelliteVAE, SatelliteVAEConfig
-from sim_satellite.vae import training as vae_training
 from sim_satellite.vae.metrics import reconstruction_metrics
+from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 from sim_satellite.vae.training import (
     VAETrainingConfig,
     load_vae_training_config_values,
@@ -41,6 +41,8 @@ def test_vae_training_config_rejects_unknown_fields() -> None:
 def test_vae_training_config_validates_split_bounds() -> None:
     with pytest.raises(ValueError, match="train_fraction"):
         load_vae_training_config_values({"train_fraction": 1.0})
+    with pytest.raises(ValueError, match="validation_split"):
+        load_vae_training_config_values({"validation_split": "zipcode"})
 
 
 def test_vae_training_config_validates_exponential_reconstruction_settings() -> None:
@@ -69,22 +71,6 @@ def test_exponential_reconstruction_loss_rewards_near_exact_reconstruction() -> 
     assert large > small * 5.0
 
 
-def test_sd_vae_comparison_reports_missing_optional_dependency(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_import(_: str) -> None:
-        raise ModuleNotFoundError("diffusers")
-
-    monkeypatch.setattr(vae_training, "import_module", fail_import)
-
-    with pytest.raises(RuntimeError, match="compare_sd_vae requires the optional"):
-        vae_training._sd_reconstruct(
-            "stabilityai/sd-vae-ft-mse",
-            torch.zeros(1, 3, 8, 8),
-            device=torch.device("cpu"),
-        )
-
-
 def test_split_vae_samples_is_deterministic(tmp_path: Path) -> None:
     manifest_path = _write_manifest_with_prepared_samples(tmp_path, count=10)
     config = VAETrainingConfig(
@@ -105,6 +91,31 @@ def test_split_vae_samples_is_deterministic(tmp_path: Path) -> None:
     ]
     assert len(first_train) == 5
     assert len(first_validation) == 2
+
+
+def test_city_split_holds_out_validation_groups(tmp_path: Path) -> None:
+    manifest_path = _write_manifest_with_prepared_samples(
+        tmp_path,
+        count=12,
+        group_count=4,
+    )
+    config = VAETrainingConfig(
+        manifest_path=str(manifest_path),
+        train_fraction=0.5,
+        validation_split="city",
+        validation_samples=3,
+        seed=123,
+    )
+
+    train_samples, validation_samples = split_vae_samples(config)
+    train_groups = {vae_training._sample_validation_group(sample) for sample in train_samples}
+    validation_groups = {
+        vae_training._sample_validation_group(sample) for sample in validation_samples
+    }
+
+    assert train_samples
+    assert len(validation_samples) == 3
+    assert train_groups.isdisjoint(validation_groups)
 
 
 def test_reconstruction_metrics_identical_images_are_strong() -> None:
@@ -134,7 +145,6 @@ def test_run_vae_training_writes_checkpoint_metrics_and_grid(tmp_path: Path) -> 
         cache_images=2,
         log_every=1,
         grid_samples=2,
-        compare_sd_vae=False,
         checkpoint_path=str(tmp_path / "custom-vae.pt"),
         metrics_path=str(tmp_path / "metrics.json"),
         grid_path=str(tmp_path / "grid.png"),
@@ -148,9 +158,11 @@ def test_run_vae_training_writes_checkpoint_metrics_and_grid(tmp_path: Path) -> 
     payload = json.loads(Path(result.metrics_path).read_text(encoding="utf-8"))
     assert payload["train_image_count"] == 3
     assert payload["validation_image_count"] == 2
-    assert payload["sd_vae"] is None
+    assert payload["latent_stats"]["sample_count"] == 3
+    assert len(payload["latent_stats"]["mean"]) == 4
     checkpoint = torch.load(result.checkpoint_path, map_location="cpu")
     assert checkpoint["vae_config"]["latent_channels"] == 4
+    assert checkpoint["latent_stats"]["sample_count"] == 3
 
 
 def _write_manifest_with_prepared_samples(
@@ -158,6 +170,7 @@ def _write_manifest_with_prepared_samples(
     *,
     count: int,
     image_size: int = 32,
+    group_count: int | None = None,
 ) -> Path:
     samples: list[SatelliteSample] = []
     for index in range(count):
@@ -177,8 +190,18 @@ def _write_manifest_with_prepared_samples(
         )
         samples.append(
             SatelliteSample(
-                image_path=tmp_path / "images" / f"sample-{index}.png",
-                mask_path=tmp_path / "masks" / f"sample-{index}.png",
+                image_path=_fixture_path(
+                    tmp_path,
+                    "images",
+                    index=index,
+                    group_count=group_count,
+                ),
+                mask_path=_fixture_path(
+                    tmp_path,
+                    "masks",
+                    index=index,
+                    group_count=group_count,
+                ),
                 prepared_path=prepared_path,
                 split="train",
             )
@@ -187,3 +210,16 @@ def _write_manifest_with_prepared_samples(
     manifest_path = tmp_path / "manifest.jsonl"
     write_manifest(samples, manifest_path)
     return manifest_path
+
+
+def _fixture_path(
+    tmp_path: Path,
+    root: str,
+    *,
+    index: int,
+    group_count: int | None,
+) -> Path:
+    filename = f"sample-{index}.png"
+    if group_count is None:
+        return tmp_path / root / filename
+    return tmp_path / root / f"city-{index % group_count}" / filename

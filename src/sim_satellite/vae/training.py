@@ -8,7 +8,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
-from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +23,6 @@ from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 from sim_satellite.vae.metrics import reconstruction_metrics
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
-DEFAULT_SD_VAE_MODEL = "stabilityai/sd-vae-ft-mse"
-
 
 @dataclass(frozen=True)
 class VAETrainingConfig:
@@ -33,6 +30,7 @@ class VAETrainingConfig:
     manifest_path: str = DEFAULT_MANIFEST_PATH
     split: str = "train"
     train_fraction: float = 0.5
+    validation_split: str = "sample"
     validation_samples: int = 32
     image_size: int = 256
     eval_size: int = 256
@@ -53,8 +51,6 @@ class VAETrainingConfig:
     checkpoint_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half.pt"
     metrics_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half-metrics.json"
     grid_path: str = "artifacts/openearthmap-custom-vae-f4-c24-half-grid.png"
-    compare_sd_vae: bool = False
-    sd_vae_model: str = DEFAULT_SD_VAE_MODEL
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> VAETrainingConfig:
@@ -81,7 +77,7 @@ class VAETrainingResult:
     validation_image_count: int
     final_loss: float
     custom_vae: dict[str, float]
-    sd_vae: dict[str, float] | None
+    latent_stats: dict[str, Any]
 
 
 class TensorCache:
@@ -124,6 +120,16 @@ def split_vae_samples(
     if not samples:
         raise ValueError("VAE training found no samples")
 
+    if config.validation_split == "city":
+        return _split_vae_samples_by_group(samples, config)
+    return _split_vae_samples_by_sample(samples, config)
+
+
+def _split_vae_samples_by_sample(
+    samples: Sequence[SatelliteSample],
+    config: VAETrainingConfig,
+) -> tuple[tuple[SatelliteSample, ...], tuple[SatelliteSample, ...]]:
+    samples = list(samples)
     random.Random(config.seed).shuffle(samples)
     train_count = int(len(samples) * config.train_fraction)
     train_samples = tuple(samples[:train_count])
@@ -133,6 +139,46 @@ def split_vae_samples(
     if len(validation_samples) != config.validation_samples:
         raise ValueError(
             "VAE training split does not leave enough validation samples after train_fraction"
+        )
+    return train_samples, validation_samples
+
+
+def _split_vae_samples_by_group(
+    samples: Sequence[SatelliteSample],
+    config: VAETrainingConfig,
+) -> tuple[tuple[SatelliteSample, ...], tuple[SatelliteSample, ...]]:
+    grouped: dict[str, list[SatelliteSample]] = {}
+    for sample in samples:
+        grouped.setdefault(_sample_validation_group(sample), []).append(sample)
+    if len(grouped) < 2:
+        raise ValueError("city validation split requires at least two sample groups")
+
+    rng = random.Random(config.seed)
+    group_names = sorted(grouped)
+    rng.shuffle(group_names)
+    train_target = int(len(samples) * config.train_fraction)
+    train_groups: list[str] = []
+    for group_name in group_names:
+        remaining = [name for name in group_names if name not in train_groups]
+        remaining_samples = sum(len(grouped[name]) for name in remaining)
+        if remaining_samples <= config.validation_samples:
+            break
+        train_groups.append(group_name)
+        train_count = sum(len(grouped[name]) for name in train_groups)
+        if train_count >= train_target:
+            break
+
+    validation_groups = [name for name in group_names if name not in train_groups]
+    train_samples = tuple(sample for name in train_groups for sample in grouped[name])
+    validation_pool = [sample for name in validation_groups for sample in grouped[name]]
+    rng.shuffle(validation_pool)
+    validation_samples = tuple(validation_pool[: config.validation_samples])
+
+    if not train_samples:
+        raise ValueError("VAE training city split produced no training samples")
+    if len(validation_samples) != config.validation_samples:
+        raise ValueError(
+            "VAE training city split does not leave enough validation samples after train_fraction"
         )
     return train_samples, validation_samples
 
@@ -187,16 +233,7 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         _to_unit(custom_recon),
         torch=torch,
     )
-
-    sd_recon: torch.Tensor | None = None
-    sd_metrics: dict[str, float] | None = None
-    if config.compare_sd_vae:
-        sd_recon = _sd_reconstruct(config.sd_vae_model, validation_real, device=device)
-        sd_metrics = reconstruction_metrics(
-            _to_unit(validation_real),
-            _to_unit(sd_recon),
-            torch=torch,
-        )
+    latent_stats = _latent_stats(model, train_samples, config=config, device=device)
 
     checkpoint_path = Path(config.checkpoint_path)
     metrics_path = Path(config.metrics_path)
@@ -208,12 +245,12 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         train_samples=train_samples,
         validation_samples=validation_samples,
         history=history,
+        latent_stats=latent_stats,
     )
     _write_grid(
         grid_path,
         real=validation_real[: config.grid_samples],
         custom=custom_recon[: config.grid_samples],
-        sd=None if sd_recon is None else sd_recon[: config.grid_samples],
     )
     _write_metrics(
         metrics_path,
@@ -222,7 +259,7 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         train_samples=train_samples,
         validation_samples=validation_samples,
         custom_metrics=custom_metrics,
-        sd_metrics=sd_metrics,
+        latent_stats=latent_stats,
         checkpoint_path=checkpoint_path,
         grid_path=grid_path,
         history=history,
@@ -236,7 +273,7 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         validation_image_count=len(validation_samples),
         final_loss=final_loss,
         custom_vae=custom_metrics,
-        sd_vae=sd_metrics,
+        latent_stats=latent_stats,
     )
 
 
@@ -259,6 +296,8 @@ def _validate_config(config: VAETrainingConfig) -> None:
             raise ValueError(f"{name} must be positive")
     if config.train_fraction <= 0.0 or config.train_fraction >= 1.0:
         raise ValueError("train_fraction must be greater than 0 and less than 1")
+    if config.validation_split not in {"sample", "city"}:
+        raise ValueError("validation_split must be one of: sample, city")
     for name in ("kl_weight", "mse_weight", "reconstruction_exponential_weight"):
         if getattr(config, name) < 0.0:
             raise ValueError(f"{name} must be non-negative")
@@ -279,8 +318,6 @@ def _validate_config(config: VAETrainingConfig) -> None:
     for name in ("manifest_path", "checkpoint_path", "metrics_path", "grid_path"):
         if not getattr(config, name):
             raise ValueError(f"{name} is required")
-    if config.compare_sd_vae and not config.sd_vae_model:
-        raise ValueError("sd_vae_model is required when compare_sd_vae is true")
 
 
 def _training_device(config: VAETrainingConfig) -> torch.device:
@@ -396,25 +433,48 @@ def _custom_reconstruct(
     return torch.cat(outputs, dim=0)
 
 
-def _sd_reconstruct(model_name: str, images: torch.Tensor, *, device: torch.device) -> torch.Tensor:
-    try:
-        diffusers: Any = import_module("diffusers")
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            "compare_sd_vae requires the optional `diffusers` package. "
-            "Install it separately or set compare_sd_vae=false."
-        ) from error
-    sd_vae = diffusers.AutoencoderKL.from_pretrained(model_name).to(device)
-    sd_vae.requires_grad_(False)
-    sd_vae.eval()
-    outputs: list[torch.Tensor] = []
-    scale = float(sd_vae.config.scaling_factor)
+def _latent_stats(
+    model: SatelliteVAE,
+    samples: Sequence[SatelliteSample],
+    *,
+    config: VAETrainingConfig,
+    device: torch.device,
+) -> dict[str, Any]:
+    latent_sum = torch.zeros(config.latent_channels, dtype=torch.float64)
+    latent_square_sum = torch.zeros(config.latent_channels, dtype=torch.float64)
+    logvar_sum = torch.zeros(config.latent_channels, dtype=torch.float64)
+    element_count = 0
+
     with torch.inference_mode():
-        for start in range(0, images.shape[0], 4):
-            batch = images[start : start + 4].to(device)
-            latents = sd_vae.encode(batch).latent_dist.mode() * scale
-            outputs.append(sd_vae.decode(latents / scale).sample.clamp(-1.0, 1.0).detach().cpu())
-    return torch.cat(outputs, dim=0)
+        for start in range(0, len(samples), config.batch_size):
+            batch_samples = samples[start : start + config.batch_size]
+            batch = torch.stack(
+                [
+                    _center_crop(_load_prepared_image(sample), config.eval_size)
+                    for sample in batch_samples
+                ]
+            ).to(device)
+            mu, logvar = model.encode(batch)
+            latent_sum += mu.sum(dim=(0, 2, 3)).detach().double().cpu()
+            latent_square_sum += mu.square().sum(dim=(0, 2, 3)).detach().double().cpu()
+            logvar_sum += logvar.sum(dim=(0, 2, 3)).detach().double().cpu()
+            element_count += int(mu.shape[0] * mu.shape[2] * mu.shape[3])
+
+    mean = latent_sum / element_count
+    variance = (latent_square_sum / element_count - mean.square()).clamp_min(0.0)
+    std = variance.sqrt()
+    logvar_mean = logvar_sum / element_count
+    return {
+        "source": "train_mu",
+        "sample_count": len(samples),
+        "element_count": element_count,
+        "mean": [float(value) for value in mean.tolist()],
+        "std": [float(value) for value in std.tolist()],
+        "global_mean": float(mean.mean().item()),
+        "global_std": float(std.mean().item()),
+        "logvar_mean": [float(value) for value in logvar_mean.tolist()],
+        "global_logvar_mean": float(logvar_mean.mean().item()),
+    }
 
 
 def _write_checkpoint(
@@ -425,6 +485,7 @@ def _write_checkpoint(
     train_samples: Sequence[SatelliteSample],
     validation_samples: Sequence[SatelliteSample],
     history: Sequence[Mapping[str, float]],
+    latent_stats: Mapping[str, Any],
 ) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -435,6 +496,7 @@ def _write_checkpoint(
             "train_samples": [str(sample.prepared_path) for sample in train_samples],
             "validation_samples": [str(sample.prepared_path) for sample in validation_samples],
             "history": list(history),
+            "latent_stats": dict(latent_stats),
         },
         checkpoint_path,
     )
@@ -448,7 +510,7 @@ def _write_metrics(
     train_samples: Sequence[SatelliteSample],
     validation_samples: Sequence[SatelliteSample],
     custom_metrics: Mapping[str, float],
-    sd_metrics: Mapping[str, float] | None,
+    latent_stats: Mapping[str, Any],
     checkpoint_path: Path,
     grid_path: Path,
     history: Sequence[Mapping[str, float]],
@@ -459,7 +521,7 @@ def _write_metrics(
         "train_image_count": len(train_samples),
         "validation_image_count": len(validation_samples),
         "custom_vae": dict(custom_metrics),
-        "sd_vae": None if sd_metrics is None else dict(sd_metrics),
+        "latent_stats": dict(latent_stats),
         "checkpoint_path": str(checkpoint_path),
         "metrics_path": str(metrics_path),
         "grid_path": str(grid_path),
@@ -476,11 +538,8 @@ def _write_grid(
     *,
     real: torch.Tensor,
     custom: torch.Tensor,
-    sd: torch.Tensor | None,
 ) -> None:
     labels = ["Original", "Custom VAE", "Custom error x4"]
-    if sd is not None:
-        labels.extend(["SD VAE", "SD error x4"])
     rows = real.shape[0]
     cell = int(real.shape[-1])
     label_height = 24
@@ -499,8 +558,6 @@ def _write_grid(
             _tensor_to_pil(custom[row]),
             _error_to_pil(real[row], custom[row]),
         ]
-        if sd is not None:
-            panels.extend([_tensor_to_pil(sd[row]), _error_to_pil(real[row], sd[row])])
         for col, panel in enumerate(panels):
             canvas.paste(panel, (col * cell, label_height + row * cell))
 
@@ -528,6 +585,28 @@ def _error_to_pil(real: torch.Tensor, reconstructed: torch.Tensor) -> Image.Imag
         (error.detach().cpu().permute(1, 2, 0).numpy() * 255.0).round().clip(0, 255).astype("uint8")
     )
     return Image.fromarray(array)
+
+
+def _sample_validation_group(sample: SatelliteSample) -> str:
+    parts = sample.image_path.parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] == "images":
+            tail = parts[index + 1 :]
+            if len(tail) > 1:
+                return tail[0]
+            if tail:
+                return _stem_group(Path(tail[0]).stem)
+    parent = sample.image_path.parent.name
+    if parent and parent != "images":
+        return parent
+    return _stem_group(sample.image_path.stem)
+
+
+def _stem_group(stem: str) -> str:
+    for separator in ("_", "-"):
+        if separator in stem:
+            return stem.split(separator, 1)[0]
+    return stem
 
 
 @click.command("train-vae", help="Train the native satellite VAE from a JSON config file.")
