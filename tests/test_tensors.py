@@ -92,4 +92,3 @@ def test_image_to_uint8_tensor_uses_rgb_byte_values() -> None:
         tensor[0, 1],
         torch.tensor([255, 0, 127], dtype=torch.uint8),
     )
-
