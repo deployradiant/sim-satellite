@@ -3,6 +3,7 @@ name = "sim-satellite"
 version = "0.1.0"
 description = "End-to-end exploration of conditional satellite-image diffusion."
 readme = "Readme.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",

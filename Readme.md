@@ -3,6 +3,8 @@
 This project is intended to be an end-to-end exploration of diffusion models and steering.
 It is a proof-of-concept research project, not a commercial product or commercial
 dataset pipeline.
+The repository contains MIT-licensed code only; it does not redistribute
+third-party datasets, prepared tensors, trained checkpoints, or model weights.
 
 The output is a simple diffusion model that has been trained on satellite images. The satellite images have been labelled to indicate where a house, tree, road etc is. This allows us to create fully fictious satellite landscapes from the diffusion model.
 
@@ -11,6 +13,22 @@ The user can interact with the model through a simple webapp. They can either ge
 ### Implementation
 
 The project is written in Python with uv. It uses Modal by default for training and inference. The web app is a static HTML page that talks to a minimal FastAPI server for masks and generation.
+
+### License
+
+The source code in this repository is licensed under the MIT License. See
+[LICENSE](LICENSE).
+
+Third-party satellite datasets, generated dataset derivatives, prepared tensor
+data, trained checkpoints, model weights, and evaluation artifacts are not
+covered by the MIT code license. This repository does not redistribute those
+materials.
+
+Experiments that use non-commercial/share-alike datasets such as OpenEarthMap,
+LandCover.ai, or LoveDA should be treated as non-commercial research work. If
+dataset derivatives, manifests, checkpoints, or model artifacts are published
+separately, release them under CC BY-NC-SA 4.0 with dataset attribution and a
+clear non-commercial-use restriction. See [NOTICE.md](NOTICE.md).
 
 ### Run the project
 
@@ -131,7 +149,9 @@ uv run modal deploy -m sim_satellite.modal_app
 
 ### Data
 
-Data is generated locally under `data/` by default and is not committed.
+Data is generated locally under `data/` by default and is not committed. Model
+checkpoints and other generated artifacts are written under `artifacts/` by
+default and are also not committed.
 OpenEarthMap should normally be fully downloaded, extracted, and prepared once
 under `data/openearthmap/` for local inspection and debugging. Modal runs prepare
 their own copy under `/data/openearthmap` on remote local scratch disk. Prepared
@@ -140,10 +160,16 @@ metadata.
 
 Dataset licenses vary by source and may restrict commercial use. OpenEarthMap
 label data follows the license of each source image, with some source regions
-under non-commercial Creative Commons terms. Any future dataset import should
+under non-commercial Creative Commons terms. LandCover.ai is CC BY-NC-SA 4.0.
+LoveDA is academic/non-commercial only. Any future dataset import should
 document the source license, preserve attribution metadata, and be treated as
 proof-of-concept/non-commercial unless every included source is explicitly
 compatible with broader use.
+
+The intended public release shape for dataset-backed work is a reproducible
+research repository plus paper or technical write-up. Do not commit or
+redistribute raw datasets, extracted tiles, prepared tensor data, trained
+checkpoints, or model weights in this repository.
 
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.
