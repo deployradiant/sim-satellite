@@ -38,6 +38,38 @@ Final mask-conditioned generation metrics can be enabled with
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
 
+Native satellite VAE training is available as a separate reconstruction audit
+step before latent flow-matching experiments. The 50% OpenEarthMap config trains
+a 4x, 24-channel convolutional VAE on half of the prepared training images and
+evaluates on images from held-out city groups:
+
+```bash
+uv run sim-satellite train-vae train.openearthmap-vae-f4-c24-half.json
+```
+
+For longer VAE runs, use the Modal/H100 target. The 20k candidate config trains
+on roughly 88% of the prepared training images and validates on 320 images from
+held-out city groups:
+
+```bash
+uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json
+```
+
+This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
+`artifacts/`. The checkpoint and metrics JSON include per-channel train-latent
+mean/std values for the encoder `mu` distribution, which is the normalization
+contract expected by later latent flow-matching experiments.
+Local sweeps on the prepared OpenEarthMap cache used 1,343 train images and up
+to 96 held-out validation images. The current config uses 24 latent channels,
+32 hidden channels, `kl_weight=1e-6`,
+`reconstruction_exponential_weight=0.5`, `reconstruction_exponential_scale=12.0`,
+and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction,
+not as a final production codec.
+`reconstruction_exponential_weight` and `reconstruction_exponential_scale`
+control a nonlinear reconstruction term that makes 99% reconstructions worth
+disproportionately more than merely acceptable reconstructions, without adding a
+separate hand-tuned sharpness loss.
+
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
 tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
@@ -216,3 +248,35 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   generation metrics. Final generation metrics now include per-class RGB mean
   MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
   when semantic masks are available.
+- 2026-06-26 PDT: AutoResearch VAE follow-up kept the exponential reconstruction
+  loss fixed and tested training mechanics/capacity on 1,343 train and 96
+  validation OpenEarthMap samples for 1,500 local steps. Baseline c16/h32 reached
+  MSE `0.002373`, PSNR `27.117`, SSIM `0.8529`, edge MAE `0.04639`, and RGB MAE
+  `0.00817`. Deterministic mean-latent training and `weight_decay=0.0` were
+  rejected because they worsened the fixed-seed validation metrics. Wider
+  c24/h48 improved SSIM/edge but introduced color drift. Latent-bandwidth-only
+  c24/h32 improved every tracked metric on the same seed: MSE `0.002359`, PSNR
+  `27.262`, SSIM `0.8560`, edge MAE `0.04587`, and RGB MAE `0.00738`. Decision:
+  update the custom VAE config/default to 24 latent channels while keeping hidden
+  width and the loss unchanged. Next best hypotheses: run the c24/h32 config
+  longer on H100, then retest c32/h32 and learning-rate schedule only if c24/h32
+  plateaus blurry.
+- 2026-06-26 PDT: The c24/h32 VAE was then trained for the longer 5,000-step
+  Modal/H100 config with
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-long-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-half.json`.
+  The run prepared 2,687 OpenEarthMap samples on remote `/data/openearthmap`
+  scratch and trained on 1,343 of them. Final 64-sample validation metrics were
+  MSE `0.001522`, PSNR `29.512`, SSIM `0.9211`, edge MAE `0.03701`, and RGB MAE
+  `0.00932`. The checkpoint, metrics, and grid were written to the Modal
+  artifact volume as `/artifacts/openearthmap-custom-vae-f4-c24-half.*`.
+  Decision: keep c24/h32 for the custom VAE direction; the next risk to inspect
+  is mild color drift, not structural capacity.
+- 2026-06-26 PDT: A longer c24/h32 Modal/H100 run trained for 20,000 steps with
+  `train_fraction=0.88`, 2,364 train samples, and 320 validation samples:
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-20k-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json`.
+  Final validation metrics improved to MSE `0.000245`, PSNR `37.456`, SSIM
+  `0.9864`, edge MAE `0.01709`, and RGB MAE `0.00453`. The checkpoint, metrics,
+  and grid were written to `/artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val320-20k.*`.
+  Decision: this is the current best validated custom VAE checkpoint. The next
+  comparison should be latent flow matching with this encoder versus pixel flow
+  matching, not more sharpness-loss tuning.
