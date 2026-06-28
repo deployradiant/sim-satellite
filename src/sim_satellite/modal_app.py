@@ -25,6 +25,12 @@ from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
 )
+from sim_satellite.segmentation import (
+    SegmentationEvaluationConfig,
+    SegmentationTrainingConfig,
+    evaluate_segmentation_model,
+    train_segmentation_model,
+)
 from sim_satellite.train import run_training
 from sim_satellite.training_config import (
     TrainingConfig,
@@ -187,6 +193,46 @@ def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_training_data(config["manifest_path"])
+    artifact_volume.reload()
+    result = asdict(
+        train_segmentation_model(
+            SegmentationTrainingConfig.from_dict(config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_segmentation_training_progress",
+                message=message,
+            ),
+        )
+    )
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
+    gpu=MODAL_INFERENCE_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def evaluate_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_training_data(config["manifest_path"])
+    artifact_volume.reload()
+    result = asdict(evaluate_segmentation_model(SegmentationEvaluationConfig(**config)))
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
@@ -247,6 +293,24 @@ def run_vae_training_target(
             return train_vae_remote.spawn(modal_config).get()
 
 
+def run_segmentation_training_target(
+    config: SegmentationTrainingConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_segmentation_training_config(config)
+    with modal.enable_output():
+        with app.run():
+            return train_segmentation_remote.spawn(modal_config).get()
+
+
+def run_segmentation_evaluation_target(
+    config: SegmentationEvaluationConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_segmentation_evaluation_config(config)
+    with modal.enable_output():
+        with app.run():
+            return evaluate_segmentation_remote.remote(modal_config)
+
+
 def run_training_sweep_target(
     configs: list[TrainingConfig],
 ) -> list[dict[str, Any]]:
@@ -286,6 +350,26 @@ def _modal_vae_training_config(config: VAETrainingConfig) -> dict[str, Any]:
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["metrics_path"] = _modal_artifact_path(config.metrics_path)
     values["grid_path"] = _modal_artifact_path(config.grid_path)
+    return values
+
+
+def _modal_segmentation_training_config(config: SegmentationTrainingConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["device"] = "cuda"
+    values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    if config.vae_checkpoint_path:
+        values["vae_checkpoint_path"] = _modal_artifact_path(config.vae_checkpoint_path)
+    return values
+
+
+def _modal_segmentation_evaluation_config(config: SegmentationEvaluationConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["device"] = "cuda"
+    values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    if config.output_path:
+        values["output_path"] = _modal_artifact_path(config.output_path)
     return values
 
 
