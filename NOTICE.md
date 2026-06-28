@@ -38,3 +38,11 @@ filtering, or mixing steps.
 Commercial use of dataset derivatives, trained checkpoints, model weights, or
 other artifacts derived from non-commercial source datasets is not permitted by
 this repository's license policy.
+
+## Public Release Process
+
+Before any public research release, create a clean copy of the repository for
+publication. The release copy should include only code, configs, synthetic test
+fixtures, documentation, and reproduction instructions. It should exclude local
+data caches, prepared tensors, logs, checkpoints, model weights, generated
+images, and any other dataset-derived artifacts.

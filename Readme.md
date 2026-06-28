@@ -171,6 +171,12 @@ research repository plus paper or technical write-up. Do not commit or
 redistribute raw datasets, extracted tiles, prepared tensor data, trained
 checkpoints, or model weights in this repository.
 
+Before any public release, create a clean release copy of the repository rather
+than publishing this working checkout directly. The release copy should include
+only code, configs, synthetic test fixtures, documentation, and reproduction
+instructions. Exclude local data caches, prepared tensors, logs, checkpoints,
+model weights, generated images, and any other dataset-derived artifacts.
+
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.
 
