@@ -57,9 +57,7 @@ MODAL_LANDCOVERAI_DATA_DIR = MODAL_DATA_ROOT / "landcoverai"
 MODAL_LANDCOVERAI_MIX_ROOT = MODAL_DATA_ROOT / "landcoverai-mix"
 LOCAL_LANDCOVERAI_ARCHIVE_PATH = os.environ.get("SIM_SATELLITE_LOCAL_LANDCOVERAI_ARCHIVE_PATH")
 MODAL_PACKAGED_LANDCOVERAI_ARCHIVE = MODAL_PACKAGE_ROOT / "landcover.ai.v1.zip"
-MODAL_LANDCOVERAI_MIX_SEED = int(
-    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_SEED", "20260626")
-)
+MODAL_LANDCOVERAI_MIX_SEED = int(os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_SEED", "20260626"))
 MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES = int(
     os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_VALIDATION_SAMPLES", "256")
 )
@@ -401,11 +399,11 @@ def _is_modal_landcoverai_mix_manifest(manifest_path: Path) -> bool:
 
 
 def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
-    if _modal_manifest_data_ready(manifest_path):
+    ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
+    if _modal_landcoverai_mix_data_ready(manifest_path, landcoverai_ratio=ratio):
         _print_modal_data_event("modal_landcoverai_mix_ready", manifest_path=str(manifest_path))
         return
 
-    ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
     ratio_label: str | float = "all" if ratio is None else ratio
     _print_modal_data_event(
         "modal_landcoverai_mix_setup_start",
@@ -423,6 +421,7 @@ def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
         landcoverai_manifest=MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl",
         landcoverai_ratio=ratio,
         validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
         seed=MODAL_LANDCOVERAI_MIX_SEED,
     )
     _print_modal_data_event(
@@ -434,7 +433,10 @@ def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
 
 def _ensure_modal_landcoverai_data() -> None:
     manifest_path = MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl"
-    if _modal_manifest_data_ready(manifest_path):
+    if _modal_landcoverai_data_ready(
+        manifest_path,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    ):
         _print_modal_data_event(
             "modal_landcoverai_data_ready",
             data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
@@ -455,6 +457,19 @@ def _ensure_modal_landcoverai_data() -> None:
             "modal_landcoverai_data_setup_progress",
             data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
             message=message,
+        ),
+    )
+    _write_manifest_marker(
+        result.manifest_path,
+        _landcoverai_data_marker_payload(
+            manifest_path=result.manifest_path,
+            min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+            samples=result.samples,
+            prepared_samples=result.prepared_samples,
+            total_tiles=result.total_tiles,
+            supervised_tiles=result.supervised_tiles,
+            skipped_tiles=result.skipped_tiles,
+            split_counts=result.split_counts,
         ),
     )
     _print_modal_data_event(
@@ -521,10 +536,12 @@ def _write_landcoverai_mix_manifest(
     landcoverai_manifest: Path,
     landcoverai_ratio: float | None,
     validation_samples: int,
+    min_labeled_fraction: float,
     seed: int,
 ) -> None:
+    openearthmap_source_samples = read_manifest(openearthmap_manifest)
     openearthmap_samples = [
-        sample for sample in read_manifest(openearthmap_manifest) if sample.split == "train"
+        sample for sample in openearthmap_source_samples if sample.split == "train"
     ]
     if not openearthmap_samples:
         raise RuntimeError(f"OpenEarthMap manifest has no train samples: {openearthmap_manifest}")
@@ -543,10 +560,13 @@ def _write_landcoverai_mix_manifest(
         for sample in sorted(openearthmap_train, key=lambda item: str(item.image_path))
     ]
     landcoverai_count = 0
+    landcoverai_source_samples: list[SatelliteSample] = []
+    landcoverai_samples: list[SatelliteSample] = []
     landcoverai_ratio_label: str | float = "all" if landcoverai_ratio is None else landcoverai_ratio
     if landcoverai_ratio is None or landcoverai_ratio > 0.0:
+        landcoverai_source_samples = read_manifest(landcoverai_manifest)
         landcoverai_samples = [
-            sample for sample in read_manifest(landcoverai_manifest) if sample.split == "train"
+            sample for sample in landcoverai_source_samples if sample.split == "train"
         ]
         landcoverai_count = (
             len(landcoverai_samples)
@@ -574,6 +594,26 @@ def _write_landcoverai_mix_manifest(
         for sample in sorted(openearthmap_val, key=lambda item: str(item.image_path))
     )
     write_manifest(mixed_samples, manifest_path)
+    _write_manifest_marker(
+        manifest_path,
+        _landcoverai_mix_marker_payload(
+            manifest_path=manifest_path,
+            openearthmap_manifest=openearthmap_manifest,
+            landcoverai_manifest=landcoverai_manifest,
+            landcoverai_ratio=landcoverai_ratio,
+            validation_samples=validation_samples,
+            min_labeled_fraction=min_labeled_fraction,
+            seed=seed,
+            openearthmap_source_samples=len(openearthmap_source_samples),
+            openearthmap_source_train_samples=len(openearthmap_samples),
+            openearthmap_train_samples=len(openearthmap_train),
+            openearthmap_val_samples=len(openearthmap_val),
+            landcoverai_source_samples=len(landcoverai_source_samples),
+            landcoverai_source_train_samples=len(landcoverai_samples),
+            landcoverai_train_samples=landcoverai_count,
+            total_samples=len(mixed_samples),
+        ),
+    )
     _print_modal_data_event(
         "modal_landcoverai_mix_manifest_written",
         manifest_path=str(manifest_path),
@@ -644,6 +684,187 @@ def _modal_manifest_data_ready(manifest_path: Path) -> bool:
     except (EOFError, OSError, RuntimeError, ValueError):
         return False
     return isinstance(payload, dict) and payload.get("version") == PREPARED_DATA_VERSION
+
+
+def _modal_landcoverai_data_ready(
+    manifest_path: Path,
+    *,
+    min_labeled_fraction: float,
+) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    return _manifest_marker_matches(
+        manifest_path,
+        {
+            "kind": "landcoverai-data",
+            "manifest_path": str(manifest_path),
+            "min_labeled_fraction": min_labeled_fraction,
+            "prepared_data_version": PREPARED_DATA_VERSION,
+        },
+    )
+
+
+def _modal_landcoverai_mix_data_ready(
+    manifest_path: Path,
+    *,
+    landcoverai_ratio: float | None,
+) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    marker_payload = _expected_landcoverai_mix_marker_payload(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        landcoverai_manifest=MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl",
+        landcoverai_ratio=landcoverai_ratio,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+        seed=MODAL_LANDCOVERAI_MIX_SEED,
+    )
+    if marker_payload is None:
+        return False
+    return _manifest_marker_matches(manifest_path, marker_payload)
+
+
+def _expected_landcoverai_mix_marker_payload(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float | None,
+    validation_samples: int,
+    min_labeled_fraction: float,
+    seed: int,
+) -> dict[str, Any] | None:
+    try:
+        openearthmap_source_samples = read_manifest(openearthmap_manifest)
+        openearthmap_samples = [
+            sample for sample in openearthmap_source_samples if sample.split == "train"
+        ]
+        if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+            return None
+        openearthmap_train_samples = len(openearthmap_samples) - validation_samples
+        landcoverai_source_samples: list[SatelliteSample] = []
+        landcoverai_samples: list[SatelliteSample] = []
+        landcoverai_train_samples = 0
+        if landcoverai_ratio is None or landcoverai_ratio > 0.0:
+            landcoverai_source_samples = read_manifest(landcoverai_manifest)
+            landcoverai_samples = [
+                sample for sample in landcoverai_source_samples if sample.split == "train"
+            ]
+            landcoverai_train_samples = (
+                len(landcoverai_samples)
+                if landcoverai_ratio is None
+                else int(openearthmap_train_samples * landcoverai_ratio)
+            )
+            if len(landcoverai_samples) < landcoverai_train_samples:
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    return _landcoverai_mix_marker_payload(
+        manifest_path=manifest_path,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=landcoverai_ratio,
+        validation_samples=validation_samples,
+        min_labeled_fraction=min_labeled_fraction,
+        seed=seed,
+        openearthmap_source_samples=len(openearthmap_source_samples),
+        openearthmap_source_train_samples=len(openearthmap_samples),
+        openearthmap_train_samples=openearthmap_train_samples,
+        openearthmap_val_samples=validation_samples,
+        landcoverai_source_samples=len(landcoverai_source_samples),
+        landcoverai_source_train_samples=len(landcoverai_samples),
+        landcoverai_train_samples=landcoverai_train_samples,
+        total_samples=openearthmap_train_samples + validation_samples + landcoverai_train_samples,
+    )
+
+
+def _landcoverai_data_marker_payload(
+    *,
+    manifest_path: Path,
+    min_labeled_fraction: float,
+    samples: int,
+    prepared_samples: int,
+    total_tiles: int,
+    supervised_tiles: int,
+    skipped_tiles: int,
+    split_counts: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "kind": "landcoverai-data",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "min_labeled_fraction": min_labeled_fraction,
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "samples": samples,
+        "prepared_samples": prepared_samples,
+        "total_tiles": total_tiles,
+        "supervised_tiles": supervised_tiles,
+        "skipped_tiles": skipped_tiles,
+        "split_counts": split_counts,
+    }
+
+
+def _landcoverai_mix_marker_payload(
+    *,
+    manifest_path: Path,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float | None,
+    validation_samples: int,
+    min_labeled_fraction: float,
+    seed: int,
+    openearthmap_source_samples: int,
+    openearthmap_source_train_samples: int,
+    openearthmap_train_samples: int,
+    openearthmap_val_samples: int,
+    landcoverai_source_samples: int,
+    landcoverai_source_train_samples: int,
+    landcoverai_train_samples: int,
+    total_samples: int,
+) -> dict[str, Any]:
+    return {
+        "kind": "landcoverai-mix",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "openearthmap_manifest": str(openearthmap_manifest),
+        "openearthmap_source_samples": openearthmap_source_samples,
+        "openearthmap_source_train_samples": openearthmap_source_train_samples,
+        "openearthmap_train_samples": openearthmap_train_samples,
+        "openearthmap_val_samples": openearthmap_val_samples,
+        "landcoverai_manifest": str(landcoverai_manifest),
+        "landcoverai_ratio": landcoverai_ratio,
+        "landcoverai_source_samples": landcoverai_source_samples,
+        "landcoverai_source_train_samples": landcoverai_source_train_samples,
+        "landcoverai_train_samples": landcoverai_train_samples,
+        "min_labeled_fraction": min_labeled_fraction,
+        "seed": seed,
+        "validation_samples": validation_samples,
+        "total_samples": total_samples,
+    }
+
+
+def _write_manifest_marker(manifest_path: Path, payload: dict[str, Any]) -> None:
+    marker_path = _manifest_marker_path(manifest_path)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _manifest_marker_matches(manifest_path: Path, expected: dict[str, Any]) -> bool:
+    marker_path = _manifest_marker_path(manifest_path)
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return all(payload.get(key) == value for key, value in expected.items())
+
+
+def _manifest_marker_path(manifest_path: Path) -> Path:
+    return manifest_path.with_name(f"{manifest_path.name}.meta.json")
 
 
 def _print_modal_data_event(event: str, **payload: Any) -> None:

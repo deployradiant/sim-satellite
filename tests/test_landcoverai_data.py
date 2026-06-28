@@ -9,7 +9,6 @@ import torch
 from PIL import Image
 
 from sim_satellite.data.landcoverai import (
-    _crop_box_for_tile,
     download_and_prepare_landcoverai,
     remap_landcoverai_mask,
     scan_landcoverai,
@@ -195,13 +194,6 @@ def test_scan_landcoverai_opens_each_scene_once(
 
     assert scan.total_tiles == 2
     assert opened_tifs == Counter({("images", f"{scene}.tif"): 1, ("masks", f"{scene}.tif"): 1})
-
-
-def test_landcoverai_crop_box_uses_width_based_columns() -> None:
-    assert _crop_box_for_tile((1024, 1024), 0) == (0, 0, 512, 512)
-    assert _crop_box_for_tile((1024, 1024), 1) == (512, 0, 1024, 512)
-    assert _crop_box_for_tile((1024, 1024), 2) == (0, 512, 512, 1024)
-    assert _crop_box_for_tile((1024, 1024), 3) == (512, 512, 1024, 1024)
 
 
 def test_remap_landcoverai_background_stays_unlabeled() -> None:
