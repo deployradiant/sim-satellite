@@ -3,6 +3,8 @@
 This project is intended to be an end-to-end exploration of diffusion models and steering.
 It is a proof-of-concept research project, not a commercial product or commercial
 dataset pipeline.
+The repository contains MIT-licensed code only; it does not redistribute
+third-party datasets, prepared tensors, trained checkpoints, or model weights.
 
 The output is a simple diffusion model that has been trained on satellite images. The satellite images have been labelled to indicate where a house, tree, road etc is. This allows us to create fully fictious satellite landscapes from the diffusion model.
 
@@ -11,6 +13,22 @@ The user can interact with the model through a simple webapp. They can either ge
 ### Implementation
 
 The project is written in Python with uv. It uses Modal by default for training and inference. The web app is a static HTML page that talks to a minimal FastAPI server for masks and generation.
+
+### License
+
+The source code in this repository is licensed under the MIT License. See
+[LICENSE](LICENSE).
+
+Third-party satellite datasets, generated dataset derivatives, prepared tensor
+data, trained checkpoints, model weights, and evaluation artifacts are not
+covered by the MIT code license. This repository does not redistribute those
+materials.
+
+Experiments that use non-commercial/share-alike datasets such as OpenEarthMap,
+LandCover.ai, or LoveDA should be treated as non-commercial research work. If
+dataset derivatives, manifests, checkpoints, or model artifacts are published
+separately, release them under CC BY-NC-SA 4.0 with dataset attribution and a
+clear non-commercial-use restriction. See [NOTICE.md](NOTICE.md).
 
 ### Run the project
 
@@ -37,6 +55,38 @@ Final mask-conditioned generation metrics can be enabled with
 `validation_holdout_patterns` so the generated images are compared against
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
+
+Native satellite VAE training is available as a separate reconstruction audit
+step before latent flow-matching experiments. The 50% OpenEarthMap config trains
+a 4x, 24-channel convolutional VAE on half of the prepared training images and
+evaluates on images from held-out city groups:
+
+```bash
+uv run sim-satellite train-vae train.openearthmap-vae-f4-c24-half.json
+```
+
+For longer VAE runs, use the Modal/H100 target. The 20k candidate config trains
+on roughly 88% of the prepared training images and validates on 320 images from
+held-out city groups:
+
+```bash
+uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json
+```
+
+This writes a custom VAE checkpoint, metrics JSON, and reconstruction grid under
+`artifacts/`. The checkpoint and metrics JSON include per-channel train-latent
+mean/std values for the encoder `mu` distribution, which is the normalization
+contract expected by later latent flow-matching experiments.
+Local sweeps on the prepared OpenEarthMap cache used 1,343 train images and up
+to 96 held-out validation images. The current config uses 24 latent channels,
+32 hidden channels, `kl_weight=1e-6`,
+`reconstruction_exponential_weight=0.5`, `reconstruction_exponential_scale=12.0`,
+and `learning_rate=1.5e-4`. Treat this as support for the custom VAE direction,
+not as a final production codec.
+`reconstruction_exponential_weight` and `reconstruction_exponential_scale`
+control a nonlinear reconstruction term that makes 99% reconstructions worth
+disproportionately more than merely acceptable reconstructions, without adding a
+separate hand-tuned sharpness loss.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
@@ -99,7 +149,9 @@ uv run modal deploy -m sim_satellite.modal_app
 
 ### Data
 
-Data is generated locally under `data/` by default and is not committed.
+Data is generated locally under `data/` by default and is not committed. Model
+checkpoints and other generated artifacts are written under `artifacts/` by
+default and are also not committed.
 OpenEarthMap should normally be fully downloaded, extracted, and prepared once
 under `data/openearthmap/` for local inspection and debugging. Modal runs prepare
 their own copy under `/data/openearthmap` on remote local scratch disk. Prepared
@@ -108,10 +160,22 @@ metadata.
 
 Dataset licenses vary by source and may restrict commercial use. OpenEarthMap
 label data follows the license of each source image, with some source regions
-under non-commercial Creative Commons terms. Any future dataset import should
+under non-commercial Creative Commons terms. LandCover.ai is CC BY-NC-SA 4.0.
+LoveDA is academic/non-commercial only. Any future dataset import should
 document the source license, preserve attribution metadata, and be treated as
 proof-of-concept/non-commercial unless every included source is explicitly
 compatible with broader use.
+
+The intended public release shape for dataset-backed work is a reproducible
+research repository plus paper or technical write-up. Do not commit or
+redistribute raw datasets, extracted tiles, prepared tensor data, trained
+checkpoints, or model weights in this repository.
+
+Before any public release, create a clean release copy of the repository rather
+than publishing this working checkout directly. The release copy should include
+only code, configs, synthetic test fixtures, documentation, and reproduction
+instructions. Exclude local data caches, prepared tensors, logs, checkpoints,
+model weights, generated images, and any other dataset-derived artifacts.
 
 ### OpenEarthMap
 It has 5,000 high-resolution aerial and satellite images with manually annotated land-cover masks across 97 regions in 44 countries. Enough for a small end-to-end mask-conditioned diffusion run and for proving the data/model/inference loop.
@@ -216,3 +280,35 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   generation metrics. Final generation metrics now include per-class RGB mean
   MAE, RGB histogram JS distance, gradient MAE, and boundary gradient deltas
   when semantic masks are available.
+- 2026-06-26 PDT: AutoResearch VAE follow-up kept the exponential reconstruction
+  loss fixed and tested training mechanics/capacity on 1,343 train and 96
+  validation OpenEarthMap samples for 1,500 local steps. Baseline c16/h32 reached
+  MSE `0.002373`, PSNR `27.117`, SSIM `0.8529`, edge MAE `0.04639`, and RGB MAE
+  `0.00817`. Deterministic mean-latent training and `weight_decay=0.0` were
+  rejected because they worsened the fixed-seed validation metrics. Wider
+  c24/h48 improved SSIM/edge but introduced color drift. Latent-bandwidth-only
+  c24/h32 improved every tracked metric on the same seed: MSE `0.002359`, PSNR
+  `27.262`, SSIM `0.8560`, edge MAE `0.04587`, and RGB MAE `0.00738`. Decision:
+  update the custom VAE config/default to 24 latent channels while keeping hidden
+  width and the loss unchanged. Next best hypotheses: run the c24/h32 config
+  longer on H100, then retest c32/h32 and learning-rate schedule only if c24/h32
+  plateaus blurry.
+- 2026-06-26 PDT: The c24/h32 VAE was then trained for the longer 5,000-step
+  Modal/H100 config with
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-long-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-half.json`.
+  The run prepared 2,687 OpenEarthMap samples on remote `/data/openearthmap`
+  scratch and trained on 1,343 of them. Final 64-sample validation metrics were
+  MSE `0.001522`, PSNR `29.512`, SSIM `0.9211`, edge MAE `0.03701`, and RGB MAE
+  `0.00932`. The checkpoint, metrics, and grid were written to the Modal
+  artifact volume as `/artifacts/openearthmap-custom-vae-f4-c24-half.*`.
+  Decision: keep c24/h32 for the custom VAE direction; the next risk to inspect
+  is mild color drift, not structural capacity.
+- 2026-06-26 PDT: A longer c24/h32 Modal/H100 run trained for 20,000 steps with
+  `train_fraction=0.88`, 2,364 train samples, and 320 validation samples:
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-c24-20k-20260626 uv run sim-satellite train-vae --target modal train.openearthmap-vae-f4-c24-h32-train88-val320-20k.json`.
+  Final validation metrics improved to MSE `0.000245`, PSNR `37.456`, SSIM
+  `0.9864`, edge MAE `0.01709`, and RGB MAE `0.00453`. The checkpoint, metrics,
+  and grid were written to `/artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val320-20k.*`.
+  Decision: this is the current best validated custom VAE checkpoint. The next
+  comparison should be latent flow matching with this encoder versus pixel flow
+  matching, not more sharpness-loss tuning.

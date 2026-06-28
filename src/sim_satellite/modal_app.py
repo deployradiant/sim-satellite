@@ -30,6 +30,11 @@ from sim_satellite.training_config import (
     TrainingConfig,
     load_training_config_values,
 )
+from sim_satellite.vae.training import (
+    VAETrainingConfig,
+    load_vae_training_config_values,
+    run_vae_training,
+)
 from sim_satellite.web import WebConfig, create_app
 
 APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
@@ -167,6 +172,21 @@ def train_many_remote(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @app.function(
     image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_openearthmap_data(config["manifest_path"])
+    result = asdict(run_vae_training(load_vae_training_config_values(config)))
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
@@ -215,7 +235,16 @@ def run_training_target(
     modal_config = _modal_training_config(config)
     with modal.enable_output():
         with app.run():
-            return train_remote.remote(modal_config)
+            return train_remote.spawn(modal_config).get()
+
+
+def run_vae_training_target(
+    config: VAETrainingConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_vae_training_config(config)
+    with modal.enable_output():
+        with app.run():
+            return train_vae_remote.spawn(modal_config).get()
 
 
 def run_training_sweep_target(
@@ -247,6 +276,16 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
         values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
     if config.resume_from:
         values["resume_from"] = _modal_artifact_path(config.resume_from)
+    return values
+
+
+def _modal_vae_training_config(config: VAETrainingConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["device"] = "cuda"
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    values["metrics_path"] = _modal_artifact_path(config.metrics_path)
+    values["grid_path"] = _modal_artifact_path(config.grid_path)
     return values
 
 
