@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, model_validator
 
-from sim_satellite.data.classes import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
+from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES, OPENEARTHMAP_RGB
 from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.infer import GenerationConfig, generate_image_with_model, load_generator

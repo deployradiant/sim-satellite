@@ -10,6 +10,8 @@ See README.md for architecture.
 - Prefer deterministic tests and seeded randomness.
 - Normalize timestamps to epoch timestamps in UTC.
 - Track source, symbol, interval, and fetch time for market data.
+- Use inline images in chat when they help visually show comparisons, generated
+  samples, or run results.
 - Never commit API keys, exchange secrets, wallet keys, or credentials.
 
 ## Subagent Workflow

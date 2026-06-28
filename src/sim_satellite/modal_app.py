@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -15,6 +17,9 @@ from typing import Any
 
 import modal
 
+from sim_satellite.data.landcoverai import download_and_prepare_landcoverai
+from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
+from sim_satellite.data.loveda import download_and_prepare_loveda
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import (
@@ -25,6 +30,11 @@ from sim_satellite.train import run_training
 from sim_satellite.training_config import (
     TrainingConfig,
     load_training_config_values,
+)
+from sim_satellite.vae.training import (
+    VAETrainingConfig,
+    load_vae_training_config_values,
+    run_vae_training,
 )
 from sim_satellite.web import WebConfig, create_app
 
@@ -48,6 +58,28 @@ MODAL_WEB_DATA_ROOT = Path(
     )
 )
 MODAL_WEB_MANIFEST_PATH = MODAL_WEB_DATA_ROOT / "manifest.jsonl"
+MODAL_OPENEARTHMAP_DATA_DIR = MODAL_DATA_ROOT / "openearthmap"
+MODAL_LANDCOVERAI_DATA_DIR = MODAL_DATA_ROOT / "landcoverai"
+MODAL_LANDCOVERAI_MIX_ROOT = MODAL_DATA_ROOT / "landcoverai-mix"
+MODAL_LOVEDA_DATA_DIR = MODAL_DATA_ROOT / "loveda"
+MODAL_LOVEDA_MIX_ROOT = MODAL_DATA_ROOT / "loveda-mix"
+LOCAL_LANDCOVERAI_ARCHIVE_PATH = os.environ.get("SIM_SATELLITE_LOCAL_LANDCOVERAI_ARCHIVE_PATH")
+LOCAL_LOVEDA_TRAIN_ARCHIVE_PATH = os.environ.get("SIM_SATELLITE_LOCAL_LOVEDA_TRAIN_ARCHIVE_PATH")
+LOCAL_LOVEDA_VAL_ARCHIVE_PATH = os.environ.get("SIM_SATELLITE_LOCAL_LOVEDA_VAL_ARCHIVE_PATH")
+MODAL_PACKAGED_LANDCOVERAI_ARCHIVE = MODAL_PACKAGE_ROOT / "landcover.ai.v1.zip"
+MODAL_PACKAGED_LOVEDA_TRAIN_ARCHIVE = MODAL_PACKAGE_ROOT / "LoveDA-Train.zip"
+MODAL_PACKAGED_LOVEDA_VAL_ARCHIVE = MODAL_PACKAGE_ROOT / "LoveDA-Val.zip"
+MODAL_LANDCOVERAI_MIX_SEED = int(os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_SEED", "20260626"))
+MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES = int(
+    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_VALIDATION_SAMPLES", "256")
+)
+MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION = float(
+    os.environ.get("SIM_SATELLITE_LANDCOVERAI_MIX_MIN_LABELED_FRACTION", "0.10")
+)
+MODAL_LOVEDA_MIX_SEED = int(os.environ.get("SIM_SATELLITE_LOVEDA_MIX_SEED", "20260628"))
+MODAL_LOVEDA_MIX_VALIDATION_SAMPLES = int(
+    os.environ.get("SIM_SATELLITE_LOVEDA_MIX_VALIDATION_SAMPLES", "256")
+)
 DEFAULT_MODAL_TRAINING_GPU = "H100!"
 DEFAULT_MODAL_INFERENCE_GPU = "T4"
 MODAL_TRAINING_GPU = os.environ.get(
@@ -71,6 +103,18 @@ MODAL_IMAGE_ENV = {
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
     "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
 }
+if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
+    MODAL_IMAGE_ENV["SIM_SATELLITE_MODAL_LANDCOVERAI_ARCHIVE_PATH"] = str(
+        MODAL_PACKAGED_LANDCOVERAI_ARCHIVE
+    )
+if LOCAL_LOVEDA_TRAIN_ARCHIVE_PATH:
+    MODAL_IMAGE_ENV["SIM_SATELLITE_MODAL_LOVEDA_TRAIN_ARCHIVE_PATH"] = str(
+        MODAL_PACKAGED_LOVEDA_TRAIN_ARCHIVE
+    )
+if LOCAL_LOVEDA_VAL_ARCHIVE_PATH:
+    MODAL_IMAGE_ENV["SIM_SATELLITE_MODAL_LOVEDA_VAL_ARCHIVE_PATH"] = str(
+        MODAL_PACKAGED_LOVEDA_VAL_ARCHIVE
+    )
 MODAL_WEB_ENV: dict[str, str | None] = {
     "SIM_SATELLITE_MODAL_WEB_CHECKPOINT_GLOB": MODAL_WEB_CHECKPOINT_GLOB,
     "SIM_SATELLITE_MODAL_WEB_COMPARISON_CHECKPOINT_GLOB": MODAL_WEB_COMPARISON_CHECKPOINT_GLOB,
@@ -95,6 +139,21 @@ if LOCAL_MODAL_WEB_DATA_ROOT.exists():
         LOCAL_MODAL_WEB_DATA_ROOT,
         str(MODAL_WEB_DATA_ROOT),
     )
+if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
+    image = image.add_local_file(
+        Path(LOCAL_LANDCOVERAI_ARCHIVE_PATH),
+        str(MODAL_PACKAGED_LANDCOVERAI_ARCHIVE),
+    )
+if LOCAL_LOVEDA_TRAIN_ARCHIVE_PATH:
+    image = image.add_local_file(
+        Path(LOCAL_LOVEDA_TRAIN_ARCHIVE_PATH),
+        str(MODAL_PACKAGED_LOVEDA_TRAIN_ARCHIVE),
+    )
+if LOCAL_LOVEDA_VAL_ARCHIVE_PATH:
+    image = image.add_local_file(
+        Path(LOCAL_LOVEDA_VAL_ARCHIVE_PATH),
+        str(MODAL_PACKAGED_LOVEDA_VAL_ARCHIVE),
+    )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 
@@ -107,7 +166,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
-    _ensure_modal_openearthmap_data(config["manifest_path"])
+    _ensure_modal_training_data(config["manifest_path"])
     result = run_training(
         load_training_config_values(config),
         after_save=artifact_volume.commit,
@@ -120,13 +179,50 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def train_many_remote(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for config in configs:
+        _ensure_modal_training_data(config["manifest_path"])
+        result = run_training(
+            load_training_config_values(config),
+            after_save=artifact_volume.commit,
+        )
+        artifact_volume.commit()
+        result_payload = asdict(result)
+        result_payload["execution_target"] = "modal"
+        results.append(result_payload)
+    return results
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_openearthmap_data(config["manifest_path"])
+    result = asdict(run_vae_training(load_vae_training_config_values(config)))
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
-    _ensure_modal_openearthmap_data(config["manifest_path"])
+    _ensure_modal_training_data(config["manifest_path"])
     artifact_volume.reload()
     result = asdict(run_inference(InferenceConfig.from_dict(config)))
     artifact_volume.commit()
@@ -168,7 +264,25 @@ def run_training_target(
     modal_config = _modal_training_config(config)
     with modal.enable_output():
         with app.run():
-            return train_remote.remote(modal_config)
+            return train_remote.spawn(modal_config).get()
+
+
+def run_vae_training_target(
+    config: VAETrainingConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_vae_training_config(config)
+    with modal.enable_output():
+        with app.run():
+            return train_vae_remote.spawn(modal_config).get()
+
+
+def run_training_sweep_target(
+    configs: list[TrainingConfig],
+) -> list[dict[str, Any]]:
+    modal_configs = [_modal_training_config(config) for config in configs]
+    with modal.enable_output():
+        with app.run():
+            return train_many_remote.remote(modal_configs)
 
 
 def run_inference_target(
@@ -191,6 +305,16 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
         values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
     if config.resume_from:
         values["resume_from"] = _modal_artifact_path(config.resume_from)
+    return values
+
+
+def _modal_vae_training_config(config: VAETrainingConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["device"] = "cuda"
+    values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
+    values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    values["metrics_path"] = _modal_artifact_path(config.metrics_path)
+    values["grid_path"] = _modal_artifact_path(config.grid_path)
     return values
 
 
@@ -326,6 +450,491 @@ def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
     )
 
 
+def _ensure_modal_training_data(manifest_path: str) -> None:
+    manifest = Path(manifest_path)
+    if _is_modal_landcoverai_mix_manifest(manifest):
+        _ensure_modal_landcoverai_mix_data(manifest)
+        return
+    if _is_modal_loveda_mix_manifest(manifest):
+        _ensure_modal_loveda_mix_data(manifest)
+        return
+    _ensure_modal_openearthmap_data(manifest_path)
+
+
+def _is_modal_landcoverai_mix_manifest(manifest_path: Path) -> bool:
+    try:
+        manifest_path.relative_to(MODAL_LANDCOVERAI_MIX_ROOT)
+    except ValueError:
+        return False
+    return manifest_path.name == "manifest.jsonl"
+
+
+def _is_modal_loveda_mix_manifest(manifest_path: Path) -> bool:
+    try:
+        manifest_path.relative_to(MODAL_LOVEDA_MIX_ROOT)
+    except ValueError:
+        return False
+    return manifest_path.name == "manifest.jsonl"
+
+
+def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
+    ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
+    if _modal_landcoverai_mix_data_ready(manifest_path, landcoverai_ratio=ratio):
+        _print_modal_data_event("modal_landcoverai_mix_ready", manifest_path=str(manifest_path))
+        return
+
+    ratio_label: str | float = "all" if ratio is None else ratio
+    _print_modal_data_event(
+        "modal_landcoverai_mix_setup_start",
+        manifest_path=str(manifest_path),
+        landcoverai_ratio=ratio_label,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    )
+    _ensure_modal_openearthmap_data(str(MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl"))
+    if ratio is None or ratio > 0.0:
+        _ensure_modal_landcoverai_data()
+    _write_landcoverai_mix_manifest(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        landcoverai_manifest=MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl",
+        landcoverai_ratio=ratio,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+        seed=MODAL_LANDCOVERAI_MIX_SEED,
+    )
+    _print_modal_data_event(
+        "modal_landcoverai_mix_setup_done",
+        manifest_path=str(manifest_path),
+        landcoverai_ratio=ratio_label,
+    )
+
+
+def _ensure_modal_loveda_mix_data(manifest_path: Path) -> None:
+    ratio = _loveda_mix_ratio_from_manifest(manifest_path)
+    if _modal_loveda_mix_data_ready(manifest_path, loveda_ratio=ratio):
+        _print_modal_data_event("modal_loveda_mix_ready", manifest_path=str(manifest_path))
+        return
+
+    ratio_label: str | float = "all" if ratio is None else ratio
+    _print_modal_data_event(
+        "modal_loveda_mix_setup_start",
+        manifest_path=str(manifest_path),
+        loveda_ratio=ratio_label,
+        validation_samples=MODAL_LOVEDA_MIX_VALIDATION_SAMPLES,
+    )
+    _ensure_modal_openearthmap_data(str(MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl"))
+    if ratio is None or ratio > 0.0:
+        _ensure_modal_loveda_data()
+    _write_loveda_mix_manifest(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        loveda_manifest=MODAL_LOVEDA_DATA_DIR / "manifest.jsonl",
+        loveda_ratio=ratio,
+        validation_samples=MODAL_LOVEDA_MIX_VALIDATION_SAMPLES,
+        seed=MODAL_LOVEDA_MIX_SEED,
+    )
+    _print_modal_data_event(
+        "modal_loveda_mix_setup_done",
+        manifest_path=str(manifest_path),
+        loveda_ratio=ratio_label,
+    )
+
+
+def _ensure_modal_landcoverai_data() -> None:
+    manifest_path = MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl"
+    if _modal_landcoverai_data_ready(
+        manifest_path,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    ):
+        _print_modal_data_event(
+            "modal_landcoverai_data_ready",
+            data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        )
+        return
+
+    _print_modal_data_event(
+        "modal_landcoverai_data_setup_start",
+        data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+    )
+    _seed_modal_landcoverai_archive()
+    result = download_and_prepare_landcoverai(
+        MODAL_LANDCOVERAI_DATA_DIR,
+        force_prepared=True,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+        progress=lambda message: _print_modal_data_event(
+            "modal_landcoverai_data_setup_progress",
+            data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+            message=message,
+        ),
+    )
+    _write_manifest_marker(
+        result.manifest_path,
+        _landcoverai_data_marker_payload(
+            manifest_path=result.manifest_path,
+            min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+            samples=result.samples,
+            prepared_samples=result.prepared_samples,
+            total_tiles=result.total_tiles,
+            supervised_tiles=result.supervised_tiles,
+            skipped_tiles=result.skipped_tiles,
+            split_counts=result.split_counts,
+        ),
+    )
+    _print_modal_data_event(
+        "modal_landcoverai_data_setup_done",
+        data_dir=str(result.data_dir),
+        manifest_path=str(result.manifest_path),
+        prepared_dir=str(result.prepared_dir),
+        samples=result.samples,
+        prepared_samples=result.prepared_samples,
+        total_tiles=result.total_tiles,
+        supervised_tiles=result.supervised_tiles,
+        skipped_tiles=result.skipped_tiles,
+        split_counts=result.split_counts,
+    )
+
+
+def _ensure_modal_loveda_data() -> None:
+    manifest_path = MODAL_LOVEDA_DATA_DIR / "manifest.jsonl"
+    if _modal_loveda_data_ready(manifest_path):
+        _print_modal_data_event(
+            "modal_loveda_data_ready",
+            data_dir=str(MODAL_LOVEDA_DATA_DIR),
+        )
+        return
+
+    _print_modal_data_event(
+        "modal_loveda_data_setup_start",
+        data_dir=str(MODAL_LOVEDA_DATA_DIR),
+    )
+    _seed_modal_loveda_archives()
+    result = download_and_prepare_loveda(
+        MODAL_LOVEDA_DATA_DIR,
+        force_prepared=True,
+        validate_official_counts=True,
+        progress=lambda message: _print_modal_data_event(
+            "modal_loveda_data_setup_progress",
+            data_dir=str(MODAL_LOVEDA_DATA_DIR),
+            message=message,
+        ),
+    )
+    _write_manifest_marker(
+        result.manifest_path,
+        _loveda_data_marker_payload(
+            manifest_path=result.manifest_path,
+            samples=result.samples,
+            prepared_samples=result.prepared_samples,
+            scanned_images=result.scanned_images,
+            missing_masks=result.missing_masks,
+            image_dirs_without_masks=result.image_dirs_without_masks,
+            unknown_mask_pixels=result.unknown_mask_pixels,
+            unknown_mask_values=result.unknown_mask_values,
+            split_counts=result.split_counts,
+        ),
+    )
+    _print_modal_data_event(
+        "modal_loveda_data_setup_done",
+        data_dir=str(result.data_dir),
+        manifest_path=str(result.manifest_path),
+        prepared_dir=str(result.prepared_dir),
+        samples=result.samples,
+        prepared_samples=result.prepared_samples,
+        scanned_images=result.scanned_images,
+        missing_masks=result.missing_masks,
+        unknown_mask_pixels=result.unknown_mask_pixels,
+        unknown_mask_values=result.unknown_mask_values,
+        split_counts=result.split_counts,
+    )
+
+
+def _seed_modal_landcoverai_archive() -> None:
+    packaged_archive = os.environ.get("SIM_SATELLITE_MODAL_LANDCOVERAI_ARCHIVE_PATH")
+    if not packaged_archive:
+        return
+    source_path = Path(packaged_archive)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Packaged LandCover.ai archive not found: {source_path}")
+    archive_path = MODAL_LANDCOVERAI_DATA_DIR / "raw" / "landcover.ai.v1.zip"
+    if archive_path.exists():
+        return
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, archive_path)
+    _print_modal_data_event(
+        "modal_landcoverai_archive_seeded",
+        data_dir=str(MODAL_LANDCOVERAI_DATA_DIR),
+        source_path=str(source_path),
+        archive_path=str(archive_path),
+    )
+
+
+def _seed_modal_loveda_archives() -> None:
+    packaged_archives = {
+        "Train.zip": os.environ.get("SIM_SATELLITE_MODAL_LOVEDA_TRAIN_ARCHIVE_PATH"),
+        "Val.zip": os.environ.get("SIM_SATELLITE_MODAL_LOVEDA_VAL_ARCHIVE_PATH"),
+    }
+    for archive_name, packaged_archive in packaged_archives.items():
+        if not packaged_archive:
+            continue
+        source_path = Path(packaged_archive)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Packaged LoveDA archive not found: {source_path}")
+        archive_path = MODAL_LOVEDA_DATA_DIR / "raw" / archive_name
+        if archive_path.exists():
+            continue
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, archive_path)
+        _print_modal_data_event(
+            "modal_loveda_archive_seeded",
+            data_dir=str(MODAL_LOVEDA_DATA_DIR),
+            source_path=str(source_path),
+            archive_path=str(archive_path),
+        )
+
+
+def _landcoverai_mix_ratio_from_manifest(manifest_path: Path) -> float | None:
+    name = manifest_path.parent.name
+    if name == "all":
+        return None
+    if name == "baseline":
+        return 0.0
+    prefix = "ratio-"
+    if not name.startswith(prefix):
+        raise ValueError(
+            "LandCover.ai mix manifest parent must be `baseline`, `all`, or `ratio-N`: "
+            f"{manifest_path}"
+        )
+    try:
+        percent = int(name.removeprefix(prefix))
+    except ValueError:
+        raise ValueError(
+            f"Invalid LandCover.ai mix ratio in manifest path: {manifest_path}"
+        ) from None
+    if percent < 0:
+        raise ValueError(f"LandCover.ai mix ratio must be non-negative: {manifest_path}")
+    return percent / 100.0
+
+
+def _loveda_mix_ratio_from_manifest(manifest_path: Path) -> float | None:
+    name = manifest_path.parent.name
+    if name == "all":
+        return None
+    if name == "baseline":
+        return 0.0
+    prefix = "ratio-"
+    if not name.startswith(prefix):
+        raise ValueError(
+            "LoveDA mix manifest parent must be `baseline`, `all`, or `ratio-N`: "
+            f"{manifest_path}"
+        )
+    try:
+        percent = int(name.removeprefix(prefix))
+    except ValueError:
+        raise ValueError(f"Invalid LoveDA mix ratio in manifest path: {manifest_path}") from None
+    if percent < 0:
+        raise ValueError(f"LoveDA mix ratio must be non-negative: {manifest_path}")
+    return percent / 100.0
+
+
+def _write_landcoverai_mix_manifest(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float | None,
+    validation_samples: int,
+    min_labeled_fraction: float,
+    seed: int,
+) -> None:
+    openearthmap_source_samples = read_manifest(openearthmap_manifest)
+    openearthmap_samples = [
+        sample for sample in openearthmap_source_samples if sample.split == "train"
+    ]
+    if not openearthmap_samples:
+        raise RuntimeError(f"OpenEarthMap manifest has no train samples: {openearthmap_manifest}")
+    if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+        raise RuntimeError(
+            f"validation_samples must be between 1 and {len(openearthmap_samples) - 1}"
+        )
+
+    shuffled_openearthmap = list(openearthmap_samples)
+    random.Random(seed).shuffle(shuffled_openearthmap)
+    openearthmap_val = shuffled_openearthmap[:validation_samples]
+    openearthmap_train = shuffled_openearthmap[validation_samples:]
+
+    mixed_samples = [
+        _with_split(sample, "train")
+        for sample in sorted(openearthmap_train, key=lambda item: str(item.image_path))
+    ]
+    landcoverai_count = 0
+    landcoverai_source_samples: list[SatelliteSample] = []
+    landcoverai_samples: list[SatelliteSample] = []
+    landcoverai_ratio_label: str | float = "all" if landcoverai_ratio is None else landcoverai_ratio
+    if landcoverai_ratio is None or landcoverai_ratio > 0.0:
+        landcoverai_source_samples = read_manifest(landcoverai_manifest)
+        landcoverai_samples = [
+            sample for sample in landcoverai_source_samples if sample.split == "train"
+        ]
+        landcoverai_count = (
+            len(landcoverai_samples)
+            if landcoverai_ratio is None
+            else int(len(openearthmap_train) * landcoverai_ratio)
+        )
+        if len(landcoverai_samples) < landcoverai_count:
+            raise RuntimeError(
+                f"LandCover.ai manifest only has {len(landcoverai_samples)} train samples; "
+                f"need {landcoverai_count}"
+            )
+        ratio_seed_offset = (
+            1_000_000 if landcoverai_ratio is None else int(landcoverai_ratio * 10_000)
+        )
+        random.Random(seed + ratio_seed_offset).shuffle(landcoverai_samples)
+        mixed_samples.extend(
+            _with_split(sample, "train")
+            for sample in sorted(
+                landcoverai_samples[:landcoverai_count],
+                key=lambda item: str(item.image_path),
+            )
+        )
+    mixed_samples.extend(
+        _with_split(sample, "val")
+        for sample in sorted(openearthmap_val, key=lambda item: str(item.image_path))
+    )
+    write_manifest(mixed_samples, manifest_path)
+    _write_manifest_marker(
+        manifest_path,
+        _landcoverai_mix_marker_payload(
+            manifest_path=manifest_path,
+            openearthmap_manifest=openearthmap_manifest,
+            landcoverai_manifest=landcoverai_manifest,
+            landcoverai_ratio=landcoverai_ratio,
+            validation_samples=validation_samples,
+            min_labeled_fraction=min_labeled_fraction,
+            seed=seed,
+            openearthmap_source_samples=len(openearthmap_source_samples),
+            openearthmap_source_train_samples=len(openearthmap_samples),
+            openearthmap_train_samples=len(openearthmap_train),
+            openearthmap_val_samples=len(openearthmap_val),
+            landcoverai_source_samples=len(landcoverai_source_samples),
+            landcoverai_source_train_samples=len(landcoverai_samples),
+            landcoverai_train_samples=landcoverai_count,
+            total_samples=len(mixed_samples),
+        ),
+    )
+    _print_modal_data_event(
+        "modal_landcoverai_mix_manifest_written",
+        manifest_path=str(manifest_path),
+        openearthmap_train=len(openearthmap_train),
+        openearthmap_val=len(openearthmap_val),
+        landcoverai_ratio=landcoverai_ratio_label,
+        landcoverai_train=landcoverai_count,
+        train_samples=len(mixed_samples) - len(openearthmap_val),
+        total_samples=len(mixed_samples),
+    )
+
+
+def _write_loveda_mix_manifest(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    loveda_manifest: Path,
+    loveda_ratio: float | None,
+    validation_samples: int,
+    seed: int,
+) -> None:
+    openearthmap_source_samples = read_manifest(openearthmap_manifest)
+    openearthmap_samples = [
+        sample for sample in openearthmap_source_samples if sample.split == "train"
+    ]
+    if not openearthmap_samples:
+        raise RuntimeError(f"OpenEarthMap manifest has no train samples: {openearthmap_manifest}")
+    if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+        raise RuntimeError(
+            f"validation_samples must be between 1 and {len(openearthmap_samples) - 1}"
+        )
+
+    shuffled_openearthmap = list(openearthmap_samples)
+    random.Random(seed).shuffle(shuffled_openearthmap)
+    openearthmap_val = shuffled_openearthmap[:validation_samples]
+    openearthmap_train = shuffled_openearthmap[validation_samples:]
+
+    mixed_samples = [
+        _with_split(sample, "train")
+        for sample in sorted(openearthmap_train, key=lambda item: str(item.image_path))
+    ]
+    loveda_count = 0
+    loveda_source_samples: list[SatelliteSample] = []
+    loveda_samples: list[SatelliteSample] = []
+    loveda_ratio_label: str | float = "all" if loveda_ratio is None else loveda_ratio
+    if loveda_ratio is None or loveda_ratio > 0.0:
+        loveda_source_samples = read_manifest(loveda_manifest)
+        loveda_samples = [sample for sample in loveda_source_samples if sample.split == "train"]
+        loveda_count = (
+            len(loveda_samples)
+            if loveda_ratio is None
+            else int(len(openearthmap_train) * loveda_ratio)
+        )
+        if len(loveda_samples) < loveda_count:
+            raise RuntimeError(
+                f"LoveDA manifest only has {len(loveda_samples)} train samples; "
+                f"need {loveda_count}"
+            )
+        ratio_seed_offset = 1_000_000 if loveda_ratio is None else int(loveda_ratio * 10_000)
+        random.Random(seed + ratio_seed_offset).shuffle(loveda_samples)
+        mixed_samples.extend(
+            _with_split(sample, "train")
+            for sample in sorted(
+                loveda_samples[:loveda_count],
+                key=lambda item: str(item.image_path),
+            )
+        )
+    mixed_samples.extend(
+        _with_split(sample, "val")
+        for sample in sorted(openearthmap_val, key=lambda item: str(item.image_path))
+    )
+    write_manifest(mixed_samples, manifest_path)
+    _write_manifest_marker(
+        manifest_path,
+        _loveda_mix_marker_payload(
+            manifest_path=manifest_path,
+            openearthmap_manifest=openearthmap_manifest,
+            loveda_manifest=loveda_manifest,
+            loveda_ratio=loveda_ratio,
+            validation_samples=validation_samples,
+            seed=seed,
+            openearthmap_source_samples=len(openearthmap_source_samples),
+            openearthmap_source_train_samples=len(openearthmap_samples),
+            openearthmap_train_samples=len(openearthmap_train),
+            openearthmap_val_samples=len(openearthmap_val),
+            loveda_source_samples=len(loveda_source_samples),
+            loveda_source_train_samples=len(loveda_samples),
+            loveda_train_samples=loveda_count,
+            total_samples=len(mixed_samples),
+        ),
+    )
+    _print_modal_data_event(
+        "modal_loveda_mix_manifest_written",
+        manifest_path=str(manifest_path),
+        openearthmap_train=len(openearthmap_train),
+        openearthmap_val=len(openearthmap_val),
+        loveda_ratio=loveda_ratio_label,
+        loveda_train=loveda_count,
+        train_samples=len(mixed_samples) - len(openearthmap_val),
+        total_samples=len(mixed_samples),
+    )
+
+
+def _with_split(sample: SatelliteSample, split: str) -> SatelliteSample:
+    return SatelliteSample(
+        image_path=sample.image_path,
+        mask_path=sample.mask_path,
+        prepared_path=sample.prepared_path,
+        split=split,
+        source=sample.source,
+    )
+
+
 def _modal_data_dir_for_manifest(manifest_path: str) -> Path:
     manifest = Path(manifest_path)
     if not manifest.is_absolute():
@@ -353,6 +962,360 @@ def _modal_openearthmap_data_ready(data_dir: Path, manifest_path: Path) -> bool:
     except (EOFError, OSError, RuntimeError, ValueError):
         return False
     return isinstance(payload, dict) and payload.get("version") == PREPARED_DATA_VERSION
+
+
+def _modal_manifest_data_ready(manifest_path: Path) -> bool:
+    if not manifest_path.exists():
+        return False
+    try:
+        samples = read_manifest(manifest_path)
+    except (OSError, ValueError):
+        return False
+    if not samples:
+        return False
+    first_prepared = samples[0].prepared_path
+    if any(not sample.prepared_path.exists() for sample in samples):
+        return False
+    try:
+        import torch
+
+        payload = torch.load(first_prepared, map_location="cpu")
+    except (EOFError, OSError, RuntimeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("version") == PREPARED_DATA_VERSION
+
+
+def _modal_landcoverai_data_ready(
+    manifest_path: Path,
+    *,
+    min_labeled_fraction: float,
+) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    return _manifest_marker_matches(
+        manifest_path,
+        {
+            "kind": "landcoverai-data",
+            "manifest_path": str(manifest_path),
+            "min_labeled_fraction": min_labeled_fraction,
+            "prepared_data_version": PREPARED_DATA_VERSION,
+        },
+    )
+
+
+def _modal_landcoverai_mix_data_ready(
+    manifest_path: Path,
+    *,
+    landcoverai_ratio: float | None,
+) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    marker_payload = _expected_landcoverai_mix_marker_payload(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        landcoverai_manifest=MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl",
+        landcoverai_ratio=landcoverai_ratio,
+        validation_samples=MODAL_LANDCOVERAI_MIX_VALIDATION_SAMPLES,
+        min_labeled_fraction=MODAL_LANDCOVERAI_MIX_MIN_LABELED_FRACTION,
+        seed=MODAL_LANDCOVERAI_MIX_SEED,
+    )
+    if marker_payload is None:
+        return False
+    return _manifest_marker_matches(manifest_path, marker_payload)
+
+
+def _modal_loveda_data_ready(manifest_path: Path) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    return _manifest_marker_matches(
+        manifest_path,
+        {
+            "kind": "loveda-data",
+            "manifest_path": str(manifest_path),
+            "prepared_data_version": PREPARED_DATA_VERSION,
+        },
+    )
+
+
+def _modal_loveda_mix_data_ready(
+    manifest_path: Path,
+    *,
+    loveda_ratio: float | None,
+) -> bool:
+    if not _modal_manifest_data_ready(manifest_path):
+        return False
+    marker_payload = _expected_loveda_mix_marker_payload(
+        manifest_path,
+        openearthmap_manifest=MODAL_OPENEARTHMAP_DATA_DIR / "manifest.jsonl",
+        loveda_manifest=MODAL_LOVEDA_DATA_DIR / "manifest.jsonl",
+        loveda_ratio=loveda_ratio,
+        validation_samples=MODAL_LOVEDA_MIX_VALIDATION_SAMPLES,
+        seed=MODAL_LOVEDA_MIX_SEED,
+    )
+    if marker_payload is None:
+        return False
+    return _manifest_marker_matches(manifest_path, marker_payload)
+
+
+def _expected_landcoverai_mix_marker_payload(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float | None,
+    validation_samples: int,
+    min_labeled_fraction: float,
+    seed: int,
+) -> dict[str, Any] | None:
+    try:
+        openearthmap_source_samples = read_manifest(openearthmap_manifest)
+        openearthmap_samples = [
+            sample for sample in openearthmap_source_samples if sample.split == "train"
+        ]
+        if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+            return None
+        openearthmap_train_samples = len(openearthmap_samples) - validation_samples
+        landcoverai_source_samples: list[SatelliteSample] = []
+        landcoverai_samples: list[SatelliteSample] = []
+        landcoverai_train_samples = 0
+        if landcoverai_ratio is None or landcoverai_ratio > 0.0:
+            landcoverai_source_samples = read_manifest(landcoverai_manifest)
+            landcoverai_samples = [
+                sample for sample in landcoverai_source_samples if sample.split == "train"
+            ]
+            landcoverai_train_samples = (
+                len(landcoverai_samples)
+                if landcoverai_ratio is None
+                else int(openearthmap_train_samples * landcoverai_ratio)
+            )
+            if len(landcoverai_samples) < landcoverai_train_samples:
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    return _landcoverai_mix_marker_payload(
+        manifest_path=manifest_path,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=landcoverai_ratio,
+        validation_samples=validation_samples,
+        min_labeled_fraction=min_labeled_fraction,
+        seed=seed,
+        openearthmap_source_samples=len(openearthmap_source_samples),
+        openearthmap_source_train_samples=len(openearthmap_samples),
+        openearthmap_train_samples=openearthmap_train_samples,
+        openearthmap_val_samples=validation_samples,
+        landcoverai_source_samples=len(landcoverai_source_samples),
+        landcoverai_source_train_samples=len(landcoverai_samples),
+        landcoverai_train_samples=landcoverai_train_samples,
+        total_samples=openearthmap_train_samples + validation_samples + landcoverai_train_samples,
+    )
+
+
+def _expected_loveda_mix_marker_payload(
+    manifest_path: Path,
+    *,
+    openearthmap_manifest: Path,
+    loveda_manifest: Path,
+    loveda_ratio: float | None,
+    validation_samples: int,
+    seed: int,
+) -> dict[str, Any] | None:
+    try:
+        openearthmap_source_samples = read_manifest(openearthmap_manifest)
+        openearthmap_samples = [
+            sample for sample in openearthmap_source_samples if sample.split == "train"
+        ]
+        if validation_samples <= 0 or validation_samples >= len(openearthmap_samples):
+            return None
+        openearthmap_train_samples = len(openearthmap_samples) - validation_samples
+        loveda_source_samples: list[SatelliteSample] = []
+        loveda_samples: list[SatelliteSample] = []
+        loveda_train_samples = 0
+        if loveda_ratio is None or loveda_ratio > 0.0:
+            loveda_source_samples = read_manifest(loveda_manifest)
+            loveda_samples = [
+                sample for sample in loveda_source_samples if sample.split == "train"
+            ]
+            loveda_train_samples = (
+                len(loveda_samples)
+                if loveda_ratio is None
+                else int(openearthmap_train_samples * loveda_ratio)
+            )
+            if len(loveda_samples) < loveda_train_samples:
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    return _loveda_mix_marker_payload(
+        manifest_path=manifest_path,
+        openearthmap_manifest=openearthmap_manifest,
+        loveda_manifest=loveda_manifest,
+        loveda_ratio=loveda_ratio,
+        validation_samples=validation_samples,
+        seed=seed,
+        openearthmap_source_samples=len(openearthmap_source_samples),
+        openearthmap_source_train_samples=len(openearthmap_samples),
+        openearthmap_train_samples=openearthmap_train_samples,
+        openearthmap_val_samples=validation_samples,
+        loveda_source_samples=len(loveda_source_samples),
+        loveda_source_train_samples=len(loveda_samples),
+        loveda_train_samples=loveda_train_samples,
+        total_samples=openearthmap_train_samples + validation_samples + loveda_train_samples,
+    )
+
+
+def _landcoverai_data_marker_payload(
+    *,
+    manifest_path: Path,
+    min_labeled_fraction: float,
+    samples: int,
+    prepared_samples: int,
+    total_tiles: int,
+    supervised_tiles: int,
+    skipped_tiles: int,
+    split_counts: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "kind": "landcoverai-data",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "min_labeled_fraction": min_labeled_fraction,
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "samples": samples,
+        "prepared_samples": prepared_samples,
+        "total_tiles": total_tiles,
+        "supervised_tiles": supervised_tiles,
+        "skipped_tiles": skipped_tiles,
+        "split_counts": split_counts,
+    }
+
+
+def _loveda_data_marker_payload(
+    *,
+    manifest_path: Path,
+    samples: int,
+    prepared_samples: int,
+    scanned_images: int,
+    missing_masks: int,
+    image_dirs_without_masks: int,
+    unknown_mask_pixels: int,
+    unknown_mask_values: dict[int, int],
+    split_counts: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "kind": "loveda-data",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "samples": samples,
+        "prepared_samples": prepared_samples,
+        "scanned_images": scanned_images,
+        "missing_masks": missing_masks,
+        "image_dirs_without_masks": image_dirs_without_masks,
+        "unknown_mask_pixels": unknown_mask_pixels,
+        "unknown_mask_values": unknown_mask_values,
+        "split_counts": split_counts,
+    }
+
+
+def _landcoverai_mix_marker_payload(
+    *,
+    manifest_path: Path,
+    openearthmap_manifest: Path,
+    landcoverai_manifest: Path,
+    landcoverai_ratio: float | None,
+    validation_samples: int,
+    min_labeled_fraction: float,
+    seed: int,
+    openearthmap_source_samples: int,
+    openearthmap_source_train_samples: int,
+    openearthmap_train_samples: int,
+    openearthmap_val_samples: int,
+    landcoverai_source_samples: int,
+    landcoverai_source_train_samples: int,
+    landcoverai_train_samples: int,
+    total_samples: int,
+) -> dict[str, Any]:
+    return {
+        "kind": "landcoverai-mix",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "openearthmap_manifest": str(openearthmap_manifest),
+        "openearthmap_source_samples": openearthmap_source_samples,
+        "openearthmap_source_train_samples": openearthmap_source_train_samples,
+        "openearthmap_train_samples": openearthmap_train_samples,
+        "openearthmap_val_samples": openearthmap_val_samples,
+        "landcoverai_manifest": str(landcoverai_manifest),
+        "landcoverai_ratio": landcoverai_ratio,
+        "landcoverai_source_samples": landcoverai_source_samples,
+        "landcoverai_source_train_samples": landcoverai_source_train_samples,
+        "landcoverai_train_samples": landcoverai_train_samples,
+        "min_labeled_fraction": min_labeled_fraction,
+        "seed": seed,
+        "validation_samples": validation_samples,
+        "total_samples": total_samples,
+    }
+
+
+def _loveda_mix_marker_payload(
+    *,
+    manifest_path: Path,
+    openearthmap_manifest: Path,
+    loveda_manifest: Path,
+    loveda_ratio: float | None,
+    validation_samples: int,
+    seed: int,
+    openearthmap_source_samples: int,
+    openearthmap_source_train_samples: int,
+    openearthmap_train_samples: int,
+    openearthmap_val_samples: int,
+    loveda_source_samples: int,
+    loveda_source_train_samples: int,
+    loveda_train_samples: int,
+    total_samples: int,
+) -> dict[str, Any]:
+    return {
+        "kind": "loveda-mix",
+        "marker_version": 1,
+        "manifest_path": str(manifest_path),
+        "prepared_data_version": PREPARED_DATA_VERSION,
+        "openearthmap_manifest": str(openearthmap_manifest),
+        "openearthmap_source_samples": openearthmap_source_samples,
+        "openearthmap_source_train_samples": openearthmap_source_train_samples,
+        "openearthmap_train_samples": openearthmap_train_samples,
+        "openearthmap_val_samples": openearthmap_val_samples,
+        "loveda_manifest": str(loveda_manifest),
+        "loveda_ratio": loveda_ratio,
+        "loveda_source_samples": loveda_source_samples,
+        "loveda_source_train_samples": loveda_source_train_samples,
+        "loveda_train_samples": loveda_train_samples,
+        "seed": seed,
+        "validation_samples": validation_samples,
+        "total_samples": total_samples,
+    }
+
+
+def _write_manifest_marker(manifest_path: Path, payload: dict[str, Any]) -> None:
+    marker_path = _manifest_marker_path(manifest_path)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _manifest_marker_matches(manifest_path: Path, expected: dict[str, Any]) -> bool:
+    marker_path = _manifest_marker_path(manifest_path)
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return all(payload.get(key) == value for key, value in expected.items())
+
+
+def _manifest_marker_path(manifest_path: Path) -> Path:
+    return manifest_path.with_name(f"{manifest_path.name}.meta.json")
 
 
 def _print_modal_data_event(event: str, **payload: Any) -> None:

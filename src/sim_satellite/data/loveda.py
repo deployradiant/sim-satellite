@@ -19,8 +19,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from sim_satellite.data.classes import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.data.loader import SatelliteSample, write_manifest
+from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 
 LOVEDA_URLS = {
     "train": "https://zenodo.org/records/5706578/files/Train.zip?download=1",

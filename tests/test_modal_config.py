@@ -5,10 +5,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+import torch
 
 from sim_satellite import modal_app
+from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
+from sim_satellite.vae.training import VAETrainingConfig
 from sim_satellite.web import WebConfig
 
 
@@ -46,6 +50,44 @@ def test_modal_training_maps_relative_manifest_to_remote_data_root(
         assert fake_app.run_calls == 1
         assert fake_train_remote.received is not None
         assert fake_train_remote.received["manifest_path"] == remote_manifest_path
+
+
+def test_modal_training_maps_landcoverai_mix_manifest_to_remote_data_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
+
+    modal_app.run_training_target(
+        TrainingConfig(manifest_path="data/landcoverai-mix/ratio-10/manifest.jsonl"),
+    )
+
+    assert fake_train_remote.received is not None
+    assert fake_train_remote.received["manifest_path"] == (
+        "/data/landcoverai-mix/ratio-10/manifest.jsonl"
+    )
+
+
+def test_modal_training_maps_loveda_mix_manifest_to_remote_data_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_train_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, train_remote=fake_train_remote)
+
+    modal_app.run_training_target(
+        TrainingConfig(manifest_path="data/loveda-mix/ratio-20/manifest.jsonl"),
+    )
+
+    assert fake_train_remote.received is not None
+    assert fake_train_remote.received["manifest_path"] == (
+        "/data/loveda-mix/ratio-20/manifest.jsonl"
+    )
 
 
 def test_modal_training_rejects_invalid_artifact_paths_before_app_run(
@@ -149,6 +191,41 @@ def test_modal_training_enters_app_run_with_valid_data(
     }
 
 
+def test_modal_training_sweep_enters_app_run_with_valid_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_train_many_remote = _FakeRemote(fake_app, [{"execution_target": "modal"}])
+    monkeypatch.setattr(modal_app, "app", fake_app)
+    monkeypatch.setattr(modal_app, "train_many_remote", fake_train_many_remote)
+
+    result = modal_app.run_training_sweep_target(
+        [
+            TrainingConfig(
+                manifest_path="data/landcoverai-mix/baseline/manifest.jsonl",
+                checkpoint_path="artifacts/mix/baseline.pt",
+            ),
+            TrainingConfig(
+                manifest_path="data/landcoverai-mix/ratio-10/manifest.jsonl",
+                checkpoint_path="artifacts/mix/ratio-10.pt",
+            ),
+        ]
+    )
+
+    assert result == [{"execution_target": "modal"}]
+    assert fake_train_many_remote.received is not None
+    assert [config["manifest_path"] for config in fake_train_many_remote.received] == [
+        "/data/landcoverai-mix/baseline/manifest.jsonl",
+        "/data/landcoverai-mix/ratio-10/manifest.jsonl",
+    ]
+    assert [config["checkpoint_path"] for config in fake_train_many_remote.received] == [
+        "/artifacts/mix/baseline.pt",
+        "/artifacts/mix/ratio-10.pt",
+    ]
+
+
 def test_modal_inference_enters_app_run_with_valid_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -187,6 +264,46 @@ def test_modal_inference_enters_app_run_with_valid_data(
         "output_path": "/artifacts/generated/sample.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "mask_path": "/data/openearthmap/extracted/train/labels/tile.png",
+    }
+
+
+def test_modal_vae_training_enters_app_run_with_valid_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
+    fake_app = _FakeApp()
+    fake_train_vae_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, train_vae_remote=fake_train_vae_remote)
+
+    result = modal_app.run_vae_training_target(
+        VAETrainingConfig(
+            manifest_path="data/openearthmap/manifest.jsonl",
+            checkpoint_path="artifacts/vae/custom.pt",
+            metrics_path="artifacts/vae/metrics.json",
+            grid_path="artifacts/vae/grid.png",
+        )
+    )
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_app.enter_calls == 1
+    assert fake_app.exit_calls == 1
+    assert fake_train_vae_remote.received == {
+        **asdict(
+            VAETrainingConfig(
+                manifest_path="data/openearthmap/manifest.jsonl",
+                checkpoint_path="artifacts/vae/custom.pt",
+                metrics_path="artifacts/vae/metrics.json",
+                grid_path="artifacts/vae/grid.png",
+            )
+        ),
+        "device": "cuda",
+        "checkpoint_path": "/artifacts/vae/custom.pt",
+        "manifest_path": "/data/openearthmap/manifest.jsonl",
+        "metrics_path": "/artifacts/vae/metrics.json",
+        "grid_path": "/artifacts/vae/grid.png",
     }
 
 
@@ -240,17 +357,354 @@ def test_modal_data_path_maps_inside_modal_container(
         modal_app._modal_data_path("/tmp/manifest.jsonl", field_name="manifest_path")
 
 
+def test_modal_landcoverai_mix_ratio_parses_manifest_parent() -> None:
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/all/manifest.jsonl")
+        )
+        is None
+    )
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/baseline/manifest.jsonl")
+        )
+        == 0.0
+    )
+    assert (
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/ratio-33/manifest.jsonl")
+        )
+        == 0.33
+    )
+    with pytest.raises(ValueError, match="baseline.*all.*ratio-N"):
+        modal_app._landcoverai_mix_ratio_from_manifest(
+            Path("/data/landcoverai-mix/nope/manifest.jsonl")
+        )
+
+
+def test_modal_loveda_mix_ratio_parses_manifest_parent() -> None:
+    assert (
+        modal_app._loveda_mix_ratio_from_manifest(Path("/data/loveda-mix/all/manifest.jsonl"))
+        is None
+    )
+    assert (
+        modal_app._loveda_mix_ratio_from_manifest(Path("/data/loveda-mix/baseline/manifest.jsonl"))
+        == 0.0
+    )
+    assert (
+        modal_app._loveda_mix_ratio_from_manifest(Path("/data/loveda-mix/ratio-20/manifest.jsonl"))
+        == 0.2
+    )
+    with pytest.raises(ValueError, match="baseline.*all.*ratio-N"):
+        modal_app._loveda_mix_ratio_from_manifest(Path("/data/loveda-mix/nope/manifest.jsonl"))
+
+
+def test_modal_writes_deterministic_landcoverai_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.5,
+        validation_samples=2,
+        min_labeled_fraction=0.1,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    source_counts = _source_split_counts(samples)
+    assert source_counts == {
+        ("landcoverai", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_deterministic_loveda_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    loveda_manifest = tmp_path / "loveda" / "manifest.jsonl"
+    output_manifest = tmp_path / "loveda-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        loveda_manifest,
+        source="loveda",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_loveda_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        loveda_manifest=loveda_manifest,
+        loveda_ratio=0.5,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    source_counts = _source_split_counts(samples)
+    assert source_counts == {
+        ("loveda", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_landcoverai_mix_uses_openearthmap_train_samples_only(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=5,
+        split="val",
+        append=True,
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.5,
+        validation_samples=2,
+        min_labeled_fraction=0.1,
+        seed=2026,
+    )
+
+    assert _source_split_counts(read_manifest(output_manifest)) == {
+        ("landcoverai", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_loveda_mix_uses_openearthmap_train_samples_only(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    loveda_manifest = tmp_path / "loveda" / "manifest.jsonl"
+    output_manifest = tmp_path / "loveda-mix" / "ratio-50" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=5,
+        split="val",
+        append=True,
+    )
+    _write_manifest_samples(
+        loveda_manifest,
+        source="loveda",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_loveda_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        loveda_manifest=loveda_manifest,
+        loveda_ratio=0.5,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    assert _source_split_counts(read_manifest(output_manifest)) == {
+        ("loveda", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_baseline_mix_manifest_without_landcoverai(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "baseline" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=0.0,
+        validation_samples=2,
+        min_labeled_fraction=0.1,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_baseline_mix_manifest_without_loveda(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    loveda_manifest = tmp_path / "loveda" / "manifest.jsonl"
+    output_manifest = tmp_path / "loveda-mix" / "baseline" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+
+    modal_app._write_loveda_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        loveda_manifest=loveda_manifest,
+        loveda_ratio=0.0,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_all_landcoverai_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    output_manifest = tmp_path / "landcoverai-mix" / "all" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_landcoverai_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        landcoverai_ratio=None,
+        validation_samples=2,
+        min_labeled_fraction=0.1,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("landcoverai", "train"): 20,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_all_loveda_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    loveda_manifest = tmp_path / "loveda" / "manifest.jsonl"
+    output_manifest = tmp_path / "loveda-mix" / "all" / "manifest.jsonl"
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        loveda_manifest,
+        source="loveda",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_loveda_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        loveda_manifest=loveda_manifest,
+        loveda_ratio=None,
+        validation_samples=2,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("loveda", "train"): 20,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_manifest_data_ready_requires_all_prepared_files(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_manifest_samples(
+        manifest_path,
+        source="openearthmap",
+        count=2,
+        split="train",
+        create_prepared=True,
+    )
+
+    samples = read_manifest(manifest_path)
+    samples[1].prepared_path.unlink()
+
+    assert modal_app._modal_manifest_data_ready(manifest_path) is False
+
+
 def _install_modal_fakes(
     monkeypatch: pytest.MonkeyPatch,
     fake_app: _FakeApp,
     *,
     train_remote: object | None = None,
+    train_vae_remote: object | None = None,
     infer_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
+    train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
     infer_remote = infer_remote if infer_remote is not None else object()
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
+    monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
 
 
@@ -259,6 +713,41 @@ def _write_data_file(tmp_path: Path, relative_path: str, *, content: bytes = b""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path
+
+
+def _write_manifest_samples(
+    manifest_path: Path,
+    *,
+    source: str,
+    count: int,
+    split: str,
+    append: bool = False,
+    create_prepared: bool = False,
+) -> None:
+    samples = read_manifest(manifest_path) if append and manifest_path.exists() else []
+    for index in range(count):
+        prepared_path = manifest_path.parent / source / split / "prepared" / f"{index}.pt"
+        if create_prepared:
+            prepared_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"version": PREPARED_DATA_VERSION}, prepared_path)
+        samples.append(
+            SatelliteSample(
+                image_path=manifest_path.parent / source / split / "images" / f"{index}.png",
+                mask_path=manifest_path.parent / source / split / "masks" / f"{index}.png",
+                prepared_path=prepared_path,
+                split=split,
+                source=source,
+            )
+        )
+    write_manifest(samples, manifest_path)
+
+
+def _source_split_counts(samples: list[SatelliteSample]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for sample in samples:
+        key = (sample.source, sample.split)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 class _FakeApp:
@@ -280,13 +769,27 @@ class _FakeApp:
 
 
 class _FakeRemote:
-    def __init__(self, app: _FakeApp, result: dict[str, str]) -> None:
+    def __init__(self, app: _FakeApp, result: object) -> None:
         self.app = app
         self.result = result
-        self.received: dict[str, object] | None = None
+        self.received: object | None = None
 
-    def remote(self, config: dict[str, object]) -> dict[str, str]:
+    def remote(self, config: object) -> object:
         assert self.app.enter_calls == 1
         assert self.app.exit_calls == 0
         self.received = config
+        return self.result
+
+    def spawn(self, config: object) -> _FakeFunctionCall:
+        assert self.app.enter_calls == 1
+        assert self.app.exit_calls == 0
+        self.received = config
+        return _FakeFunctionCall(self.result)
+
+
+class _FakeFunctionCall:
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    def get(self) -> object:
         return self.result

@@ -10,9 +10,11 @@ from PIL import Image
 
 from sim_satellite.data.loader import read_manifest
 from sim_satellite.data.loveda import download_and_prepare_loveda
+from sim_satellite.data.openearthmap import OPENEARTHMAP_RGB, download_and_prepare_openearthmap
 from sim_satellite.data.prepared import load_prepared_sample
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.model import ModelConfig
+from sim_satellite.training_data import center_square_crop_box, load_batch, preload_samples
 
 
 def test_prepare_loveda_remaps_masks_and_writes_manifest(tmp_path: Path) -> None:
@@ -46,6 +48,65 @@ def test_prepare_loveda_remaps_masks_and_writes_manifest(tmp_path: Path) -> None
     prepared = load_prepared_sample(samples[0].prepared_path, torch=torch)
     assert prepared.image.shape == (2, 2, 3)
     assert prepared.mask.tolist() == [[8, 4], [5, 7]]
+
+
+def test_prepare_loveda_matches_openearth_training_batch_contract(tmp_path: Path) -> None:
+    openearthmap_dir = tmp_path / "openearthmap"
+    loveda_dir = tmp_path / "loveda"
+    _write_openearth_scene(
+        openearthmap_dir,
+        mask_classes=["building", "road", "water", "agriculture land"],
+    )
+    image_path = loveda_dir / "extracted" / "Train" / "Urban" / "images_png" / "tile.png"
+    mask_path = loveda_dir / "extracted" / "Train" / "Urban" / "masks_png" / "tile.png"
+    _write_rgb_image(image_path, size=(512, 512))
+    _write_loveda_mask(mask_path, [2, 3, 4, 7], size=(512, 512))
+
+    openearthmap_result = download_and_prepare_openearthmap(
+        openearthmap_dir,
+        download=False,
+        extract=False,
+    )
+    loveda_result = download_and_prepare_loveda(
+        loveda_dir,
+        download=False,
+        extract=False,
+    )
+
+    openearthmap_sample = read_manifest(openearthmap_result.manifest_path)[0]
+    loveda_sample = read_manifest(loveda_result.manifest_path)[0]
+    openearthmap_prepared = load_prepared_sample(openearthmap_sample.prepared_path, torch=torch)
+    loveda_prepared = load_prepared_sample(loveda_sample.prepared_path, torch=torch)
+
+    assert openearthmap_prepared.image.shape == loveda_prepared.image.shape
+    assert openearthmap_prepared.mask.shape == loveda_prepared.mask.shape
+    assert openearthmap_prepared.image.dtype == loveda_prepared.image.dtype == torch.uint8
+    assert openearthmap_prepared.mask.dtype == loveda_prepared.mask.dtype == torch.uint8
+    assert torch.equal(openearthmap_prepared.image, loveda_prepared.image)
+    assert torch.equal(openearthmap_prepared.mask, loveda_prepared.mask)
+
+    config = ModelConfig(image_size=256, mask_channels=9)
+    samples = (openearthmap_sample, loveda_sample)
+    preloaded = preload_samples(samples)
+    crop_boxes = [
+        center_square_crop_box(sample, crop_size=config.image_size, preloaded_samples=preloaded)
+        for sample in samples
+    ]
+    images, masks = load_batch(
+        samples,
+        crop_boxes,
+        torch=torch,
+        model_config=config,
+        device=torch.device("cpu"),
+        preloaded_samples=preloaded,
+    )
+
+    assert images.shape == (2, 3, 256, 256)
+    assert masks.shape == (2, 9, 256, 256)
+    assert images.dtype == masks.dtype == torch.float32
+    assert torch.equal(images[0], images[1])
+    assert torch.equal(masks[0], masks[1])
+    assert torch.allclose(masks.sum(dim=1), torch.ones((2, 256, 256)))
 
 
 def test_prepare_loveda_tracks_validation_split(tmp_path: Path) -> None:
@@ -171,16 +232,59 @@ def _touch(path: Path) -> None:
     path.write_bytes(b"fixture")
 
 
-def _write_rgb_image(path: Path) -> None:
+def _write_rgb_image(path: Path, *, size: tuple[int, int] = (2, 2)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (2, 2), (1, 2, 3)).save(path)
+    Image.new("RGB", size, (1, 2, 3)).save(path)
 
 
-def _write_loveda_mask(path: Path, values: list[int]) -> None:
+def _write_loveda_mask(
+    path: Path,
+    values: list[int],
+    *,
+    size: tuple[int, int] = (2, 2),
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mask = Image.new("L", (2, 2))
-    mask.putdata(values)
+    mask = Image.new("L", size, values[0])
+    pixels = mask.load()
+    quadrant_values = {
+        (0, 0): values[0],
+        (1, 0): values[1],
+        (0, 1): values[2],
+        (1, 1): values[3],
+    }
+    half_width = size[0] // 2
+    half_height = size[1] // 2
+    for y in range(size[1]):
+        for x in range(size[0]):
+            pixels[x, y] = quadrant_values[(x // half_width, y // half_height)]
     mask.save(path)
+
+
+def _write_openearth_scene(
+    root: Path,
+    *,
+    mask_classes: list[str],
+    size: tuple[int, int] = (512, 512),
+) -> None:
+    image_path = root / "extracted" / "train" / "images" / "tile.png"
+    mask_path = root / "extracted" / "train" / "labels" / "tile.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (1, 2, 3)).save(image_path)
+    mask = Image.new("RGB", size, OPENEARTHMAP_RGB[mask_classes[0]])
+    pixels = mask.load()
+    quadrant_values = {
+        (0, 0): OPENEARTHMAP_RGB[mask_classes[0]],
+        (1, 0): OPENEARTHMAP_RGB[mask_classes[1]],
+        (0, 1): OPENEARTHMAP_RGB[mask_classes[2]],
+        (1, 1): OPENEARTHMAP_RGB[mask_classes[3]],
+    }
+    half_width = size[0] // 2
+    half_height = size[1] // 2
+    for y in range(size[1]):
+        for x in range(size[0]):
+            pixels[x, y] = quadrant_values[(x // half_width, y // half_height)]
+    mask.save(mask_path)
 
 
 def _png_bytes(mode: str, color: float | tuple[float, ...] | str | None) -> bytes:
