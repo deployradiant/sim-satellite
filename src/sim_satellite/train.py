@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 import click
 import torch
@@ -88,9 +88,12 @@ def run_training(
         samples_to_preload,
         progress=report_preload_progress,
     )
-    batches = tuple(preloaded_samples.batch(batch) for batch in sample_batches)
     validation_batches = tuple(
-        preloaded_samples.batch(batch) for batch in validation_sample_batches
+        tuple(preloaded_samples[sample] for sample in batch)
+        for batch in validation_sample_batches
+    )
+    batches = tuple(
+        tuple(preloaded_samples[sample] for sample in batch) for batch in sample_batches
     )
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
@@ -510,81 +513,23 @@ def _load_training_state(
     list[training_log.TrainingLossRecord],
     list[training_log.ValidationLossRecord],
 ]:
-    if not path.exists():
-        raise FileNotFoundError(f"Resume checkpoint not found: {path}")
-    checkpoint = torch.load(path, map_location=device)
-    if not isinstance(checkpoint, Mapping):
-        raise RuntimeError(f"Resume checkpoint must be a mapping: {path}")
-    missing = [
-        key
-        for key in (
-            "model_state",
-            "optimizer_state",
-            "generator_state",
-            "device_generator_state",
-            "model_config",
-            "training_config",
-            "step",
-            "losses",
-            "validation_losses",
-            "generation_metrics",
-            "final_loss",
-            "metrics_path",
-            "loss_plot_path",
-        )
-        if key not in checkpoint
-    ]
-    if missing:
-        raise RuntimeError(f"Resume checkpoint is missing {', '.join(missing)}: {path}")
-
-    checkpoint_model_config = checkpoint["model_config"]
-    if not isinstance(checkpoint_model_config, Mapping):
-        raise RuntimeError(f"Resume checkpoint model_config must be a mapping: {path}")
-    try:
-        loaded_model_config = ModelConfig.from_checkpoint_dict(checkpoint_model_config)
-    except ValueError as exc:
-        raise RuntimeError(f"Resume checkpoint model_config is invalid: {path}. {exc}") from exc
-    if loaded_model_config != model_config:
+    checkpoint = training_log.load_training_checkpoint(path, torch=torch, map_location=device)
+    if checkpoint.model_config != model_config:
         raise ValueError("Resume checkpoint model_config does not match the requested model")
-    model_state = checkpoint["model_state"]
-    optimizer_state = checkpoint["optimizer_state"]
-    if not isinstance(model_state, Mapping):
-        raise RuntimeError(f"Resume checkpoint model_state must be a mapping: {path}")
-    if not isinstance(optimizer_state, Mapping):
-        raise RuntimeError(f"Resume checkpoint optimizer_state must be a mapping: {path}")
-    if not isinstance(checkpoint["training_config"], Mapping):
-        raise RuntimeError(f"Resume checkpoint training_config must be a mapping: {path}")
-    if not isinstance(checkpoint["generation_metrics"], Mapping):
-        raise RuntimeError(f"Resume checkpoint generation_metrics must be a mapping: {path}")
-    if not isinstance(checkpoint["losses"], list):
-        raise RuntimeError(f"Resume checkpoint losses must be a list: {path}")
-    if not isinstance(checkpoint["validation_losses"], list):
-        raise RuntimeError(f"Resume checkpoint validation_losses must be a list: {path}")
-    if not isinstance(checkpoint["step"], int):
-        raise RuntimeError(f"Resume checkpoint step must be an integer: {path}")
-    if not isinstance(checkpoint["final_loss"], int | float):
-        raise RuntimeError(f"Resume checkpoint final_loss must be numeric: {path}")
-    if not isinstance(checkpoint["metrics_path"], str):
-        raise RuntimeError(f"Resume checkpoint metrics_path must be a string: {path}")
-    if not isinstance(checkpoint["loss_plot_path"], str):
-        raise RuntimeError(f"Resume checkpoint loss_plot_path must be a string: {path}")
 
-    model.load_state_dict(model_state)
-    optimizer.load_state_dict(optimizer_state)
-    generator.set_state(checkpoint["generator_state"])
-    device_generator_state = checkpoint["device_generator_state"]
+    model.load_state_dict(checkpoint.model_state)
+    optimizer.load_state_dict(checkpoint.optimizer_state)
+    generator.set_state(checkpoint.generator_state)
     if device_generator is not None:
-        if device_generator_state is None:
+        if checkpoint.device_generator_state is None:
             raise RuntimeError(f"Resume checkpoint is missing device generator state: {path}")
-        device_generator.set_state(device_generator_state)
-    step = checkpoint["step"]
-    final_loss = float(checkpoint["final_loss"])
-    losses = cast(list[training_log.TrainingLossRecord], list(checkpoint["losses"]))
-    validation_losses = cast(
-        list[training_log.ValidationLossRecord],
-        list(checkpoint["validation_losses"]),
+        device_generator.set_state(checkpoint.device_generator_state)
+    return (
+        checkpoint.step,
+        checkpoint.final_loss,
+        checkpoint.losses,
+        checkpoint.validation_losses,
     )
-    return step, final_loss, losses, validation_losses
 
 
 def _load_training_samples(config: TrainingConfig) -> tuple[SatelliteSample, ...]:

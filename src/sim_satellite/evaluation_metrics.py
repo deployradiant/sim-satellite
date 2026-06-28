@@ -65,33 +65,6 @@ class MaskMetricState:
                 f"{int(self.rgb_generated_sum.shape[1])} != {image_channels}"
             )
 
-    def add_histogram_counts(
-        self,
-        values: Any,
-        labels: Any,
-        *,
-        class_count: int,
-        channel: int,
-        torch: Any,
-        target: str,
-    ) -> None:
-        bin_ids = (values * self.histogram_bins).long().clamp(0, self.histogram_bins - 1)
-        combined = labels * self.histogram_bins + bin_ids
-        counts = (
-            torch.bincount(
-                combined,
-                minlength=class_count * self.histogram_bins,
-            )
-            .view(class_count, self.histogram_bins)
-            .detach()
-            .cpu()
-            .double()
-        )
-        if target == "generated":
-            self.hist_generated_count[:, channel, :] += counts
-        else:
-            self.hist_real_count[:, channel, :] += counts
-
     def payload(self) -> dict[str, Any]:
         pixel_count = self.pixel_count
         valid = pixel_count > 0.0
@@ -232,21 +205,19 @@ class GenerationMetricAccumulator:
                 .cpu()
                 .double()
             )
-            state.add_histogram_counts(
+            state.hist_generated_count[:, channel, :] += _histogram_counts(
                 generated_values,
                 flat_labels,
                 class_count=class_count,
-                channel=channel,
+                histogram_bins=state.histogram_bins,
                 torch=torch,
-                target="generated",
             )
-            state.add_histogram_counts(
+            state.hist_real_count[:, channel, :] += _histogram_counts(
                 real_values,
                 flat_labels,
                 class_count=class_count,
-                channel=channel,
+                histogram_bins=state.histogram_bins,
                 torch=torch,
-                target="real",
             )
 
         generated_gradient = _sobel_gradient_magnitude(generated, torch=torch).reshape(-1)
@@ -393,6 +364,28 @@ def _histogram_jensen_shannon(generated_counts: Any, real_counts: Any) -> Any:
     ).sum(dim=2)
     real_kl = (real * (real.clamp_min(epsilon) / midpoint.clamp_min(epsilon)).log()).sum(dim=2)
     return (0.5 * (generated_kl + real_kl)).mean(dim=1)
+
+
+def _histogram_counts(
+    values: Any,
+    labels: Any,
+    *,
+    class_count: int,
+    histogram_bins: int,
+    torch: Any,
+) -> Any:
+    bin_ids = (values * histogram_bins).long().clamp(0, histogram_bins - 1)
+    combined = labels * histogram_bins + bin_ids
+    return (
+        torch.bincount(
+            combined,
+            minlength=class_count * histogram_bins,
+        )
+        .view(class_count, histogram_bins)
+        .detach()
+        .cpu()
+        .double()
+    )
 
 
 def _macro_average(values: Any, valid: Any) -> float | None:

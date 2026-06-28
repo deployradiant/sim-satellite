@@ -18,19 +18,6 @@ class PreloadedSample:
     prepared: PreparedSample
 
 
-class PreloadedSamples:
-    def __init__(self, samples: dict[SatelliteSample, PreparedSample]) -> None:
-        self._samples = samples
-
-    def __len__(self) -> int:
-        return len(self._samples)
-
-    def batch(self, samples: tuple[SatelliteSample, ...]) -> tuple[PreloadedSample, ...]:
-        return tuple(
-            PreloadedSample(sample=sample, prepared=self._samples[sample]) for sample in samples
-        )
-
-
 def unique_samples(
     training_samples: tuple[SatelliteSample, ...],
     validation_batches: tuple[tuple[SatelliteSample, ...], ...],
@@ -53,15 +40,18 @@ def preload_samples(
     samples: tuple[SatelliteSample, ...],
     *,
     progress: Callable[[int, int], None] | None = None,
-) -> PreloadedSamples:
+) -> dict[SatelliteSample, PreloadedSample]:
     import torch
 
-    preloaded: dict[SatelliteSample, PreparedSample] = {}
+    preloaded: dict[SatelliteSample, PreloadedSample] = {}
     for index, sample in enumerate(samples, start=1):
-        preloaded[sample] = load_prepared_sample(sample.prepared_path, torch=torch)
+        preloaded[sample] = PreloadedSample(
+            sample=sample,
+            prepared=load_prepared_sample(sample.prepared_path, torch=torch),
+        )
         if progress is not None and _should_report(index, len(samples)):
             progress(index, len(samples))
-    return PreloadedSamples(preloaded)
+    return preloaded
 
 
 def _should_report(current: int, total: int) -> bool:
@@ -130,10 +120,6 @@ def random_square_crop_box(
 ) -> tuple[int, int, int, int]:
     width, height = sample.prepared.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(
-            f"Sample has invalid dimensions: {sample.sample.image_path} is {(width, height)}"
-        )
 
     max_left = width - size
     max_top = height - size
@@ -157,10 +143,6 @@ def center_square_crop_box(
 ) -> tuple[int, int, int, int]:
     width, height = sample.prepared.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(
-            f"Sample has invalid dimensions: {sample.sample.image_path} is {(width, height)}"
-        )
     left = (width - size) // 2
     top = (height - size) // 2
     return left, top, left + size, top + size

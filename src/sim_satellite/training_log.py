@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,80 @@ from sim_satellite.model import ModelConfig
 MetricValue = float | int
 TrainingLossRecord = dict[str, MetricValue | str]
 ValidationLossRecord = dict[str, MetricValue | str]
+_TRAINING_CHECKPOINT_KEYS = (
+    "model_state",
+    "optimizer_state",
+    "generator_state",
+    "device_generator_state",
+    "model_config",
+    "training_config",
+    "step",
+    "losses",
+    "validation_losses",
+    "generation_metrics",
+    "final_loss",
+    "metrics_path",
+    "loss_plot_path",
+)
+
+
+@dataclass(frozen=True)
+class TrainingCheckpoint:
+    model_state: Mapping[str, Any]
+    optimizer_state: Mapping[str, Any]
+    generator_state: Any
+    device_generator_state: Any
+    model_config: ModelConfig
+    step: int
+    losses: list[TrainingLossRecord]
+    validation_losses: list[ValidationLossRecord]
+    final_loss: float
+
+
+def load_training_checkpoint(path: Path, *, torch: Any, map_location: Any) -> TrainingCheckpoint:
+    if not path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {path}")
+    payload = torch.load(path, map_location=map_location)
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"Resume checkpoint must be a mapping: {path}")
+
+    missing = [key for key in _TRAINING_CHECKPOINT_KEYS if key not in payload]
+    if missing:
+        raise RuntimeError(f"Resume checkpoint is missing {', '.join(missing)}: {path}")
+
+    checkpoint_model_config = payload["model_config"]
+    if not isinstance(checkpoint_model_config, Mapping):
+        raise RuntimeError(f"Resume checkpoint model_config must be a mapping: {path}")
+    try:
+        model_config = ModelConfig.from_checkpoint_dict(checkpoint_model_config)
+    except ValueError as exc:
+        raise RuntimeError(f"Resume checkpoint model_config is invalid: {path}. {exc}") from exc
+
+    for key in ("model_state", "optimizer_state", "training_config", "generation_metrics"):
+        if not isinstance(payload[key], Mapping):
+            raise RuntimeError(f"Resume checkpoint {key} must be a mapping: {path}")
+    for key in ("losses", "validation_losses"):
+        if not isinstance(payload[key], list):
+            raise RuntimeError(f"Resume checkpoint {key} must be a list: {path}")
+    for key in ("metrics_path", "loss_plot_path"):
+        if not isinstance(payload[key], str):
+            raise RuntimeError(f"Resume checkpoint {key} must be a string: {path}")
+    if not isinstance(payload["step"], int):
+        raise RuntimeError(f"Resume checkpoint step must be an integer: {path}")
+    if not isinstance(payload["final_loss"], int | float):
+        raise RuntimeError(f"Resume checkpoint final_loss must be numeric: {path}")
+
+    return TrainingCheckpoint(
+        model_state=payload["model_state"],
+        optimizer_state=payload["optimizer_state"],
+        generator_state=payload["generator_state"],
+        device_generator_state=payload["device_generator_state"],
+        model_config=model_config,
+        step=payload["step"],
+        losses=list(payload["losses"]),
+        validation_losses=list(payload["validation_losses"]),
+        final_loss=float(payload["final_loss"]),
+    )
 
 
 def print_train_start(

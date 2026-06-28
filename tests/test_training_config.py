@@ -9,6 +9,7 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
+from sim_satellite import training_log
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
@@ -261,23 +262,26 @@ def test_resume_checkpoint_requires_full_training_state(tmp_path: Path) -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     generator = torch.Generator(device="cpu").manual_seed(123)
     device_generator = torch.Generator(device="cpu").manual_seed(456)
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "generator_state": generator.get_state(),
-            "device_generator_state": device_generator.get_state(),
-            "model_config": asdict(model_config),
-            "training_config": asdict(TrainingConfig()),
-            "step": 1,
-            "losses": [],
-            "validation_losses": [],
-            "generation_metrics": {},
-            "final_loss": 0.0,
-            "metrics_path": "metrics.json",
-            "loss_plot_path": "loss.png",
-        },
+    training_log._write_training_checkpoint(
         checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
+        device_generator=device_generator,
+        model_config=model_config,
+        config=TrainingConfig(),
+        losses=[],
+        validation_losses=[],
+        generation_metrics={},
+        final_loss=0.0,
+        step=1,
+        metrics_path=tmp_path / "metrics.json",
+        loss_plot_path=tmp_path / "loss.png",
+        torch=torch,
     )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    del checkpoint["optimizer_state"]
+    torch.save(checkpoint, checkpoint_path)
 
     with pytest.raises(RuntimeError, match="optimizer_state"):
         _load_training_state(

@@ -37,7 +37,7 @@ def test_preloaded_batch_loading_uses_aligned_crop(tmp_path: Path) -> None:
     write_prepared_sample(sample, torch=torch, config=config)
 
     preloaded = preload_samples((sample,))
-    preloaded_sample = preloaded.batch((sample,))[0]
+    preloaded_sample = preloaded[sample]
     crop_box = random_square_crop_box(
         preloaded_sample,
         crop_size=8,
