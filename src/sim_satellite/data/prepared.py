@@ -104,6 +104,19 @@ def load_prepared_sample(path: Path, *, torch: Any) -> PreparedSample:
         or not isinstance(size, tuple)
     ):
         raise RuntimeError(f"Prepared sample data is missing image, mask, or size: {path}")
+    if len(size) != 2 or not all(isinstance(value, int) for value in size):
+        raise RuntimeError(f"Prepared sample data size must be a width/height tuple: {path}")
+    width, height = size
+    if width < 1 or height < 1:
+        raise RuntimeError(f"Prepared sample data has invalid size {size}: {path}")
+    if image.dtype != torch.uint8 or mask.dtype != torch.uint8:
+        raise RuntimeError(f"Prepared sample image and mask must be uint8 tensors: {path}")
+    if image.ndim != 3 or int(image.shape[2]) != 3:
+        raise RuntimeError(f"Prepared sample image must have shape (H, W, 3): {path}")
+    if mask.ndim != 2:
+        raise RuntimeError(f"Prepared sample mask must have shape (H, W): {path}")
+    if tuple(image.shape[:2]) != (height, width) or tuple(mask.shape) != (height, width):
+        raise RuntimeError(f"Prepared sample tensor shapes must match size {size}: {path}")
     return PreparedSample(
         image=cast(Tensor, image),
         mask=cast(Tensor, mask),

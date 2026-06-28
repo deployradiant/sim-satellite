@@ -9,12 +9,14 @@ import torch
 from click.testing import CliRunner
 
 import sim_satellite.train as train_module
+from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.train import (
     TIMESTEP_LOGIT_NORMAL_MEAN,
     TIMESTEP_LOGIT_NORMAL_STD,
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
     _autocast_context,
     _load_training_samples,
+    _load_training_state,
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
@@ -158,15 +160,15 @@ def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Pat
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
                 '"prepared": "prepared/abancay/a.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
                 '"prepared": "prepared/tokyo/b.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
                 '"prepared": "prepared/maputo/c.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
             ]
         )
         + "\n",
@@ -208,19 +210,19 @@ def test_max_train_samples_limits_seeded_training_samples(tmp_path: Path) -> Non
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
                 '"prepared": "prepared/abancay/a.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
                 '"prepared": "prepared/tokyo/b.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/maputo/images/c.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/maputo/labels/c.tif", '
                 '"prepared": "prepared/maputo/c.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/lima/images/d.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/lima/labels/d.tif", '
                 '"prepared": "prepared/lima/d.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
             ]
         )
         + "\n",
@@ -252,6 +254,44 @@ def test_training_config_validates_max_train_samples() -> None:
         load_training_config_values({"max_train_samples": -1})
 
 
+def test_resume_checkpoint_requires_full_training_state(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "resume.pt"
+    model_config = ModelConfig(image_size=32, mask_channels=2, hidden_channels=4)
+    model = build_model(model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    generator = torch.Generator(device="cpu").manual_seed(123)
+    device_generator = torch.Generator(device="cpu").manual_seed(456)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "generator_state": generator.get_state(),
+            "device_generator_state": device_generator.get_state(),
+            "model_config": asdict(model_config),
+            "training_config": asdict(TrainingConfig()),
+            "step": 1,
+            "losses": [],
+            "validation_losses": [],
+            "generation_metrics": {},
+            "final_loss": 0.0,
+            "metrics_path": "metrics.json",
+            "loss_plot_path": "loss.png",
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match="optimizer_state"):
+        _load_training_state(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            device_generator=device_generator,
+            torch=torch,
+            model_config=model_config,
+            device=torch.device("cpu"),
+        )
+
+
 def test_generation_metrics_load_validation_batches_without_periodic_validation(
     tmp_path: Path,
 ) -> None:
@@ -262,11 +302,11 @@ def test_generation_metrics_load_validation_batches_without_periodic_validation(
                 '{"image": "extracted/OpenEarthMap_wo_xBD/abancay/images/a.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/abancay/labels/a.tif", '
                 '"prepared": "prepared/abancay/a.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
                 '{"image": "extracted/OpenEarthMap_wo_xBD/tokyo/images/b.tif", '
                 '"mask": "extracted/OpenEarthMap_wo_xBD/tokyo/labels/b.tif", '
                 '"prepared": "prepared/tokyo/b.pt", '
-                '"split": "train"}',
+                '"split": "train", "source": "fixture"}',
             ]
         )
         + "\n",

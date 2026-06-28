@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import overload
+from typing import Any, overload
 
 
 @dataclass(frozen=True)
@@ -16,18 +16,16 @@ class SatelliteSample:
     mask_path: Path
     prepared_path: Path
     split: str
-    source: str = "openearthmap"
+    source: str
 
     @classmethod
-    def from_json(cls, value: dict[str, str], root: Path) -> SatelliteSample:
-        if not value.get("prepared"):
-            raise ValueError("manifest sample is missing required prepared path")
+    def from_json(cls, value: Mapping[str, Any], root: Path) -> SatelliteSample:
         return cls(
-            image_path=_resolve(root, value["image"]),
-            mask_path=_resolve(root, value["mask"]),
-            prepared_path=_resolve(root, value["prepared"]),
-            split=value["split"],
-            source=value.get("source", "openearthmap"),
+            image_path=_resolve(root, _required_manifest_string(value, "image")),
+            mask_path=_resolve(root, _required_manifest_string(value, "mask")),
+            prepared_path=_resolve(root, _required_manifest_string(value, "prepared")),
+            split=_required_manifest_string(value, "split"),
+            source=_required_manifest_string(value, "source"),
         )
 
     def to_json(self, root: Path) -> dict[str, str]:
@@ -86,6 +84,8 @@ def read_manifest(manifest_path: str | Path) -> list[SatelliteSample]:
                 value = json.loads(stripped)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{path}:{line_number}: manifest sample must be an object")
             samples.append(SatelliteSample.from_json(value, root))
 
     return samples
@@ -120,6 +120,13 @@ def _resolve(root: Path, value: str) -> Path:
     if path.is_absolute():
         return path
     return root / path
+
+
+def _required_manifest_string(value: Mapping[str, Any], name: str) -> str:
+    field = value.get(name)
+    if not isinstance(field, str) or not field:
+        raise ValueError(f"manifest sample is missing required {name}")
+    return field
 
 
 def _relative_or_absolute(path: Path, root: Path) -> str:

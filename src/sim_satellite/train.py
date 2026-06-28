@@ -17,7 +17,6 @@ import torch
 
 from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
-from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.generation import generate_conditioned_images
 from sim_satellite.model import (
     ModelConfig,
@@ -65,17 +64,17 @@ def run_training(
     crop_generator = torch.Generator(device="cpu").manual_seed(config.seed)
     random_generator = torch.Generator(device=device).manual_seed(config.seed)
     training_samples = _load_training_samples(config)
-    batches = tuple(iter_batches(training_samples, config.batch_size))
-    validation_batches = _load_validation_batches(config)
+    sample_batches = tuple(iter_batches(training_samples, config.batch_size))
+    validation_sample_batches = _load_validation_batches(config)
     preload_started_at = time.monotonic()
-    samples_to_preload = training_data.unique_samples(training_samples, validation_batches)
-    train_sample_count = sum(len(batch) for batch in batches)
+    samples_to_preload = training_data.unique_samples(training_samples, validation_sample_batches)
+    train_sample_count = sum(len(batch) for batch in sample_batches)
     training_log.print_preload_start(
         manifest_path=config.manifest_path,
         split=config.split,
         sample_count=len(samples_to_preload),
         train_samples=train_sample_count,
-        validation_batches=len(validation_batches),
+        validation_batches=len(validation_sample_batches),
     )
 
     def report_preload_progress(completed: int, total: int) -> None:
@@ -88,6 +87,10 @@ def run_training(
     preloaded_samples = training_data.preload_samples(
         samples_to_preload,
         progress=report_preload_progress,
+    )
+    batches = tuple(preloaded_samples.batch(batch) for batch in sample_batches)
+    validation_batches = tuple(
+        preloaded_samples.batch(batch) for batch in validation_sample_batches
     )
     preload_seconds = max(0.0, time.monotonic() - preload_started_at)
 
@@ -159,7 +162,6 @@ def run_training(
             device=device,
             crop_generator=crop_generator,
             random_generator=random_generator,
-            preloaded_samples=preloaded_samples,
             mask_drop_probability=config.mask_drop_probability,
             precision=config.precision,
             profile_timing=_should_sample_step_timing(config, step_number),
@@ -200,7 +202,6 @@ def run_training(
                 model_config=model_config,
                 device=device,
                 config=config,
-                preloaded_samples=preloaded_samples,
                 log_color_stats=should_log_color_stats,
             )
             validation_record: training_log.ValidationLossRecord = {
@@ -305,7 +306,6 @@ def run_training(
         model_config=model_config,
         device=device,
         config=config,
-        preloaded_samples=preloaded_samples,
     )
     training_log.write_training_artifacts(
         checkpoint_path,
@@ -403,7 +403,7 @@ def _sample_flow_timesteps(
 
 
 def _train_step(
-    samples: tuple[SatelliteSample, ...],
+    samples: tuple[training_data.PreloadedSample, ...],
     *,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -412,7 +412,6 @@ def _train_step(
     device: torch.device,
     crop_generator: torch.Generator,
     random_generator: torch.Generator,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     mask_drop_probability: float,
     precision: str,
     profile_timing: bool,
@@ -428,7 +427,6 @@ def _train_step(
             crop_size=model_config.image_size,
             torch=torch,
             generator=crop_generator,
-            preloaded_samples=preloaded_samples,
         )
         for sample in samples
     ]
@@ -443,7 +441,6 @@ def _train_step(
         torch=torch,
         model_config=model_config,
         device=device,
-        preloaded_samples=preloaded_samples,
     )
     _synchronize_device(torch, device, profile_timing)
     if profile_timing:
@@ -516,28 +513,76 @@ def _load_training_state(
     if not path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location=device)
-    checkpoint_model_config = checkpoint.get("model_config")
-    if (
-        not isinstance(checkpoint_model_config, Mapping)
-        or ModelConfig.from_dict(checkpoint_model_config) != model_config
-    ):
+    if not isinstance(checkpoint, Mapping):
+        raise RuntimeError(f"Resume checkpoint must be a mapping: {path}")
+    missing = [
+        key
+        for key in (
+            "model_state",
+            "optimizer_state",
+            "generator_state",
+            "device_generator_state",
+            "model_config",
+            "training_config",
+            "step",
+            "losses",
+            "validation_losses",
+            "generation_metrics",
+            "final_loss",
+            "metrics_path",
+            "loss_plot_path",
+        )
+        if key not in checkpoint
+    ]
+    if missing:
+        raise RuntimeError(f"Resume checkpoint is missing {', '.join(missing)}: {path}")
+
+    checkpoint_model_config = checkpoint["model_config"]
+    if not isinstance(checkpoint_model_config, Mapping):
+        raise RuntimeError(f"Resume checkpoint model_config must be a mapping: {path}")
+    try:
+        loaded_model_config = ModelConfig.from_checkpoint_dict(checkpoint_model_config)
+    except ValueError as exc:
+        raise RuntimeError(f"Resume checkpoint model_config is invalid: {path}. {exc}") from exc
+    if loaded_model_config != model_config:
         raise ValueError("Resume checkpoint model_config does not match the requested model")
-    model.load_state_dict(checkpoint["model_state"])
-    optimizer_state = checkpoint.get("optimizer_state")
-    if optimizer_state is not None:
-        optimizer.load_state_dict(optimizer_state)
-    generator_state = checkpoint.get("generator_state")
-    if generator_state is not None:
-        generator.set_state(generator_state)
-    device_generator_state = checkpoint.get("device_generator_state")
-    if device_generator is not None and device_generator_state is not None:
+    model_state = checkpoint["model_state"]
+    optimizer_state = checkpoint["optimizer_state"]
+    if not isinstance(model_state, Mapping):
+        raise RuntimeError(f"Resume checkpoint model_state must be a mapping: {path}")
+    if not isinstance(optimizer_state, Mapping):
+        raise RuntimeError(f"Resume checkpoint optimizer_state must be a mapping: {path}")
+    if not isinstance(checkpoint["training_config"], Mapping):
+        raise RuntimeError(f"Resume checkpoint training_config must be a mapping: {path}")
+    if not isinstance(checkpoint["generation_metrics"], Mapping):
+        raise RuntimeError(f"Resume checkpoint generation_metrics must be a mapping: {path}")
+    if not isinstance(checkpoint["losses"], list):
+        raise RuntimeError(f"Resume checkpoint losses must be a list: {path}")
+    if not isinstance(checkpoint["validation_losses"], list):
+        raise RuntimeError(f"Resume checkpoint validation_losses must be a list: {path}")
+    if not isinstance(checkpoint["step"], int):
+        raise RuntimeError(f"Resume checkpoint step must be an integer: {path}")
+    if not isinstance(checkpoint["final_loss"], int | float):
+        raise RuntimeError(f"Resume checkpoint final_loss must be numeric: {path}")
+    if not isinstance(checkpoint["metrics_path"], str):
+        raise RuntimeError(f"Resume checkpoint metrics_path must be a string: {path}")
+    if not isinstance(checkpoint["loss_plot_path"], str):
+        raise RuntimeError(f"Resume checkpoint loss_plot_path must be a string: {path}")
+
+    model.load_state_dict(model_state)
+    optimizer.load_state_dict(optimizer_state)
+    generator.set_state(checkpoint["generator_state"])
+    device_generator_state = checkpoint["device_generator_state"]
+    if device_generator is not None:
+        if device_generator_state is None:
+            raise RuntimeError(f"Resume checkpoint is missing device generator state: {path}")
         device_generator.set_state(device_generator_state)
-    step = int(checkpoint["step"])
-    final_loss = float(checkpoint.get("final_loss", 0.0))
-    losses = cast(list[training_log.TrainingLossRecord], list(checkpoint.get("losses", [])))
+    step = checkpoint["step"]
+    final_loss = float(checkpoint["final_loss"])
+    losses = cast(list[training_log.TrainingLossRecord], list(checkpoint["losses"]))
     validation_losses = cast(
         list[training_log.ValidationLossRecord],
-        list(checkpoint.get("validation_losses", [])),
+        list(checkpoint["validation_losses"]),
     )
     return step, final_loss, losses, validation_losses
 
@@ -623,13 +668,12 @@ def _validation_batch_limit(config: TrainingConfig) -> int:
 
 def _evaluate_validation_loss(
     model: Any,
-    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
+    validation_batches: tuple[tuple[training_data.PreloadedSample, ...], ...],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
     log_color_stats: bool,
 ) -> tuple[float, dict[str, float | int]]:
     was_training = model.training
@@ -643,7 +687,6 @@ def _evaluate_validation_loss(
                 training_data.center_square_crop_box(
                     sample,
                     crop_size=model_config.image_size,
-                    preloaded_samples=preloaded_samples,
                 )
                 for sample in samples
             ]
@@ -653,7 +696,6 @@ def _evaluate_validation_loss(
                 torch=torch,
                 model_config=model_config,
                 device=device,
-                preloaded_samples=preloaded_samples,
             )
             if log_color_stats:
                 color_batches.append(clean.detach().cpu())
@@ -683,13 +725,12 @@ def _evaluate_validation_loss(
 
 def _evaluate_final_generation_metrics(
     model: Any,
-    validation_batches: tuple[tuple[SatelliteSample, ...], ...],
+    validation_batches: tuple[tuple[training_data.PreloadedSample, ...], ...],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
     config: TrainingConfig,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> dict[str, Any]:
     if config.generation_metrics_samples <= 0:
         return evaluation_metrics.disabled_generation_metrics_payload()
@@ -715,7 +756,6 @@ def _evaluate_final_generation_metrics(
                 training_data.center_square_crop_box(
                     sample,
                     crop_size=model_config.image_size,
-                    preloaded_samples=preloaded_samples,
                 )
                 for sample in samples
             ]
@@ -725,7 +765,6 @@ def _evaluate_final_generation_metrics(
                 torch=torch,
                 model_config=model_config,
                 device=device,
-                preloaded_samples=preloaded_samples,
             )
 
             generated = generate_conditioned_images(

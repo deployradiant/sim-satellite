@@ -9,6 +9,141 @@ from sim_satellite.image_metrics import structural_similarity
 
 
 @dataclass
+class MaskMetricState:
+    pixel_count: Any
+    rgb_generated_sum: Any
+    rgb_real_sum: Any
+    hist_generated_count: Any
+    hist_real_count: Any
+    gradient_generated_sum: Any
+    gradient_real_sum: Any
+    histogram_bins: int
+    sample_count: int = 0
+    boundary_pixel_count: int = 0
+    boundary_gradient_generated_sum: float = 0.0
+    boundary_gradient_real_sum: float = 0.0
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        class_count: int,
+        image_channels: int,
+        histogram_bins: int,
+        torch: Any,
+    ) -> MaskMetricState:
+        return cls(
+            pixel_count=torch.zeros(class_count, dtype=torch.float64),
+            rgb_generated_sum=torch.zeros(class_count, image_channels, dtype=torch.float64),
+            rgb_real_sum=torch.zeros(class_count, image_channels, dtype=torch.float64),
+            hist_generated_count=torch.zeros(
+                class_count,
+                image_channels,
+                histogram_bins,
+                dtype=torch.float64,
+            ),
+            hist_real_count=torch.zeros(
+                class_count,
+                image_channels,
+                histogram_bins,
+                dtype=torch.float64,
+            ),
+            gradient_generated_sum=torch.zeros(class_count, dtype=torch.float64),
+            gradient_real_sum=torch.zeros(class_count, dtype=torch.float64),
+            histogram_bins=histogram_bins,
+        )
+
+    def validate_shape(self, *, class_count: int, image_channels: int) -> None:
+        if int(self.pixel_count.shape[0]) != class_count:
+            raise ValueError(
+                "All semantic mask batches must have the same class count: "
+                f"{int(self.pixel_count.shape[0])} != {class_count}"
+            )
+        if int(self.rgb_generated_sum.shape[1]) != image_channels:
+            raise ValueError(
+                "All image batches must have the same channel count for mask metrics: "
+                f"{int(self.rgb_generated_sum.shape[1])} != {image_channels}"
+            )
+
+    def add_histogram_counts(
+        self,
+        values: Any,
+        labels: Any,
+        *,
+        class_count: int,
+        channel: int,
+        torch: Any,
+        target: str,
+    ) -> None:
+        bin_ids = (values * self.histogram_bins).long().clamp(0, self.histogram_bins - 1)
+        combined = labels * self.histogram_bins + bin_ids
+        counts = (
+            torch.bincount(
+                combined,
+                minlength=class_count * self.histogram_bins,
+            )
+            .view(class_count, self.histogram_bins)
+            .detach()
+            .cpu()
+            .double()
+        )
+        if target == "generated":
+            self.hist_generated_count[:, channel, :] += counts
+        else:
+            self.hist_real_count[:, channel, :] += counts
+
+    def payload(self) -> dict[str, Any]:
+        pixel_count = self.pixel_count
+        valid = pixel_count > 0.0
+        safe_count = pixel_count.clamp_min(1.0).view(-1, 1)
+        rgb_generated = self.rgb_generated_sum / safe_count
+        rgb_real = self.rgb_real_sum / safe_count
+        rgb_mae = (rgb_generated - rgb_real).abs().mean(dim=1)
+
+        gradient_generated = self.gradient_generated_sum / pixel_count.clamp_min(1.0)
+        gradient_real = self.gradient_real_sum / pixel_count.clamp_min(1.0)
+        gradient_mae = (gradient_generated - gradient_real).abs()
+
+        hist_js = _histogram_jensen_shannon(
+            self.hist_generated_count,
+            self.hist_real_count,
+        )
+        boundary_generated = (
+            self.boundary_gradient_generated_sum / self.boundary_pixel_count
+            if self.boundary_pixel_count > 0
+            else None
+        )
+        boundary_real = (
+            self.boundary_gradient_real_sum / self.boundary_pixel_count
+            if self.boundary_pixel_count > 0
+            else None
+        )
+        boundary_delta = (
+            abs(boundary_generated - boundary_real)
+            if boundary_generated is not None and boundary_real is not None
+            else None
+        )
+
+        return {
+            "mask_sample_count": self.sample_count,
+            "mask_class_pixel_counts": [int(value) for value in pixel_count.tolist()],
+            "mask_rgb_mean_mae_macro": _macro_average(rgb_mae, valid),
+            "mask_rgb_mean_mae_weighted": _weighted_average(rgb_mae, pixel_count),
+            "mask_rgb_mean_mae_per_class": _per_class_values(rgb_mae, valid),
+            "mask_rgb_hist_js_macro": _macro_average(hist_js, valid),
+            "mask_rgb_hist_js_weighted": _weighted_average(hist_js, pixel_count),
+            "mask_rgb_hist_js_per_class": _per_class_values(hist_js, valid),
+            "mask_gradient_mae_macro": _macro_average(gradient_mae, valid),
+            "mask_gradient_mae_weighted": _weighted_average(gradient_mae, pixel_count),
+            "mask_gradient_mae_per_class": _per_class_values(gradient_mae, valid),
+            "mask_boundary_pixel_count": self.boundary_pixel_count,
+            "mask_boundary_gradient_generated": boundary_generated,
+            "mask_boundary_gradient_real": boundary_real,
+            "mask_boundary_gradient_delta": boundary_delta,
+        }
+
+
+@dataclass
 class GenerationMetricAccumulator:
     """Accumulate paired generated-vs-real image metrics over batches."""
 
@@ -18,17 +153,7 @@ class GenerationMetricAccumulator:
     _psnr_sum: float = 0.0
     _psnr_count: int = 0
     _ssim_sum: float = 0.0
-    _mask_sample_count: int = 0
-    _mask_pixel_count: Any | None = None
-    _mask_rgb_generated_sum: Any | None = None
-    _mask_rgb_real_sum: Any | None = None
-    _mask_hist_generated_count: Any | None = None
-    _mask_hist_real_count: Any | None = None
-    _mask_gradient_generated_sum: Any | None = None
-    _mask_gradient_real_sum: Any | None = None
-    _boundary_pixel_count: int = 0
-    _boundary_gradient_generated_sum: float = 0.0
-    _boundary_gradient_real_sum: float = 0.0
+    _mask_state: MaskMetricState | None = None
 
     def update(self, generated: Any, real: Any, *, torch: Any, semantic_mask: Any = None) -> None:
         generated = generated.detach().float().clamp(0.0, 1.0)
@@ -84,33 +209,30 @@ class GenerationMetricAccumulator:
 
         class_count = int(semantic_mask.shape[1])
         image_channels = int(generated.shape[1])
-        self._ensure_mask_storage(class_count, image_channels, torch=torch)
+        state = self._mask_state_for(class_count, image_channels, torch=torch)
 
         labels = semantic_mask.argmax(dim=1).long()
         flat_labels = labels.reshape(-1)
         pixel_count = torch.bincount(flat_labels, minlength=class_count).detach().cpu().double()
-        assert self._mask_pixel_count is not None
-        assert self._mask_rgb_generated_sum is not None
-        assert self._mask_rgb_real_sum is not None
-        self._mask_pixel_count += pixel_count
-        self._mask_sample_count += int(generated.shape[0])
+        state.pixel_count += pixel_count
+        state.sample_count += int(generated.shape[0])
 
         for channel in range(image_channels):
             generated_values = generated[:, channel, :, :].reshape(-1)
             real_values = real[:, channel, :, :].reshape(-1)
-            self._mask_rgb_generated_sum[:, channel] += (
+            state.rgb_generated_sum[:, channel] += (
                 torch.bincount(flat_labels, weights=generated_values, minlength=class_count)
                 .detach()
                 .cpu()
                 .double()
             )
-            self._mask_rgb_real_sum[:, channel] += (
+            state.rgb_real_sum[:, channel] += (
                 torch.bincount(flat_labels, weights=real_values, minlength=class_count)
                 .detach()
                 .cpu()
                 .double()
             )
-            self._add_histogram_counts(
+            state.add_histogram_counts(
                 generated_values,
                 flat_labels,
                 class_count=class_count,
@@ -118,7 +240,7 @@ class GenerationMetricAccumulator:
                 torch=torch,
                 target="generated",
             )
-            self._add_histogram_counts(
+            state.add_histogram_counts(
                 real_values,
                 flat_labels,
                 class_count=class_count,
@@ -129,15 +251,13 @@ class GenerationMetricAccumulator:
 
         generated_gradient = _sobel_gradient_magnitude(generated, torch=torch).reshape(-1)
         real_gradient = _sobel_gradient_magnitude(real, torch=torch).reshape(-1)
-        assert self._mask_gradient_generated_sum is not None
-        assert self._mask_gradient_real_sum is not None
-        self._mask_gradient_generated_sum += (
+        state.gradient_generated_sum += (
             torch.bincount(flat_labels, weights=generated_gradient, minlength=class_count)
             .detach()
             .cpu()
             .double()
         )
-        self._mask_gradient_real_sum += (
+        state.gradient_real_sum += (
             torch.bincount(flat_labels, weights=real_gradient, minlength=class_count)
             .detach()
             .cpu()
@@ -147,90 +267,34 @@ class GenerationMetricAccumulator:
         boundary_mask = _semantic_boundary_mask(labels, torch=torch).reshape(-1)
         boundary_count = int(boundary_mask.sum().detach().cpu().item())
         if boundary_count > 0:
-            self._boundary_pixel_count += boundary_count
-            self._boundary_gradient_generated_sum += float(
+            state.boundary_pixel_count += boundary_count
+            state.boundary_gradient_generated_sum += float(
                 generated_gradient[boundary_mask].sum().detach().cpu().item()
             )
-            self._boundary_gradient_real_sum += float(
+            state.boundary_gradient_real_sum += float(
                 real_gradient[boundary_mask].sum().detach().cpu().item()
             )
 
-    def _ensure_mask_storage(self, class_count: int, image_channels: int, *, torch: Any) -> None:
-        if self._mask_pixel_count is None:
-            self._mask_pixel_count = torch.zeros(class_count, dtype=torch.float64)
-            self._mask_rgb_generated_sum = torch.zeros(
-                class_count,
-                image_channels,
-                dtype=torch.float64,
-            )
-            self._mask_rgb_real_sum = torch.zeros(
-                class_count,
-                image_channels,
-                dtype=torch.float64,
-            )
-            self._mask_hist_generated_count = torch.zeros(
-                class_count,
-                image_channels,
-                self.mask_histogram_bins,
-                dtype=torch.float64,
-            )
-            self._mask_hist_real_count = torch.zeros(
-                class_count,
-                image_channels,
-                self.mask_histogram_bins,
-                dtype=torch.float64,
-            )
-            self._mask_gradient_generated_sum = torch.zeros(class_count, dtype=torch.float64)
-            self._mask_gradient_real_sum = torch.zeros(class_count, dtype=torch.float64)
-            return
-
-        if int(self._mask_pixel_count.shape[0]) != class_count:
-            raise ValueError(
-                "All semantic mask batches must have the same class count: "
-                f"{int(self._mask_pixel_count.shape[0])} != {class_count}"
-            )
-        assert self._mask_rgb_generated_sum is not None
-        if int(self._mask_rgb_generated_sum.shape[1]) != image_channels:
-            raise ValueError(
-                "All image batches must have the same channel count for mask metrics: "
-                f"{int(self._mask_rgb_generated_sum.shape[1])} != {image_channels}"
-            )
-
-    def _add_histogram_counts(
+    def _mask_state_for(
         self,
-        values: Any,
-        labels: Any,
-        *,
         class_count: int,
-        channel: int,
+        image_channels: int,
+        *,
         torch: Any,
-        target: str,
-    ) -> None:
-        bin_ids = (
-            (values * self.mask_histogram_bins)
-            .long()
-            .clamp(
-                0,
-                self.mask_histogram_bins - 1,
+    ) -> MaskMetricState:
+        if self._mask_state is None:
+            self._mask_state = MaskMetricState.create(
+                class_count=class_count,
+                image_channels=image_channels,
+                histogram_bins=self.mask_histogram_bins,
+                torch=torch,
             )
-        )
-        combined = labels * self.mask_histogram_bins + bin_ids
-        counts = (
-            torch.bincount(
-                combined,
-                minlength=class_count * self.mask_histogram_bins,
-            )
-            .view(class_count, self.mask_histogram_bins)
-            .detach()
-            .cpu()
-            .double()
-        )
-        if target == "generated":
-            assert self._mask_hist_generated_count is not None
-            self._mask_hist_generated_count[:, channel, :] += counts
         else:
-            assert self._mask_hist_real_count is not None
-            self._mask_hist_real_count[:, channel, :] += counts
+            self._mask_state.validate_shape(
+                class_count=class_count,
+                image_channels=image_channels,
+            )
+        return self._mask_state
 
     def payload(
         self,
@@ -266,64 +330,9 @@ class GenerationMetricAccumulator:
         return payload
 
     def _mask_payload(self) -> dict[str, Any]:
-        if self._mask_pixel_count is None:
+        if self._mask_state is None:
             return {}
-
-        assert self._mask_rgb_generated_sum is not None
-        assert self._mask_rgb_real_sum is not None
-        assert self._mask_hist_generated_count is not None
-        assert self._mask_hist_real_count is not None
-        assert self._mask_gradient_generated_sum is not None
-        assert self._mask_gradient_real_sum is not None
-
-        pixel_count = self._mask_pixel_count
-        valid = pixel_count > 0.0
-        safe_count = pixel_count.clamp_min(1.0).view(-1, 1)
-        rgb_generated = self._mask_rgb_generated_sum / safe_count
-        rgb_real = self._mask_rgb_real_sum / safe_count
-        rgb_mae = (rgb_generated - rgb_real).abs().mean(dim=1)
-
-        gradient_generated = self._mask_gradient_generated_sum / pixel_count.clamp_min(1.0)
-        gradient_real = self._mask_gradient_real_sum / pixel_count.clamp_min(1.0)
-        gradient_mae = (gradient_generated - gradient_real).abs()
-
-        hist_js = _histogram_jensen_shannon(
-            self._mask_hist_generated_count,
-            self._mask_hist_real_count,
-        )
-        boundary_generated = (
-            self._boundary_gradient_generated_sum / self._boundary_pixel_count
-            if self._boundary_pixel_count > 0
-            else None
-        )
-        boundary_real = (
-            self._boundary_gradient_real_sum / self._boundary_pixel_count
-            if self._boundary_pixel_count > 0
-            else None
-        )
-        boundary_delta = (
-            abs(boundary_generated - boundary_real)
-            if boundary_generated is not None and boundary_real is not None
-            else None
-        )
-
-        return {
-            "mask_sample_count": self._mask_sample_count,
-            "mask_class_pixel_counts": [int(value) for value in pixel_count.tolist()],
-            "mask_rgb_mean_mae_macro": _macro_average(rgb_mae, valid),
-            "mask_rgb_mean_mae_weighted": _weighted_average(rgb_mae, pixel_count),
-            "mask_rgb_mean_mae_per_class": _per_class_values(rgb_mae, valid),
-            "mask_rgb_hist_js_macro": _macro_average(hist_js, valid),
-            "mask_rgb_hist_js_weighted": _weighted_average(hist_js, pixel_count),
-            "mask_rgb_hist_js_per_class": _per_class_values(hist_js, valid),
-            "mask_gradient_mae_macro": _macro_average(gradient_mae, valid),
-            "mask_gradient_mae_weighted": _weighted_average(gradient_mae, pixel_count),
-            "mask_gradient_mae_per_class": _per_class_values(gradient_mae, valid),
-            "mask_boundary_pixel_count": self._boundary_pixel_count,
-            "mask_boundary_gradient_generated": boundary_generated,
-            "mask_boundary_gradient_real": boundary_real,
-            "mask_boundary_gradient_delta": boundary_delta,
-        }
+        return self._mask_state.payload()
 
 
 def disabled_generation_metrics_payload() -> dict[str, Any]:

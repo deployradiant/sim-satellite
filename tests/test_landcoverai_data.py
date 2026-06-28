@@ -110,17 +110,17 @@ def test_prepare_landcoverai_matches_openearth_training_batch_contract(tmp_path:
     config = ModelConfig(image_size=256, mask_channels=9)
     samples = (openearthmap_sample, landcoverai_sample)
     preloaded = preload_samples(samples)
+    preloaded_samples = preloaded.batch(samples)
     crop_boxes = [
-        center_square_crop_box(sample, crop_size=config.image_size, preloaded_samples=preloaded)
-        for sample in samples
+        center_square_crop_box(sample, crop_size=config.image_size)
+        for sample in preloaded_samples
     ]
     images, masks = load_batch(
-        samples,
+        preloaded_samples,
         crop_boxes,
         torch=torch,
         model_config=config,
         device=torch.device("cpu"),
-        preloaded_samples=preloaded,
     )
 
     assert images.shape == (2, 3, 256, 256)

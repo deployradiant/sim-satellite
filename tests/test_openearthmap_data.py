@@ -11,6 +11,18 @@ from sim_satellite.data.loader import read_manifest
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 
 
+def test_manifest_requires_source(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        '{"image": "image.png", "mask": "mask.png", '
+        '"prepared": "prepared.pt", "split": "train"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="required source"):
+        read_manifest(manifest_path)
+
+
 def test_prepare_openearthmap_writes_manifest_without_classes_sidecar(
     tmp_path: Path,
 ) -> None:
