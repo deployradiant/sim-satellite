@@ -14,9 +14,11 @@ from sim_satellite.data.landcoverai import (
     scan_landcoverai,
 )
 from sim_satellite.data.loader import read_manifest
+from sim_satellite.data.openearthmap import OPENEARTHMAP_RGB, download_and_prepare_openearthmap
 from sim_satellite.data.prepared import load_prepared_sample
 from sim_satellite.data.tensors import mask_to_class_ids
 from sim_satellite.model import ModelConfig
+from sim_satellite.training_data import center_square_crop_box, load_batch, preload_samples
 
 
 def test_prepare_landcoverai_tiles_remaps_and_writes_manifest(tmp_path: Path) -> None:
@@ -61,6 +63,72 @@ def test_prepare_landcoverai_tiles_remaps_and_writes_manifest(tmp_path: Path) ->
     prepared = load_prepared_sample(samples[0].prepared_path, torch=torch)
     assert prepared.image.shape == (512, 512, 3)
     assert prepared.mask.shape == (512, 512)
+
+
+def test_prepare_landcoverai_matches_openearth_training_batch_contract(tmp_path: Path) -> None:
+    openearthmap_dir = tmp_path / "openearthmap"
+    landcoverai_dir = tmp_path / "landcoverai"
+    _write_openearth_scene(
+        openearthmap_dir,
+        mask_classes=["building", "tree", "water", "road"],
+    )
+    scene = "N-00-00-A-a-0-0"
+    _write_scene(
+        landcoverai_dir / "extracted",
+        scene=scene,
+        mask_values=[1, 2, 3, 4],
+    )
+    (landcoverai_dir / "extracted" / "train.txt").write_text(
+        f"{scene}_0\n",
+        encoding="utf-8",
+    )
+
+    openearthmap_result = download_and_prepare_openearthmap(
+        openearthmap_dir,
+        download=False,
+        extract=False,
+    )
+    landcoverai_result = download_and_prepare_landcoverai(
+        landcoverai_dir,
+        download=False,
+        extract=False,
+        validate_official_counts=False,
+    )
+
+    openearthmap_sample = read_manifest(openearthmap_result.manifest_path)[0]
+    landcoverai_sample = read_manifest(landcoverai_result.manifest_path)[0]
+    openearthmap_prepared = load_prepared_sample(openearthmap_sample.prepared_path, torch=torch)
+    landcoverai_prepared = load_prepared_sample(landcoverai_sample.prepared_path, torch=torch)
+
+    assert openearthmap_prepared.image.shape == landcoverai_prepared.image.shape
+    assert openearthmap_prepared.mask.shape == landcoverai_prepared.mask.shape
+    assert openearthmap_prepared.image.dtype == landcoverai_prepared.image.dtype == torch.uint8
+    assert openearthmap_prepared.mask.dtype == landcoverai_prepared.mask.dtype == torch.uint8
+    assert torch.equal(openearthmap_prepared.image, landcoverai_prepared.image)
+    assert torch.equal(openearthmap_prepared.mask, landcoverai_prepared.mask)
+
+    config = ModelConfig(image_size=256, mask_channels=9)
+    samples = (openearthmap_sample, landcoverai_sample)
+    preloaded = preload_samples(samples)
+    crop_boxes = [
+        center_square_crop_box(sample, crop_size=config.image_size, preloaded_samples=preloaded)
+        for sample in samples
+    ]
+    images, masks = load_batch(
+        samples,
+        crop_boxes,
+        torch=torch,
+        model_config=config,
+        device=torch.device("cpu"),
+        preloaded_samples=preloaded,
+    )
+
+    assert images.shape == (2, 3, 256, 256)
+    assert masks.shape == (2, 9, 256, 256)
+    assert images.dtype == masks.dtype == torch.float32
+    assert torch.equal(images[0], images[1])
+    assert torch.equal(masks[0], masks[1])
+    assert torch.allclose(masks.sum(dim=1), torch.ones((2, 256, 256)))
 
 
 def test_prepare_landcoverai_can_filter_sparse_tiles(tmp_path: Path) -> None:
@@ -251,6 +319,33 @@ def _write_scene(
         (1, 0): mask_values[1],
         (0, 1): mask_values[2],
         (1, 1): mask_values[3],
+    }
+    half_width = size[0] // 2
+    half_height = size[1] // 2
+    for y in range(size[1]):
+        for x in range(size[0]):
+            pixels[x, y] = quadrant_values[(x // half_width, y // half_height)]
+    mask.save(mask_path)
+
+
+def _write_openearth_scene(
+    root: Path,
+    *,
+    mask_classes: list[str],
+    size: tuple[int, int] = (512, 512),
+) -> None:
+    image_path = root / "extracted" / "train" / "images" / "tile.png"
+    mask_path = root / "extracted" / "train" / "labels" / "tile.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (1, 2, 3)).save(image_path)
+    mask = Image.new("RGB", size, OPENEARTHMAP_RGB[mask_classes[0]])
+    pixels = mask.load()
+    quadrant_values = {
+        (0, 0): OPENEARTHMAP_RGB[mask_classes[0]],
+        (1, 0): OPENEARTHMAP_RGB[mask_classes[1]],
+        (0, 1): OPENEARTHMAP_RGB[mask_classes[2]],
+        (1, 1): OPENEARTHMAP_RGB[mask_classes[3]],
     }
     half_width = size[0] // 2
     half_height = size[1] // 2
