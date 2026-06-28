@@ -259,13 +259,39 @@ def _download(
     progress: ProgressReporter | None,
 ) -> None:
     if archive_path.exists() and not force:
-        _report(progress, f"Using cached archive {archive_path}")
-        return
+        if zipfile.is_zipfile(archive_path):
+            _report(progress, f"Using cached archive {archive_path}")
+            return
+        _report(progress, f"Cached archive is invalid; replacing {archive_path}")
+        archive_path.unlink()
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = archive_path.with_suffix(f"{archive_path.suffix}.part")
     _report(progress, f"Downloading OpenEarthMap archive to {archive_path}")
 
+    for attempt in range(1, 4):
+        try:
+            _download_archive_once(partial_path, progress=progress)
+            if not zipfile.is_zipfile(partial_path):
+                raise RuntimeError("downloaded OpenEarthMap archive is not a valid zip file")
+            partial_path.replace(archive_path)
+            _report(progress, f"Download complete: {archive_path}")
+            return
+        except Exception as exc:
+            if partial_path.exists():
+                partial_path.unlink()
+            if attempt == 3:
+                raise RuntimeError(
+                    f"Failed to download a valid OpenEarthMap archive after {attempt} attempts"
+                ) from exc
+            _report(progress, f"Download attempt {attempt} failed; retrying: {exc}")
+
+
+def _download_archive_once(
+    partial_path: Path,
+    *,
+    progress: ProgressReporter | None,
+) -> None:
     with urllib.request.urlopen(OPENEARTHMAP_URL) as response:
         total_bytes = _content_length(response)
         downloaded_bytes = 0
@@ -292,8 +318,12 @@ def _download(
                 elif downloaded_bytes - last_reported_bytes >= 256 * 1024 * 1024:
                     _report(progress, f"Downloaded {_format_bytes(downloaded_bytes)}")
                     last_reported_bytes = downloaded_bytes
-    partial_path.replace(archive_path)
-    _report(progress, f"Download complete: {archive_path}")
+
+        if total_bytes is not None and downloaded_bytes != total_bytes:
+            raise RuntimeError(
+                "downloaded byte count did not match Content-Length: "
+                f"{downloaded_bytes} != {total_bytes}"
+            )
 
 
 def _extract(
