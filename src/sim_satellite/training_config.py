@@ -12,6 +12,9 @@ from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASS_IDS
 from sim_satellite.model import ModelConfig
 
 DEFAULT_MANIFEST_PATH = "data/openearthmap/manifest.jsonl"
+TRAINING_SPACE_PIXEL = "pixel"
+TRAINING_SPACE_LATENT = "latent"
+TRAINING_SPACES = {TRAINING_SPACE_PIXEL, TRAINING_SPACE_LATENT}
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,14 @@ class TrainingConfig:
     mask_channels: int = len(OPENEARTHMAP_CLASS_IDS)
     hidden_channels: int = 64
     mask_drop_probability: float = 0.0
+    train_fraction: float = 1.0
     max_train_samples: int = 0
+    training_space: str = TRAINING_SPACE_PIXEL
+    latent_checkpoint_path: str = (
+        "artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val320-20k.pt"
+    )
+    latent_downsample_factor: int = 4
+    latent_channels: int = 24
     precision: str = "float32"
     timing_sample_every: int = 0
     color_stats_every: int = 0
@@ -56,6 +66,20 @@ class TrainingConfig:
         return cls(**{name: values[name] for name in names if name in values})
 
     def model_config(self) -> ModelConfig:
+        image_size = self.image_size
+        image_channels = self.image_channels
+        if self.training_space == TRAINING_SPACE_LATENT:
+            image_size = self.image_size // self.latent_downsample_factor
+            image_channels = self.latent_channels
+        return ModelConfig(
+            image_size=image_size,
+            image_channels=image_channels,
+            mask_channels=self.mask_channels,
+            hidden_channels=self.hidden_channels,
+            seed=self.seed,
+        )
+
+    def data_model_config(self) -> ModelConfig:
         return ModelConfig(
             image_size=self.image_size,
             image_channels=self.image_channels,
@@ -104,12 +128,30 @@ def _validate_training_config(config: TrainingConfig) -> None:
 
     if config.mask_drop_probability < 0.0 or config.mask_drop_probability > 1.0:
         raise ValueError("mask_drop_probability must be between 0 and 1")
+    if config.train_fraction <= 0.0 or config.train_fraction > 1.0:
+        raise ValueError("train_fraction must be greater than 0 and at most 1")
     if config.generation_metrics_guidance_scale < 0.0:
         raise ValueError("generation_metrics_guidance_scale must be non-negative")
     if config.precision not in {"float32", "bf16"}:
         raise ValueError("precision must be one of: bf16, float32")
     if config.device != "cuda" and not config.device.startswith("cuda:"):
         raise ValueError("device must be a CUDA device")
+    if config.training_space not in TRAINING_SPACES:
+        raise ValueError("training_space must be one of: latent, pixel")
+    if config.image_channels != 3:
+        raise ValueError("image_channels must be 3")
+    if config.training_space == TRAINING_SPACE_LATENT:
+        if not config.latent_checkpoint_path:
+            raise ValueError("latent_checkpoint_path is required for latent training")
+        if config.latent_downsample_factor <= 0:
+            raise ValueError("latent_downsample_factor must be positive")
+        if config.latent_channels <= 0:
+            raise ValueError("latent_channels must be positive")
+        if config.image_size % config.latent_downsample_factor != 0:
+            raise ValueError("image_size must be divisible by latent_downsample_factor")
+        latent_size = config.image_size // config.latent_downsample_factor
+        if latent_size < 32:
+            raise ValueError("latent model image size must be at least 32")
 
     for name in ("manifest_path", "split"):
         if not getattr(config, name):

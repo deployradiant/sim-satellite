@@ -73,6 +73,41 @@ def test_training_config_defaults_to_scaling_law_model_width() -> None:
     assert config.model_config().hidden_channels == 64
 
 
+def test_training_config_derives_latent_model_config_from_pixel_crop_config() -> None:
+    config = load_training_config_values(
+        {
+            "training_space": "latent",
+            "image_size": 256,
+            "latent_downsample_factor": 4,
+            "latent_channels": 24,
+        }
+    )
+
+    model_config = config.model_config()
+    data_model_config = config.data_model_config()
+
+    assert model_config.image_size == 64
+    assert model_config.image_channels == 24
+    assert data_model_config.image_size == 256
+    assert data_model_config.image_channels == 3
+
+
+def test_training_config_validates_latent_fields() -> None:
+    cases = (
+        ({"training_space": "future"}, "training_space must be one of: latent, pixel"),
+        ({"training_space": "latent", "latent_checkpoint_path": ""}, "latent_checkpoint_path"),
+        ({"training_space": "latent", "image_size": 250}, "image_size must be divisible"),
+        ({"training_space": "latent", "image_size": 96}, "latent model image size"),
+        ({"training_space": "latent", "latent_channels": 0}, "latent_channels must be positive"),
+        ({"train_fraction": 0.0}, "train_fraction must be greater than 0"),
+        ({"train_fraction": 1.5}, "train_fraction must be greater than 0"),
+    )
+
+    for values, message in cases:
+        with pytest.raises(ValueError, match=message):
+            load_training_config_values(values)
+
+
 def test_training_config_rejects_removed_training_fields() -> None:
     for field in ("inpaint_probability", "inpaint_min_size_ratio", "use_coordinates"):
         with pytest.raises(ValueError, match=f"Unknown training config fields: {field}"):
@@ -247,9 +282,45 @@ def test_max_train_samples_limits_seeded_training_samples(tmp_path: Path) -> Non
     assert len(samples) == 2
 
 
-def test_training_config_validates_max_train_samples() -> None:
+def test_train_fraction_limits_seeded_training_samples(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                f'{{"image": "extracted/OpenEarthMap_wo_xBD/city/images/{name}.tif", '
+                f'"mask": "extracted/OpenEarthMap_wo_xBD/city/labels/{name}.tif", '
+                f'"prepared": "prepared/city/{name}.pt", '
+                '"split": "train"}'
+                for name in ("a", "b", "c", "d")
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    samples = _load_training_samples(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            seed=7,
+            train_fraction=0.5,
+        )
+    )
+    expected = _load_training_samples(
+        TrainingConfig(
+            manifest_path=str(manifest_path),
+            seed=7,
+        )
+    )
+
+    assert samples == expected[:2]
+    assert len(samples) == 2
+
+
+def test_training_config_validates_training_sample_limits() -> None:
     with pytest.raises(ValueError, match="max_train_samples must be non-negative"):
         load_training_config_values({"max_train_samples": -1})
+    with pytest.raises(ValueError, match="train_fraction"):
+        load_training_config_values({"train_fraction": -0.1})
 
 
 def test_generation_metrics_load_validation_batches_without_periodic_validation(

@@ -113,6 +113,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_openearthmap_data(config["manifest_path"])
+    artifact_volume.reload()
     result = run_training(
         load_training_config_values(config),
         after_save=artifact_volume.commit,
@@ -220,6 +221,8 @@ def _modal_training_config(config: TrainingConfig) -> dict[str, Any]:
         values["loss_plot_path"] = _modal_artifact_path(config.loss_plot_path)
     if config.resume_from:
         values["resume_from"] = _modal_artifact_path(config.resume_from)
+    if config.latent_checkpoint_path:
+        values["latent_checkpoint_path"] = _modal_artifact_path(config.latent_checkpoint_path)
     return values
 
 

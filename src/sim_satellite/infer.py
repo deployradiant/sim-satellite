@@ -14,6 +14,12 @@ import torch
 from sim_satellite.data.loader import SatelliteDataset
 from sim_satellite.data.tensors import load_mask_tensor
 from sim_satellite.generation import generate_conditioned_images
+from sim_satellite.latent import (
+    checkpoint_uses_latents,
+    data_model_config_for_latents,
+    load_checkpoint_latent_codec,
+    semantic_mask_for_model,
+)
 from sim_satellite.model import ModelConfig, build_model
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
@@ -90,6 +96,7 @@ class LoadedGenerator:
     torch: Any
     model: Any
     model_config: ModelConfig
+    latent_codec: Any | None
     checkpoint_path: Path
     device: Any
 
@@ -139,14 +146,17 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
+    _validate_latent_state_matches_checkpoint(model_config, checkpoint, checkpoint_path)
     model = build_model(model_config)
     model = model.to(torch_device)
     _load_model_state(model, model_state, checkpoint_path=checkpoint_path)
+    latent_codec = load_checkpoint_latent_codec(checkpoint, torch=torch, device=torch_device)
     model.eval()
     return LoadedGenerator(
         torch=torch,
         model=model,
         model_config=model_config,
+        latent_codec=latent_codec,
         checkpoint_path=checkpoint_path,
         device=torch_device,
     )
@@ -161,22 +171,29 @@ def generate_image_with_model(
     torch = loaded_generator.torch
     model = loaded_generator.model
     model_config = loaded_generator.model_config
+    latent_codec = loaded_generator.latent_codec
+    data_model_config = data_model_config_for_latents(model_config, latent_codec)
     device = loaded_generator.device
 
     mask_path = _resolve_mask_path(config.mask_path)
     semantic_mask = (
-        load_mask_tensor(mask_path, torch=torch, config=model_config).unsqueeze(0).to(device)
+        load_mask_tensor(mask_path, torch=torch, config=data_model_config).unsqueeze(0).to(device)
+    )
+    generation_mask = semantic_mask_for_model(
+        semantic_mask,
+        model_size=(model_config.image_size, model_config.image_size),
     )
 
     image = generate_conditioned_images(
         model,
-        semantic_mask,
+        generation_mask,
         torch=torch,
         model_config=model_config,
         device=device,
         seed=config.seed,
         steps=config.steps,
         guidance_scale=config.guidance_scale,
+        latent_codec=latent_codec,
         progress=progress,
     )
 
@@ -220,6 +237,21 @@ def _load_model_state(
         raise RuntimeError(
             f"Inference checkpoint is incompatible with flow U-Net: {checkpoint_path}. {exc}"
         ) from exc
+
+
+def _validate_latent_state_matches_checkpoint(
+    model_config: ModelConfig,
+    checkpoint: Mapping[str, Any],
+    checkpoint_path: Path,
+) -> None:
+    if model_config.image_channels == 3:
+        return
+    if checkpoint_uses_latents(checkpoint):
+        return
+    raise RuntimeError(
+        "Inference checkpoint has non-RGB model channels but is missing latent "
+        f"training_config metadata: {checkpoint_path}"
+    )
 
 
 def _required_mask_path(mask_path: str | None) -> str:

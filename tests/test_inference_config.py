@@ -11,6 +11,7 @@ from sim_satellite import infer
 from sim_satellite.generation import flow_inference_schedule, flow_inference_tensors
 from sim_satellite.infer import InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
+from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
 
 def test_inference_config_rejects_old_model_shape_fields() -> None:
@@ -115,6 +116,51 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
         infer.load_generator(checkpoint_path, device="cpu")
 
 
+def test_load_generator_loads_latent_checkpoint_codec(tmp_path: Path) -> None:
+    vae_checkpoint_path = _write_vae_checkpoint(tmp_path)
+    checkpoint_path = _write_flow_checkpoint(
+        tmp_path,
+        torch=torch,
+        filename="latent-flow.pt",
+        model_config=ModelConfig(
+            image_size=32,
+            image_channels=4,
+            mask_channels=2,
+            hidden_channels=4,
+            seed=99,
+        ),
+        training_config={
+            "training_space": "latent",
+            "latent_checkpoint_path": str(vae_checkpoint_path),
+            "latent_downsample_factor": 4,
+            "latent_channels": 4,
+        },
+    )
+
+    loaded = infer.load_generator(checkpoint_path, device="cpu")
+
+    assert loaded.latent_codec is not None
+    assert loaded.model_config.image_channels == 4
+
+
+def test_load_generator_rejects_non_rgb_checkpoint_without_latent_metadata(tmp_path: Path) -> None:
+    checkpoint_path = _write_flow_checkpoint(
+        tmp_path,
+        torch=torch,
+        filename="latent-without-metadata.pt",
+        model_config=ModelConfig(
+            image_size=32,
+            image_channels=4,
+            mask_channels=2,
+            hidden_channels=4,
+            seed=99,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="missing latent training_config metadata"):
+        infer.load_generator(checkpoint_path, device="cpu")
+
+
 def test_flow_inference_tensors_match_schedule() -> None:
     timesteps, step_size = flow_inference_tensors(4, torch=torch, device="cpu")
 
@@ -137,9 +183,11 @@ def _write_flow_checkpoint(
     *,
     torch: Any,
     filename: str = "flow.pt",
+    model_config: ModelConfig | None = None,
+    training_config: dict[str, object] | None = None,
 ) -> Path:
     checkpoint_path = tmp_path / filename
-    config = ModelConfig(
+    config = model_config or ModelConfig(
         image_size=32,
         image_channels=3,
         mask_channels=2,
@@ -151,5 +199,25 @@ def _write_flow_checkpoint(
         "model_config": asdict(config),
         "model_state": model.state_dict(),
     }
+    if training_config is not None:
+        checkpoint["training_config"] = training_config
     torch.save(checkpoint, checkpoint_path)
+    return checkpoint_path
+
+
+def _write_vae_checkpoint(tmp_path: Path) -> Path:
+    config = SatelliteVAEConfig(latent_channels=4, hidden_channels=8)
+    model = SatelliteVAE(config)
+    checkpoint_path = tmp_path / "vae.pt"
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "vae_config": asdict(config),
+            "latent_stats": {
+                "mean": [0.0] * 4,
+                "std": [1.0] * 4,
+            },
+        },
+        checkpoint_path,
+    )
     return checkpoint_path

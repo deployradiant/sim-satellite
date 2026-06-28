@@ -128,6 +128,8 @@ def test_modal_training_enters_app_run_with_valid_data(
             manifest_path="data/openearthmap/manifest.jsonl",
             checkpoint_path="artifacts/checkpoints/model.pt",
             resume_from="artifacts/checkpoints/model-step-50000.pt",
+            training_space="latent",
+            latent_checkpoint_path="artifacts/vae/custom.pt",
         )
     )
 
@@ -141,12 +143,15 @@ def test_modal_training_enters_app_run_with_valid_data(
                 manifest_path="data/openearthmap/manifest.jsonl",
                 checkpoint_path="artifacts/checkpoints/model.pt",
                 resume_from="artifacts/checkpoints/model-step-50000.pt",
+                training_space="latent",
+                latent_checkpoint_path="artifacts/vae/custom.pt",
             )
         ),
         "device": "cuda",
         "checkpoint_path": "/artifacts/checkpoints/model.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "resume_from": "/artifacts/checkpoints/model-step-50000.pt",
+        "latent_checkpoint_path": "/artifacts/vae/custom.pt",
     }
 
 
