@@ -29,9 +29,14 @@ See README.md for architecture.
 - Keep the full OpenEarthMap download, extraction, and prepared tensor data under
   `data/openearthmap/` locally when disk space allows. This directory is
   generated state and must not be committed.
-- Modal training should download, extract, and prepare OpenEarthMap on the remote
-  box's local `/data/openearthmap` scratch disk. Do not upload the full dataset
-  or prepared tensor tree into a shared Modal data volume for standard runs.
+- Modal training data should be persisted in the shared Modal data volume
+  mounted at `/data`, not redownloaded into throwaway scratch space for each
+  run. The default data volume is `sim-satellite-openearthmap-cache`, and
+  `SIM_SATELLITE_MODAL_DATA_VOLUME_NAME` can override it.
+- Keep full remote training datasets, extracted archives, prepared tensors, and
+  generated research/mix manifests in the Modal `/data` volume whenever they are
+  reused across runs. Commit the data volume after download, extraction,
+  preparation, or manifest generation.
 - Keep local preparation useful for inspection and local debugging with
   `uv run sim-satellite openearthmap`, but do not require the local checkout to
   contain the full dataset before starting Modal training.

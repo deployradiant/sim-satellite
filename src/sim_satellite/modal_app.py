@@ -45,6 +45,10 @@ from sim_satellite.web import WebConfig, create_app
 
 APP_NAME = os.environ.get("SIM_SATELLITE_MODAL_APP_NAME", "sim-satellite")
 ARTIFACT_VOLUME_NAME = "sim-satellite-artifacts"
+DATA_VOLUME_NAME = os.environ.get(
+    "SIM_SATELLITE_MODAL_DATA_VOLUME_NAME",
+    "sim-satellite-openearthmap-cache",
+)
 LOCAL_DATA_ROOT = Path("data")
 LOCAL_MODAL_WEB_DATA_ROOT = Path(
     os.environ.get("SIM_SATELLITE_LOCAL_MODAL_WEB_DATA_ROOT", "data/modal-web-preview")
@@ -133,6 +137,11 @@ if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
     )
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
+data_volume = modal.Volume.from_name(DATA_VOLUME_NAME, create_if_missing=True)
+modal_volumes = {
+    str(MODAL_ARTIFACT_ROOT): artifact_volume,
+    str(MODAL_DATA_ROOT): data_volume,
+}
 
 
 @app.function(
@@ -140,7 +149,7 @@ artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_TRAINING_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
@@ -159,7 +168,7 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_TRAINING_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_openearthmap_data(config["manifest_path"])
@@ -174,7 +183,7 @@ def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_TRAINING_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
@@ -198,7 +207,7 @@ def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 def evaluate_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
@@ -214,7 +223,7 @@ def evaluate_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
@@ -231,7 +240,7 @@ def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_WEB_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+    volumes=modal_volumes,
 )
 @modal.asgi_app()
 def web_remote() -> Any:
@@ -443,6 +452,7 @@ def _modal_data_path(value: str, *, field_name: str) -> str:
 
 
 def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
+    data_volume.reload()
     data_dir = _modal_data_dir_for_manifest(manifest_path)
     if _modal_openearthmap_data_ready(data_dir, Path(manifest_path)):
         _print_modal_data_event("modal_data_ready", data_dir=str(data_dir))
@@ -472,6 +482,7 @@ def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
         scanned_images=result.scanned_images,
         missing_masks=result.missing_masks,
     )
+    data_volume.commit()
 
 
 def _ensure_modal_training_data(manifest_path: str) -> None:
@@ -491,6 +502,7 @@ def _is_modal_landcoverai_mix_manifest(manifest_path: Path) -> bool:
 
 
 def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
+    data_volume.reload()
     ratio = _landcoverai_mix_ratio_from_manifest(manifest_path)
     if _modal_landcoverai_mix_data_ready(manifest_path, landcoverai_ratio=ratio):
         _print_modal_data_event("modal_landcoverai_mix_ready", manifest_path=str(manifest_path))
@@ -521,9 +533,11 @@ def _ensure_modal_landcoverai_mix_data(manifest_path: Path) -> None:
         manifest_path=str(manifest_path),
         landcoverai_ratio=ratio_label,
     )
+    data_volume.commit()
 
 
 def _ensure_modal_landcoverai_data() -> None:
+    data_volume.reload()
     manifest_path = MODAL_LANDCOVERAI_DATA_DIR / "manifest.jsonl"
     if _modal_landcoverai_data_ready(
         manifest_path,
@@ -576,6 +590,7 @@ def _ensure_modal_landcoverai_data() -> None:
         skipped_tiles=result.skipped_tiles,
         split_counts=result.split_counts,
     )
+    data_volume.commit()
 
 
 def _seed_modal_landcoverai_archive() -> None:
