@@ -17,6 +17,7 @@ import torch
 
 from sim_satellite import diagnostics, evaluation_metrics, training_data, training_log
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample, iter_batches
+from sim_satellite.data.prepared import PreparedSample
 from sim_satellite.generation import generate_conditioned_images
 from sim_satellite.model import (
     ModelConfig,
@@ -406,7 +407,7 @@ def _sample_flow_timesteps(
 
 
 def _train_step(
-    samples: tuple[training_data.PreloadedSample, ...],
+    samples: tuple[PreparedSample, ...],
     *,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -617,7 +618,7 @@ def _validation_batch_limit(config: TrainingConfig) -> int:
 
 def _evaluate_validation_loss(
     model: Any,
-    validation_batches: tuple[tuple[training_data.PreloadedSample, ...], ...],
+    validation_batches: tuple[tuple[PreparedSample, ...], ...],
     *,
     torch: Any,
     model_config: ModelConfig,
@@ -674,7 +675,7 @@ def _evaluate_validation_loss(
 
 def _evaluate_final_generation_metrics(
     model: Any,
-    validation_batches: tuple[tuple[training_data.PreloadedSample, ...], ...],
+    validation_batches: tuple[tuple[PreparedSample, ...], ...],
     *,
     torch: Any,
     model_config: ModelConfig,

@@ -13,11 +13,8 @@ class MaskMetricState:
     pixel_count: Any
     rgb_generated_sum: Any
     rgb_real_sum: Any
-    hist_generated_count: Any
-    hist_real_count: Any
     gradient_generated_sum: Any
     gradient_real_sum: Any
-    histogram_bins: int
     sample_count: int = 0
     boundary_pixel_count: int = 0
     boundary_gradient_generated_sum: float = 0.0
@@ -29,28 +26,14 @@ class MaskMetricState:
         *,
         class_count: int,
         image_channels: int,
-        histogram_bins: int,
         torch: Any,
     ) -> MaskMetricState:
         return cls(
             pixel_count=torch.zeros(class_count, dtype=torch.float64),
             rgb_generated_sum=torch.zeros(class_count, image_channels, dtype=torch.float64),
             rgb_real_sum=torch.zeros(class_count, image_channels, dtype=torch.float64),
-            hist_generated_count=torch.zeros(
-                class_count,
-                image_channels,
-                histogram_bins,
-                dtype=torch.float64,
-            ),
-            hist_real_count=torch.zeros(
-                class_count,
-                image_channels,
-                histogram_bins,
-                dtype=torch.float64,
-            ),
             gradient_generated_sum=torch.zeros(class_count, dtype=torch.float64),
             gradient_real_sum=torch.zeros(class_count, dtype=torch.float64),
-            histogram_bins=histogram_bins,
         )
 
     def payload(self) -> dict[str, Any]:
@@ -65,10 +48,6 @@ class MaskMetricState:
         gradient_real = self.gradient_real_sum / pixel_count.clamp_min(1.0)
         gradient_mae = (gradient_generated - gradient_real).abs()
 
-        hist_js = _histogram_jensen_shannon(
-            self.hist_generated_count,
-            self.hist_real_count,
-        )
         boundary_generated = (
             self.boundary_gradient_generated_sum / self.boundary_pixel_count
             if self.boundary_pixel_count > 0
@@ -91,9 +70,6 @@ class MaskMetricState:
             "mask_rgb_mean_mae_macro": _macro_average(rgb_mae, valid),
             "mask_rgb_mean_mae_weighted": _weighted_average(rgb_mae, pixel_count),
             "mask_rgb_mean_mae_per_class": _per_class_values(rgb_mae, valid),
-            "mask_rgb_hist_js_macro": _macro_average(hist_js, valid),
-            "mask_rgb_hist_js_weighted": _weighted_average(hist_js, pixel_count),
-            "mask_rgb_hist_js_per_class": _per_class_values(hist_js, valid),
             "mask_gradient_mae_macro": _macro_average(gradient_mae, valid),
             "mask_gradient_mae_weighted": _weighted_average(gradient_mae, pixel_count),
             "mask_gradient_mae_per_class": _per_class_values(gradient_mae, valid),
@@ -113,12 +89,10 @@ class GenerationMetricAccumulator:
         class_count: int,
         image_channels: int,
         torch: Any,
-        mask_histogram_bins: int = 16,
     ) -> None:
         self.class_count = class_count
         self.image_channels = image_channels
         self.sample_count = 0
-        self.mask_histogram_bins = mask_histogram_bins
         self._mse_sum = 0.0
         self._psnr_sum = 0.0
         self._psnr_count = 0
@@ -126,23 +100,12 @@ class GenerationMetricAccumulator:
         self._mask_state = MaskMetricState.create(
             class_count=class_count,
             image_channels=image_channels,
-            histogram_bins=mask_histogram_bins,
             torch=torch,
         )
 
     def update(self, generated: Any, real: Any, *, semantic_mask: Any, torch: Any) -> None:
         generated = generated.detach().float().clamp(0.0, 1.0)
         real = real.detach().float().clamp(0.0, 1.0)
-        if generated.shape != real.shape:
-            raise ValueError(
-                "Generated and real image batches must have the same shape: "
-                f"{tuple(generated.shape)} != {tuple(real.shape)}"
-            )
-        if generated.ndim != 4:
-            raise ValueError(
-                f"Expected image batches with shape (N, C, H, W), got {generated.ndim}D"
-            )
-
         batch_mse = torch.mean((generated - real) ** 2, dim=(1, 2, 3))
         finite_psnr = batch_mse > 0.0
         batch_ssim = structural_similarity(generated, real, torch=torch)
@@ -165,30 +128,6 @@ class GenerationMetricAccumulator:
         torch: Any,
     ) -> None:
         semantic_mask = semantic_mask.detach().float()
-        if semantic_mask.ndim != 4:
-            raise ValueError(
-                f"Expected semantic masks with shape (N, K, H, W), got {semantic_mask.ndim}D"
-            )
-        shape_mismatch = (
-            semantic_mask.shape[0] != generated.shape[0]
-            or semantic_mask.shape[-2:] != generated.shape[-2:]
-        )
-        if shape_mismatch:
-            raise ValueError(
-                "Semantic masks must match generated image batch and spatial shape: "
-                f"{tuple(semantic_mask.shape)} vs {tuple(generated.shape)}"
-            )
-        if int(semantic_mask.shape[1]) != self.class_count:
-            raise ValueError(
-                "Semantic masks must match accumulator class count: "
-                f"{int(semantic_mask.shape[1])} != {self.class_count}"
-            )
-        if int(generated.shape[1]) != self.image_channels:
-            raise ValueError(
-                "Image batches must match accumulator channel count: "
-                f"{int(generated.shape[1])} != {self.image_channels}"
-            )
-
         state = self._mask_state
         class_count = self.class_count
         labels = semantic_mask.argmax(dim=1).long()
@@ -212,21 +151,6 @@ class GenerationMetricAccumulator:
                 .cpu()
                 .double()
             )
-            state.hist_generated_count[:, channel, :] += _histogram_counts(
-                generated_values,
-                flat_labels,
-                class_count=class_count,
-                histogram_bins=state.histogram_bins,
-                torch=torch,
-            )
-            state.hist_real_count[:, channel, :] += _histogram_counts(
-                real_values,
-                flat_labels,
-                class_count=class_count,
-                histogram_bins=state.histogram_bins,
-                torch=torch,
-            )
-
         generated_gradient = _sobel_gradient_magnitude(generated, torch=torch).reshape(-1)
         real_gradient = _sobel_gradient_magnitude(real, torch=torch).reshape(-1)
         state.gradient_generated_sum += (
@@ -260,14 +184,6 @@ class GenerationMetricAccumulator:
         generation_steps: int,
         guidance_scale: float,
     ) -> dict[str, Any]:
-        if self.sample_count == 0:
-            return {
-                "enabled": False,
-                "status": "skipped: no validation samples were available",
-                "sample_count": 0,
-                "requested_sample_count": requested_sample_count,
-            }
-
         payload = {
             "enabled": True,
             "status": (
@@ -330,42 +246,6 @@ def _semantic_boundary_mask(labels: Any, *, torch: Any) -> Any:
             padding=1,
         ).squeeze(1)
         > 0.0
-    )
-
-
-def _histogram_jensen_shannon(generated_counts: Any, real_counts: Any) -> Any:
-    generated = generated_counts.double()
-    real = real_counts.double()
-    generated = generated / generated.sum(dim=2, keepdim=True).clamp_min(1.0)
-    real = real / real.sum(dim=2, keepdim=True).clamp_min(1.0)
-    midpoint = 0.5 * (generated + real)
-    epsilon = 1e-12
-    generated_kl = (
-        generated * (generated.clamp_min(epsilon) / midpoint.clamp_min(epsilon)).log()
-    ).sum(dim=2)
-    real_kl = (real * (real.clamp_min(epsilon) / midpoint.clamp_min(epsilon)).log()).sum(dim=2)
-    return (0.5 * (generated_kl + real_kl)).mean(dim=1)
-
-
-def _histogram_counts(
-    values: Any,
-    labels: Any,
-    *,
-    class_count: int,
-    histogram_bins: int,
-    torch: Any,
-) -> Any:
-    bin_ids = (values * histogram_bins).long().clamp(0, histogram_bins - 1)
-    combined = labels * histogram_bins + bin_ids
-    return (
-        torch.bincount(
-            combined,
-            minlength=class_count * histogram_bins,
-        )
-        .view(class_count, histogram_bins)
-        .detach()
-        .cpu()
-        .double()
     )
 
 
