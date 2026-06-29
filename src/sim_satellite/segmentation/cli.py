@@ -14,12 +14,14 @@ from sim_satellite.segmentation.config import (
     DEFAULT_SEGMENTATION_PREDICTION_DIR,
     SegmentationEvaluationConfig,
     SegmentationPredictionConfig,
+    SegmentationPreparationConfig,
     load_segmentation_training_config_file,
 )
 from sim_satellite.segmentation.inference import (
     evaluate_segmentation_model,
     predict_segmentation_masks,
 )
+from sim_satellite.segmentation.preparation import prepare_segmentation_manifest
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 
@@ -38,6 +40,40 @@ def _run_evaluation_with_target(
     from sim_satellite.modal_app import run_segmentation_evaluation_target
 
     return run_segmentation_evaluation_target(config)
+
+
+@click.command("segmentation-prepare", help="Prepare a raw segmentation manifest for training.")
+@click.argument("raw_manifest_path", type=click.Path(path_type=Path))
+@click.option(
+    "--output-manifest",
+    "output_manifest_path",
+    type=click.Path(path_type=Path),
+    required=True,
+)
+@click.option("--prepared-dir", type=click.Path(path_type=Path), required=True)
+@click.option("--source", default="custom", show_default=True)
+@click.option("--force-prepared", is_flag=True, help="Rewrite prepared sample data files.")
+def prepare_cli(
+    raw_manifest_path: Path,
+    output_manifest_path: Path,
+    prepared_dir: Path,
+    source: str,
+    force_prepared: bool,
+) -> None:
+    try:
+        result = prepare_segmentation_manifest(
+            SegmentationPreparationConfig(
+                raw_manifest_path=str(raw_manifest_path),
+                output_manifest_path=str(output_manifest_path),
+                prepared_dir=str(prepared_dir),
+                source=source,
+                force_prepared=force_prepared,
+            ),
+            progress=click.echo,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
 
 
 @click.command("segmentation-train", help="Train the VAE-fused segmentation classifier.")

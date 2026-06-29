@@ -86,6 +86,15 @@ class SegmentationPredictionConfig:
 
 
 @dataclass(frozen=True)
+class SegmentationPreparationConfig:
+    raw_manifest_path: str
+    output_manifest_path: str
+    prepared_dir: str
+    source: str = "custom"
+    force_prepared: bool = False
+
+
+@dataclass(frozen=True)
 class SegmentationTrainingResult:
     checkpoint_path: str
     metrics_path: str
@@ -119,6 +128,16 @@ class SegmentationPredictionResult:
     output_dir: str
     manifest_path: str
     images: int
+
+
+@dataclass(frozen=True)
+class SegmentationPreparationResult:
+    raw_manifest_path: str
+    output_manifest_path: str
+    prepared_dir: str
+    samples: int
+    splits: dict[str, int]
+    sources: dict[str, int]
 
 
 def _validate_training_config(config: SegmentationTrainingConfig) -> None:
@@ -161,6 +180,17 @@ def _validate_prediction_config(config: SegmentationPredictionConfig) -> None:
         raise ValueError("pass exactly one of images_manifest_path or images_dir")
     if config.max_images < 0:
         raise ValueError("max_images must be non-negative")
+
+
+def _validate_preparation_config(config: SegmentationPreparationConfig) -> None:
+    if not config.raw_manifest_path:
+        raise ValueError("raw_manifest_path is required")
+    if not config.output_manifest_path:
+        raise ValueError("output_manifest_path is required")
+    if not config.prepared_dir:
+        raise ValueError("prepared_dir is required")
+    if not config.source:
+        raise ValueError("source is required")
 
 
 def load_segmentation_training_config_file(config_path: Path) -> SegmentationTrainingConfig:

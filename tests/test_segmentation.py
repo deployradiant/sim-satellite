@@ -19,6 +19,7 @@ from sim_satellite.segmentation.config import (
     VAE_ASPP_UNET_MODEL_NAME,
     SegmentationEvaluationConfig,
     SegmentationPredictionConfig,
+    SegmentationPreparationConfig,
     SegmentationTrainingConfig,
 )
 from sim_satellite.segmentation.data import (
@@ -39,6 +40,7 @@ from sim_satellite.segmentation.metrics import (
     _segmentation_metrics,
 )
 from sim_satellite.segmentation.models import build_segmentation_model
+from sim_satellite.segmentation.preparation import prepare_segmentation_manifest
 from sim_satellite.segmentation.training import train_segmentation_model
 from sim_satellite.segmentation.vae import _load_vae_feature_encoder
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
@@ -250,6 +252,54 @@ def test_segmentation_train_and_evaluate_use_prepared_tensors(tmp_path: Path) ->
     assert 0.0 <= evaluation.mean_iou <= 1.0
 
 
+def test_segmentation_prepare_raw_manifest_writes_prepared_training_manifest(
+    tmp_path: Path,
+) -> None:
+    for index, _split in enumerate(("custom-train", "custom-val")):
+        _write_rgb_fixture(tmp_path / "raw" / f"tile-{index}.png", index=index)
+        _write_label_fixture(tmp_path / "raw" / f"tile-{index}-mask.png", index=index)
+    raw_manifest_path = tmp_path / "raw.jsonl"
+    raw_manifest_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "image": "raw/tile-0.png",
+                        "mask": "raw/tile-0-mask.png",
+                        "split": "custom-train",
+                        "source": "fixture",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "image": "raw/tile-1.png",
+                        "mask": "raw/tile-1-mask.png",
+                        "split": "custom-val",
+                        "source": "fixture",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_manifest_path = tmp_path / "prepared-manifest.jsonl"
+
+    result = prepare_segmentation_manifest(
+        SegmentationPreparationConfig(
+            raw_manifest_path=str(raw_manifest_path),
+            output_manifest_path=str(output_manifest_path),
+            prepared_dir=str(tmp_path / "prepared"),
+        )
+    )
+
+    prepared_samples = _samples_for_split(output_manifest_path, "custom-train,custom-val")
+    assert result.samples == 2
+    assert result.splits == {"custom-train": 1, "custom-val": 1}
+    assert [sample.source for sample in prepared_samples] == ["fixture", "fixture"]
+    assert all(sample.prepared_path.exists() for sample in prepared_samples)
+
+
 def test_segmentation_predict_writes_class_id_and_color_masks(tmp_path: Path) -> None:
     vae_path = tmp_path / "vae.pt"
     _write_vae_checkpoint(vae_path)
@@ -425,6 +475,7 @@ def test_vae_normalization_requires_latent_stats(tmp_path: Path) -> None:
 
 def test_cli_exposes_segmentation_commands() -> None:
     for command in (
+        "segmentation-prepare",
         "segmentation-train",
         "segmentation-evaluate",
         "segmentation-predict",
