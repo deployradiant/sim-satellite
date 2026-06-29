@@ -399,6 +399,22 @@ def test_modal_loveda_mix_ratio_parses_manifest_parent() -> None:
         modal_app._loveda_mix_ratio_from_manifest(Path("/data/loveda-mix/nope/manifest.jsonl"))
 
 
+def test_modal_dataset_mix_ratio_parses_manifest_parent() -> None:
+    assert modal_app._dataset_mix_ratios_from_manifest(
+        Path("/data/dataset-mix/baseline/manifest.jsonl")
+    ) == (0.0, 0.0)
+    assert modal_app._dataset_mix_ratios_from_manifest(
+        Path("/data/dataset-mix/landcoverai-20/manifest.jsonl")
+    ) == (0.2, 0.0)
+    assert modal_app._dataset_mix_ratios_from_manifest(
+        Path("/data/dataset-mix/landcoverai-20-loveda-20/manifest.jsonl")
+    ) == (0.2, 0.2)
+    with pytest.raises(ValueError, match="baseline.*landcoverai-N"):
+        modal_app._dataset_mix_ratios_from_manifest(
+            Path("/data/dataset-mix/loveda-20/manifest.jsonl")
+        )
+
+
 def test_modal_writes_deterministic_landcoverai_mix_manifest(tmp_path: Path) -> None:
     openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
     landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
@@ -465,6 +481,53 @@ def test_modal_writes_deterministic_loveda_mix_manifest(tmp_path: Path) -> None:
     source_counts = _source_split_counts(samples)
     assert source_counts == {
         ("loveda", "train"): 4,
+        ("openearthmap", "train"): 8,
+        ("openearthmap", "val"): 2,
+    }
+
+
+def test_modal_writes_deterministic_dataset_mix_manifest(tmp_path: Path) -> None:
+    openearthmap_manifest = tmp_path / "openearthmap" / "manifest.jsonl"
+    landcoverai_manifest = tmp_path / "landcoverai" / "manifest.jsonl"
+    loveda_manifest = tmp_path / "loveda" / "manifest.jsonl"
+    output_manifest = (
+        tmp_path / "dataset-mix" / "landcoverai-50-loveda-25" / "manifest.jsonl"
+    )
+    _write_manifest_samples(
+        openearthmap_manifest,
+        source="openearthmap",
+        count=10,
+        split="train",
+    )
+    _write_manifest_samples(
+        landcoverai_manifest,
+        source="landcoverai",
+        count=20,
+        split="train",
+    )
+    _write_manifest_samples(
+        loveda_manifest,
+        source="loveda",
+        count=20,
+        split="train",
+    )
+
+    modal_app._write_dataset_mix_manifest(
+        output_manifest,
+        openearthmap_manifest=openearthmap_manifest,
+        landcoverai_manifest=landcoverai_manifest,
+        loveda_manifest=loveda_manifest,
+        landcoverai_ratio=0.5,
+        loveda_ratio=0.25,
+        validation_samples=2,
+        min_labeled_fraction=0.1,
+        seed=2026,
+    )
+
+    samples = read_manifest(output_manifest)
+    assert _source_split_counts(samples) == {
+        ("landcoverai", "train"): 4,
+        ("loveda", "train"): 2,
         ("openearthmap", "train"): 8,
         ("openearthmap", "val"): 2,
     }
