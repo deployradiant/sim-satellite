@@ -213,17 +213,6 @@ def create_app(
             media_type="image/png",
         )
 
-    @app.post("/api/generate")
-    def generate(payload: GenerateRequest) -> dict[str, Any]:
-        slot = checkpoint_slot(payload.checkpoint)
-        prepared = _prepare_generation(payload, samples, config)
-        return _run_generation(
-            prepared,
-            config,
-            generator(slot.checkpoint_id),
-            checkpoint_slot=slot,
-        )
-
     @app.post("/api/generate/stream")
     def generate_stream(payload: GenerateRequest) -> StreamingResponse:
         slot = checkpoint_slot(payload.checkpoint)
@@ -480,7 +469,7 @@ def _run_generation(
     config: WebConfig,
     loaded_generator: Any,
     *,
-    progress: ProgressCallback | None = None,
+    progress: ProgressCallback,
     checkpoint_slot: CheckpointSlot | None = None,
 ) -> dict[str, Any]:
     try:
@@ -490,14 +479,11 @@ def _run_generation(
             steps=prepared.steps,
             guidance_scale=config.guidance_scale,
         )
-        if progress is None:
-            generated = generate_image_with_model(loaded_generator, generation_config)
-        else:
-            generated = generate_image_with_model(
-                loaded_generator,
-                generation_config,
-                progress=progress,
-            )
+        generated = generate_image_with_model(
+            loaded_generator,
+            generation_config,
+            progress=progress,
+        )
     finally:
         if prepared.temporary_mask_path is not None:
             prepared.temporary_mask_path.unlink(missing_ok=True)

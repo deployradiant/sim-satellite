@@ -25,7 +25,6 @@ LANDCOVERAI_URL = "https://landcover.ai.linuxpolska.com/download/landcover.ai.v1
 LANDCOVERAI_LICENSE = "CC BY-NC-SA 4.0; proof-of-concept/non-commercial use only."
 LANDCOVERAI_TILE_SIZE = 512
 LANDCOVERAI_EXPECTED_SPLIT_COUNTS = {"train": 7470, "val": 1602, "test": 1602}
-LANDCOVERAI_EXPECTED_TOTAL_TILES = sum(LANDCOVERAI_EXPECTED_SPLIT_COUNTS.values())
 LANDCOVERAI_EXPECTED_SOURCE_SCENES = 41
 _EXTRACT_MARKER = ".landcoverai-extract-complete.json"
 ProgressReporter = Callable[[str], None]
@@ -36,13 +35,6 @@ LANDCOVERAI_TO_OPENEARTHMAP = {
     2: OPENEARTHMAP_CLASS_IDS["tree"],
     3: OPENEARTHMAP_CLASS_IDS["water"],
     4: OPENEARTHMAP_CLASS_IDS["road"],
-}
-LANDCOVERAI_CLASS_MAP = {
-    "background": "unlabeled",
-    "building": "building",
-    "woodland": "tree",
-    "water": "water",
-    "road": "road",
 }
 
 

@@ -155,28 +155,6 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
-def train_many_remote(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for config in configs:
-        _ensure_modal_training_data(config["manifest_path"])
-        result = run_training(
-            load_training_config_values(config),
-            after_save=artifact_volume.commit,
-        )
-        artifact_volume.commit()
-        result_payload = asdict(result)
-        result_payload["execution_target"] = "modal"
-        results.append(result_payload)
-    return results
-
-
-@app.function(
-    image=image,
-    timeout=MODAL_TRAINING_TIMEOUT,
-    gpu=MODAL_TRAINING_GPU,
-    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
-    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
-)
 def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_openearthmap_data(config["manifest_path"])
     result = asdict(run_vae_training(load_vae_training_config_values(config)))
@@ -245,15 +223,6 @@ def run_vae_training_target(
     with modal.enable_output():
         with app.run():
             return train_vae_remote.spawn(modal_config).get()
-
-
-def run_training_sweep_target(
-    configs: list[TrainingConfig],
-) -> list[dict[str, Any]]:
-    modal_configs = [_modal_training_config(config) for config in configs]
-    with modal.enable_output():
-        with app.run():
-            return train_many_remote.remote(modal_configs)
 
 
 def run_inference_target(

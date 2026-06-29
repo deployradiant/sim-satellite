@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from sim_satellite import infer
-from sim_satellite.generation import flow_inference_schedule, flow_inference_tensors
+from sim_satellite.generation import flow_inference_tensors
 from sim_satellite.infer import InferenceConfig, InferenceResult
 from sim_satellite.model import ModelConfig, build_model
 
@@ -116,7 +116,7 @@ def test_load_generator_rejects_incompatible_flow_checkpoint(tmp_path: Path) -> 
         infer.load_generator(checkpoint_path, device="cpu")
 
 
-def test_flow_inference_tensors_match_schedule() -> None:
+def test_flow_inference_tensors() -> None:
     timesteps, step_size = flow_inference_tensors(4, torch=torch, device="cpu")
 
     assert timesteps.shape == (4, 1)
@@ -124,12 +124,6 @@ def test_flow_inference_tensors_match_schedule() -> None:
     assert torch.allclose(
         timesteps.flatten(),
         torch.tensor([0.875, 0.625, 0.375, 0.125]),
-    )
-    assert flow_inference_schedule(4) == (
-        (0.875, 0.25),
-        (0.625, 0.25),
-        (0.375, 0.25),
-        (0.125, 0.25),
     )
 
 
