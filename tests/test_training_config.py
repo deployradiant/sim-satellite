@@ -21,6 +21,8 @@ from sim_satellite.train import (
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
+    _validation_flow_loss_stats,
+    _validation_flow_loss_stats_payload,
 )
 from sim_satellite.training_config import TrainingConfig, load_training_config_values
 
@@ -151,6 +153,39 @@ def test_flow_timesteps_use_seeded_uniform_logit_mixture_by_default() -> None:
     assert logit_tail_mass < 0.05
     assert mixed_tail_mass > 0.08
     assert mixed_tail_mass > logit_tail_mass * 2.0
+
+
+def test_validation_flow_loss_stats_report_mask_class_and_boundary_loss() -> None:
+    labels = torch.tensor([[[0, 1, 2, 2], [0, 2, 2, 0]]])
+    semantic_mask = torch.nn.functional.one_hot(labels, num_classes=3).movedim(-1, 1).float()
+    target = torch.zeros(1, 3, 2, 4)
+    prediction = target.clone()
+    for class_id, value in enumerate((1.0, 2.0, 3.0)):
+        prediction += (labels == class_id).unsqueeze(1) * value
+
+    class_loss_sum, class_pixel_count, boundary_loss_sum, boundary_pixel_count = (
+        _validation_flow_loss_stats(
+            prediction,
+            target,
+            semantic_mask,
+            torch=torch,
+            class_count=3,
+        )
+    )
+    payload = _validation_flow_loss_stats_payload(
+        class_loss_sum,
+        class_pixel_count,
+        boundary_loss_sum=boundary_loss_sum,
+        boundary_pixel_count=boundary_pixel_count,
+    )
+
+    assert class_pixel_count.tolist() == [3, 1, 4]
+    assert payload["mask_flow_mse_unlabeled"] == pytest.approx(1.0)
+    assert payload["mask_flow_mse_macro"] == pytest.approx((4.0 + 9.0) / 2.0)
+    assert payload["mask_flow_mse_weighted"] == pytest.approx((4.0 + 9.0 * 4.0) / 5.0)
+    assert payload["mask_supervised_pixel_fraction"] == pytest.approx(5.0 / 8.0)
+    assert payload["mask_boundary_pixel_count"] > 0
+    assert payload["mask_boundary_flow_mse"] > 0.0
 
 
 def test_validation_holdout_patterns_split_training_and_validation(tmp_path: Path) -> None:

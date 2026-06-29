@@ -312,3 +312,18 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   Decision: this is the current best validated custom VAE checkpoint. The next
   comparison should be latent flow matching with this encoder versus pixel flow
   matching, not more sharpness-loss tuning.
+- 2026-06-29 PDT: Data-mix evaluation showed that aggregate validation loss is
+  too blunt to judge visual mask-conditioned quality by itself. The reported
+  training/validation loss is rectified-flow velocity MSE over RGB pixels, not a
+  segmentation or semantic-alignment score. Validation now also records
+  supervised mask-class macro/weighted flow MSE, unlabeled flow MSE, supervised
+  pixel fraction, and semantic-boundary flow MSE/count. A LandCover.ai 50%
+  pretrain (`4k`) followed by OpenEarthMap continuation to `8k` reached final
+  OpenEarth validation loss `0.0995389372`, which did not beat the existing
+  Mix20 curriculum result `0.0984945893`, but its generated-image metrics were
+  captured on 60 held-out masks with 60 inference steps: MSE `0.0575318`, SSIM
+  `0.153104`, mask RGB macro MAE `0.098093`, mask gradient macro MAE
+  `0.172310`, and boundary gradient delta `0.069003`. The older 4k OpenEarth,
+  LandCover20, and LandCover20+LoveDA20 A/B artifacts had generated-image
+  metrics disabled, so future merge decisions should compare fixed-seed visual
+  panels plus generated-image metrics, not aggregate flow loss alone.

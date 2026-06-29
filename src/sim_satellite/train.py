@@ -631,6 +631,10 @@ def _evaluate_validation_loss(
     generator = torch.Generator(device=device).manual_seed(config.seed + 10_000)
     losses: list[Any] = []
     color_batches: list[Any] = []
+    class_loss_sum = torch.zeros(model_config.mask_channels, dtype=torch.float64)
+    class_pixel_count = torch.zeros(model_config.mask_channels, dtype=torch.float64)
+    boundary_loss_sum = 0.0
+    boundary_pixel_count = 0
     with torch.no_grad():
         for samples in validation_batches[: config.validation_batches]:
             crop_boxes = [
@@ -662,6 +666,19 @@ def _evaluate_validation_loss(
                 prediction = model(noisy, semantic_mask, timestep)
             loss = _flow_prediction_loss(prediction, target, torch=torch)
             losses.append(loss.detach())
+            batch_loss_sum, batch_pixel_count, batch_boundary_loss, batch_boundary_pixels = (
+                _validation_flow_loss_stats(
+                    prediction,
+                    target,
+                    semantic_mask,
+                    torch=torch,
+                    class_count=model_config.mask_channels,
+                )
+            )
+            class_loss_sum += batch_loss_sum
+            class_pixel_count += batch_pixel_count
+            boundary_loss_sum += batch_boundary_loss
+            boundary_pixel_count += batch_boundary_pixels
 
     if was_training:
         model.train()
@@ -670,7 +687,102 @@ def _evaluate_validation_loss(
         color_stats = diagnostics.color_stats_payload(
             diagnostics.image_batch_color_stats(torch.cat(color_batches, dim=0))
         )
+    color_stats.update(
+        _validation_flow_loss_stats_payload(
+            class_loss_sum,
+            class_pixel_count,
+            boundary_loss_sum=boundary_loss_sum,
+            boundary_pixel_count=boundary_pixel_count,
+        )
+    )
     return training_log.loss_scalar(torch.stack(losses).mean()), color_stats
+
+
+def _validation_flow_loss_stats(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    semantic_mask: torch.Tensor,
+    *,
+    torch: ModuleType,
+    class_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, float, int]:
+    pixel_loss = (prediction.float() - target.float()).pow(2).mean(dim=1)
+    labels = semantic_mask.argmax(dim=1).long()
+    flat_labels = labels.reshape(-1)
+    flat_loss = pixel_loss.reshape(-1)
+    class_loss_sum = (
+        torch.bincount(flat_labels, weights=flat_loss, minlength=class_count)
+        .detach()
+        .cpu()
+        .double()
+    )
+    class_pixel_count = torch.bincount(flat_labels, minlength=class_count).detach().cpu().double()
+
+    boundary_mask = _semantic_boundary_mask(labels, torch=torch).reshape(-1)
+    boundary_pixel_count = int(boundary_mask.sum().detach().cpu().item())
+    boundary_loss_sum = (
+        float(flat_loss[boundary_mask].sum().detach().cpu().item())
+        if boundary_pixel_count > 0
+        else 0.0
+    )
+    return class_loss_sum, class_pixel_count, boundary_loss_sum, boundary_pixel_count
+
+
+def _validation_flow_loss_stats_payload(
+    class_loss_sum: torch.Tensor,
+    class_pixel_count: torch.Tensor,
+    *,
+    boundary_loss_sum: float,
+    boundary_pixel_count: int,
+) -> dict[str, float | int]:
+    class_loss = class_loss_sum / class_pixel_count.clamp_min(1.0)
+    supervised_counts = class_pixel_count[1:]
+    supervised_losses = class_loss[1:]
+    present_supervised = supervised_counts > 0.0
+    supervised_pixel_count = supervised_counts.sum()
+    total_pixel_count = class_pixel_count.sum()
+    macro_loss = (
+        float(supervised_losses[present_supervised].mean().item())
+        if bool(present_supervised.any().item())
+        else 0.0
+    )
+    weighted_loss = (
+        float(class_loss_sum[1:].sum().item() / max(float(supervised_pixel_count.item()), 1.0))
+        if float(supervised_pixel_count.item()) > 0.0
+        else 0.0
+    )
+    unlabeled_loss = float(class_loss[0].item()) if class_pixel_count.shape[0] > 0 else 0.0
+    supervised_fraction = (
+        float(supervised_pixel_count.item() / max(float(total_pixel_count.item()), 1.0))
+        if float(total_pixel_count.item()) > 0.0
+        else 0.0
+    )
+    boundary_loss = boundary_loss_sum / max(boundary_pixel_count, 1)
+    return {
+        "mask_flow_mse_macro": macro_loss,
+        "mask_flow_mse_weighted": weighted_loss,
+        "mask_flow_mse_unlabeled": unlabeled_loss,
+        "mask_supervised_pixel_fraction": supervised_fraction,
+        "mask_boundary_flow_mse": boundary_loss,
+        "mask_boundary_pixel_count": boundary_pixel_count,
+    }
+
+
+def _semantic_boundary_mask(labels: torch.Tensor, *, torch: ModuleType) -> torch.Tensor:
+    boundary = torch.zeros_like(labels, dtype=torch.bool)
+    boundary[:, :, 1:] |= labels[:, :, 1:] != labels[:, :, :-1]
+    boundary[:, :, :-1] |= labels[:, :, 1:] != labels[:, :, :-1]
+    boundary[:, 1:, :] |= labels[:, 1:, :] != labels[:, :-1, :]
+    boundary[:, :-1, :] |= labels[:, 1:, :] != labels[:, :-1, :]
+    return (
+        torch.nn.functional.max_pool2d(
+            boundary.float().unsqueeze(1),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ).squeeze(1)
+        > 0.0
+    )
 
 
 def _evaluate_final_generation_metrics(
