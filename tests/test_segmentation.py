@@ -426,6 +426,7 @@ def test_vae_normalization_requires_latent_stats(tmp_path: Path) -> None:
 def test_cli_exposes_segmentation_commands() -> None:
     for command in (
         "segmentation-train",
+        "segmentation-pseudolabel-study",
         "segmentation-evaluate",
         "segmentation-predict",
     ):

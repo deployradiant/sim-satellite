@@ -26,9 +26,11 @@ from sim_satellite.infer import (
     run_inference,
 )
 from sim_satellite.segmentation import (
+    OpenEarthMapPseudoLabelStudyConfig,
     SegmentationEvaluationConfig,
     SegmentationTrainingConfig,
     evaluate_segmentation_model,
+    run_openearthmap_pseudolabel_study,
     train_segmentation_model,
 )
 from sim_satellite.train import run_training
@@ -195,6 +197,30 @@ def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
+def openearthmap_pseudolabel_study_remote(config: dict[str, Any]) -> dict[str, Any]:
+    artifact_volume.reload()
+    result = asdict(
+        run_openearthmap_pseudolabel_study(
+            OpenEarthMapPseudoLabelStudyConfig.from_dict(config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_openearthmap_pseudolabel_study_progress",
+                message=message,
+            ),
+            after_train=lambda _name, _result: artifact_volume.commit(),
+        )
+    )
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
     timeout=MODAL_DATA_SETUP_TIMEOUT,
     gpu=MODAL_INFERENCE_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
@@ -280,6 +306,15 @@ def run_segmentation_training_target(
             return train_segmentation_remote.spawn(modal_config).get()
 
 
+def run_openearthmap_pseudolabel_study_target(
+    config: OpenEarthMapPseudoLabelStudyConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_openearthmap_pseudolabel_study_config(config)
+    with modal.enable_output():
+        with app.run():
+            return openearthmap_pseudolabel_study_remote.spawn(modal_config).get()
+
+
 def run_segmentation_evaluation_target(
     config: SegmentationEvaluationConfig,
 ) -> dict[str, Any]:
@@ -329,6 +364,37 @@ def _modal_segmentation_training_config(config: SegmentationTrainingConfig) -> d
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     if config.vae_checkpoint_path:
         values["vae_checkpoint_path"] = _modal_artifact_path(config.vae_checkpoint_path)
+    return values
+
+
+def _modal_openearthmap_pseudolabel_study_config(
+    config: OpenEarthMapPseudoLabelStudyConfig,
+) -> dict[str, Any]:
+    values = asdict(config)
+    values["openearthmap_data_dir"] = _modal_data_path(
+        config.openearthmap_data_dir,
+        field_name="openearthmap_data_dir",
+    )
+    values["output_data_dir"] = _modal_data_path(
+        config.output_data_dir,
+        field_name="output_data_dir",
+    )
+    values["artifact_dir"] = _modal_artifact_path(config.artifact_dir)
+    values["classifier_checkpoint_path"] = _modal_artifact_path(config.classifier_checkpoint_path)
+    values["baseline_checkpoint_path"] = _modal_artifact_path(config.baseline_checkpoint_path)
+    values["full_checkpoint_path"] = _modal_artifact_path(config.full_checkpoint_path)
+
+    training_values = values["training"]
+    training_values["device"] = "cuda"
+    training_values["manifest_path"] = _modal_data_path(
+        training_values["manifest_path"],
+        field_name="training.manifest_path",
+    )
+    training_values["checkpoint_path"] = _modal_artifact_path(training_values["checkpoint_path"])
+    if training_values["vae_checkpoint_path"]:
+        training_values["vae_checkpoint_path"] = _modal_artifact_path(
+            training_values["vae_checkpoint_path"]
+        )
     return values
 
 

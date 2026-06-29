@@ -1,0 +1,29 @@
+{
+  "artifact_dir": "artifacts/openearthmap-pseudo-label-study",
+  "baseline_checkpoint_path": "artifacts/openearthmap-pseudo-label-study/labelled-only-vae-aspp-unet-200k.pt",
+  "classifier_checkpoint_path": "artifacts/segmentation-study-2026-06-28-200k/deeplab_unet_vae200k_fused_noaug_lr3e-4_alldata_s200000_val256.pt",
+  "full_checkpoint_path": "artifacts/openearthmap-pseudo-label-study/full-pseudo-labelled-vae-aspp-unet-200k.pt",
+  "openearthmap_data_dir": "data/openearthmap",
+  "output_data_dir": "data/openearthmap/pseudo-label-study",
+  "save_color_masks": false,
+  "seed": 2026,
+  "validation_samples": 256,
+  "training": {
+    "augment": false,
+    "batch_size": 8,
+    "cache_samples": 256,
+    "class_weight_power": 0.5,
+    "dice_weight": 0.5,
+    "eval_every": 10000,
+    "image_size": 256,
+    "learning_rate": 0.0003,
+    "max_validation_samples": 256,
+    "split": "train",
+    "steps": 200000,
+    "unlabeled_weight": 0.25,
+    "vae_checkpoint_path": "artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val300-200k.pt",
+    "vae_normalize_latents": true,
+    "validation_split": "val",
+    "weight_decay": 0.0001
+  }
+}

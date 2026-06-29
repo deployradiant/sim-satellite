@@ -108,6 +108,20 @@ changing preparation behavior, rebuild them with:
 uv run sim-satellite openearthmap --force-prepared
 ```
 
+To test whether classifier-generated labels help, run the OpenEarthMap
+pseudo-label study on Modal:
+
+```bash
+uv run sim-satellite segmentation-pseudolabel-study segmentation.openearthmap-pseudolabel-study-200k.json
+```
+
+The study labels OpenEarthMap images that do not have masks with the current
+VAE-fused classifier, prepares those pseudo masks into tensors, then trains a
+labelled-only 200k-step segmenter and a labelled-plus-pseudo 200k-step segmenter
+against the same labelled validation holdout. It writes checkpoints and
+`comparison.json` / `comparison.png` under
+`artifacts/openearthmap-pseudo-label-study/`.
+
 For local CUDA PyTorch debugging runs, put `"steps": 1` in the training JSON:
 
 ```bash

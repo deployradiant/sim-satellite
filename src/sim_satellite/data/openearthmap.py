@@ -55,14 +55,22 @@ class OpenEarthMapResult:
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
+    unlabeled_images: int
 
 
 @dataclass(frozen=True)
 class OpenEarthMapScan:
     samples: tuple[_OpenEarthMapPair, ...]
+    unlabeled_images: tuple[OpenEarthMapImage, ...]
     scanned_images: int
     missing_masks: int
     image_dirs_without_labels: int
+
+
+@dataclass(frozen=True)
+class OpenEarthMapImage:
+    image_path: Path
+    split: str
 
 
 @dataclass(frozen=True)
@@ -103,11 +111,6 @@ def download_and_prepare_openearthmap(
         _report(progress, f"Skipping extraction; using {paths.extracted_dir}")
 
     scan = scan_openearthmap(paths.extracted_dir, progress=progress)
-    if scan.image_dirs_without_labels:
-        raise RuntimeError(
-            "OpenEarthMap scan found image directories without matching labels: "
-            f"{scan.image_dirs_without_labels}"
-        )
     if not scan.samples:
         raise RuntimeError(f"No OpenEarthMap image/mask pairs found under {paths.extracted_dir}")
 
@@ -126,7 +129,8 @@ def download_and_prepare_openearthmap(
         "Done: "
         f"{len(scan.samples)} samples, "
         f"{scan.scanned_images} images scanned, "
-        f"{scan.missing_masks} images skipped without masks",
+        f"{scan.missing_masks} images skipped without masks, "
+        f"{len(scan.unlabeled_images)} unlabeled images retained",
     )
 
     return OpenEarthMapResult(
@@ -140,6 +144,7 @@ def download_and_prepare_openearthmap(
         scanned_images=scan.scanned_images,
         missing_masks=scan.missing_masks,
         image_dirs_without_labels=scan.image_dirs_without_labels,
+        unlabeled_images=len(scan.unlabeled_images),
     )
 
 
@@ -150,6 +155,7 @@ def scan_openearthmap(
 ) -> OpenEarthMapScan:
     root = Path(extracted_dir)
     pairs: list[_OpenEarthMapPair] = []
+    unlabeled_images: list[OpenEarthMapImage] = []
     scanned_images = 0
     missing_masks = 0
     image_dirs_without_labels = 0
@@ -159,9 +165,18 @@ def scan_openearthmap(
     _report(progress, f"Found {len(image_dirs)} image directories")
 
     for index, image_dir in enumerate(image_dirs, start=1):
+        image_paths = sorted(_iter_files(image_dir, IMAGE_SUFFIXES))
+        scanned_images += len(image_paths)
         label_dir = _matching_label_dir(image_dir)
         if label_dir is None:
             image_dirs_without_labels += 1
+            unlabeled_images.extend(
+                OpenEarthMapImage(
+                    image_path=image_path,
+                    split=_split_from_path(image_path),
+                )
+                for image_path in image_paths
+            )
             if _should_report(index, len(image_dirs)):
                 _report_scan_progress(
                     progress,
@@ -172,11 +187,16 @@ def scan_openearthmap(
                 )
             continue
 
-        for image_path in sorted(_iter_files(image_dir, IMAGE_SUFFIXES)):
-            scanned_images += 1
+        for image_path in image_paths:
             mask_path = _matching_mask(image_path, image_dir, label_dir)
             if mask_path is None:
                 missing_masks += 1
+                unlabeled_images.append(
+                    OpenEarthMapImage(
+                        image_path=image_path,
+                        split=_split_from_path(image_path),
+                    )
+                )
                 continue
             pairs.append(
                 _OpenEarthMapPair(
@@ -196,6 +216,7 @@ def scan_openearthmap(
 
     return OpenEarthMapScan(
         samples=tuple(pairs),
+        unlabeled_images=tuple(unlabeled_images),
         scanned_images=scanned_images,
         missing_masks=missing_masks,
         image_dirs_without_labels=image_dirs_without_labels,
@@ -557,6 +578,9 @@ def _build_click_command():
         click.echo(f"samples={result.samples}")
         click.echo(f"prepared_samples={result.prepared_samples}")
         click.echo(f"scanned_images={result.scanned_images}")
+        click.echo(f"missing_masks={result.missing_masks}")
+        click.echo(f"unlabeled_images={result.unlabeled_images}")
+        click.echo(f"image_dirs_without_labels={result.image_dirs_without_labels}")
 
     return command
 

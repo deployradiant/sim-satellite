@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -253,6 +254,63 @@ def test_modal_vae_training_enters_app_run_with_valid_data(
     }
 
 
+def test_modal_pseudolabel_study_maps_data_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_study_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(
+        monkeypatch,
+        fake_app,
+        openearthmap_pseudolabel_study_remote=fake_study_remote,
+    )
+
+    result = modal_app.run_openearthmap_pseudolabel_study_target(
+        modal_app.OpenEarthMapPseudoLabelStudyConfig(
+            openearthmap_data_dir="data/openearthmap",
+            output_data_dir="data/openearthmap/pseudo-label-study",
+            artifact_dir="artifacts/pseudo-label-study",
+            classifier_checkpoint_path="artifacts/segmentation/classifier.pt",
+            baseline_checkpoint_path="artifacts/pseudo-label-study/baseline.pt",
+            full_checkpoint_path="artifacts/pseudo-label-study/full.pt",
+            training=modal_app.SegmentationTrainingConfig(
+                manifest_path="data/placeholder/manifest.jsonl",
+                checkpoint_path="artifacts/placeholder.pt",
+                vae_checkpoint_path="artifacts/vae.pt",
+                steps=1,
+            ),
+        )
+    )
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_study_remote.received is not None
+    assert fake_study_remote.received["openearthmap_data_dir"] == "/data/openearthmap"
+    assert fake_study_remote.received["output_data_dir"] == (
+        "/data/openearthmap/pseudo-label-study"
+    )
+    assert fake_study_remote.received["artifact_dir"] == "/artifacts/pseudo-label-study"
+    assert fake_study_remote.received["classifier_checkpoint_path"] == (
+        "/artifacts/segmentation/classifier.pt"
+    )
+    assert fake_study_remote.received["baseline_checkpoint_path"] == (
+        "/artifacts/pseudo-label-study/baseline.pt"
+    )
+    assert fake_study_remote.received["full_checkpoint_path"] == (
+        "/artifacts/pseudo-label-study/full.pt"
+    )
+    assert fake_study_remote.received["training"]["device"] == "cuda"
+    assert fake_study_remote.received["training"]["manifest_path"] == (
+        "/data/placeholder/manifest.jsonl"
+    )
+    assert fake_study_remote.received["training"]["checkpoint_path"] == (
+        "/artifacts/placeholder.pt"
+    )
+    assert fake_study_remote.received["training"]["vae_checkpoint_path"] == ("/artifacts/vae.pt")
+
+
 def test_modal_web_config_uses_artifact_checkpoint_and_remote_local_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -491,14 +549,25 @@ def _install_modal_fakes(
     train_remote: object | None = None,
     train_vae_remote: object | None = None,
     infer_remote: object | None = None,
+    openearthmap_pseudolabel_study_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
     train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
     infer_remote = infer_remote if infer_remote is not None else object()
+    openearthmap_pseudolabel_study_remote = (
+        openearthmap_pseudolabel_study_remote
+        if openearthmap_pseudolabel_study_remote is not None
+        else object()
+    )
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
     monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
+    monkeypatch.setattr(
+        modal_app,
+        "openearthmap_pseudolabel_study_remote",
+        openearthmap_pseudolabel_study_remote,
+    )
 
 
 def _write_data_file(tmp_path: Path, relative_path: str, *, content: bytes = b"") -> Path:
@@ -565,7 +634,7 @@ class _FakeRemote:
     def __init__(self, app: _FakeApp, result: object) -> None:
         self.app = app
         self.result = result
-        self.received: object | None = None
+        self.received: Any | None = None
 
     def remote(self, config: object) -> object:
         assert self.app.enter_calls == 1

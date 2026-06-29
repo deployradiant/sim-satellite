@@ -20,6 +20,9 @@ from sim_satellite.segmentation.inference import (
     evaluate_segmentation_model,
     predict_segmentation_masks,
 )
+from sim_satellite.segmentation.pseudolabel import (
+    load_openearthmap_pseudolabel_study_config_file,
+)
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 
@@ -48,6 +51,23 @@ def train_cli(config_path: Path) -> None:
 
         result = run_segmentation_training_target(
             load_segmentation_training_config_file(config_path)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@click.command(
+    "segmentation-pseudolabel-study",
+    help="Pseudo-label unmasked OpenEarthMap images and train the comparison study.",
+)
+@click.argument("config_path", type=click.Path(path_type=Path))
+def pseudolabel_study_cli(config_path: Path) -> None:
+    try:
+        from sim_satellite.modal_app import run_openearthmap_pseudolabel_study_target
+
+        result = run_openearthmap_pseudolabel_study_target(
+            load_openearthmap_pseudolabel_study_config_file(config_path)
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

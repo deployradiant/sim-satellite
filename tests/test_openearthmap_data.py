@@ -14,8 +14,7 @@ from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 def test_manifest_requires_source(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     manifest_path.write_text(
-        '{"image": "image.png", "mask": "mask.png", '
-        '"prepared": "prepared.pt", "split": "train"}\n',
+        '{"image": "image.png", "mask": "mask.png", "prepared": "prepared.pt", "split": "train"}\n',
         encoding="utf-8",
     )
 
@@ -64,6 +63,7 @@ def test_prepare_openearthmap_reports_and_skips_missing_masks(tmp_path: Path) ->
 
     assert result.scanned_images == 2
     assert result.missing_masks == 1
+    assert result.unlabeled_images == 1
     assert result.samples == 1
     assert [sample.image_path.name for sample in samples] == ["paired.png"]
 
@@ -77,12 +77,18 @@ def test_prepare_openearthmap_rejects_when_no_pairs_are_found(tmp_path: Path) ->
         download_and_prepare_openearthmap(data_dir, download=False, extract=False)
 
 
-def test_prepare_openearthmap_rejects_image_dirs_without_labels(tmp_path: Path) -> None:
+def test_prepare_openearthmap_retains_image_dirs_without_labels(tmp_path: Path) -> None:
     data_dir = tmp_path / "openearthmap"
-    _write_rgb_image(data_dir / "extracted" / "train" / "images" / "tile.png")
+    _write_rgb_image(data_dir / "extracted" / "train" / "labelled" / "images" / "tile.png")
+    _write_label_mask(data_dir / "extracted" / "train" / "labelled" / "labels" / "tile.png")
+    _write_rgb_image(data_dir / "extracted" / "train" / "unlabelled" / "images" / "tile.png")
 
-    with pytest.raises(RuntimeError, match="image directories without matching labels"):
-        download_and_prepare_openearthmap(data_dir, download=False, extract=False)
+    result = download_and_prepare_openearthmap(data_dir, download=False, extract=False)
+
+    assert result.samples == 1
+    assert result.scanned_images == 2
+    assert result.image_dirs_without_labels == 1
+    assert result.unlabeled_images == 1
 
 
 def test_prepare_openearthmap_rejects_unsafe_zip_members(tmp_path: Path) -> None:
