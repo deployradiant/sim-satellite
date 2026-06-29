@@ -47,6 +47,17 @@ uv run sim-satellite train --target modal train.json
 uv run sim-satellite infer --target modal
 ```
 
+### Development checks
+
+```bash
+git config core.hooksPath .githooks
+uv run ruff format .
+uv run ruff check .
+```
+
+Commits require `uv run ruff format --check .` through the tracked pre-commit
+hook.
+
 Training reads run settings from a JSON file. Omitted fields use
 `TrainingConfig` defaults.
 Final mask-conditioned generation metrics can be enabled with

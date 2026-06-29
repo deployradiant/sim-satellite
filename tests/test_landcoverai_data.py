@@ -112,8 +112,7 @@ def test_prepare_landcoverai_matches_openearth_training_batch_contract(tmp_path:
     preloaded = preload_samples(samples)
     preloaded_samples = tuple(preloaded[sample] for sample in samples)
     crop_boxes = [
-        center_square_crop_box(sample, crop_size=config.image_size)
-        for sample in preloaded_samples
+        center_square_crop_box(sample, crop_size=config.image_size) for sample in preloaded_samples
     ]
     images, masks = load_batch(
         preloaded_samples,

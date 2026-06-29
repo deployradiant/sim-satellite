@@ -90,8 +90,7 @@ def run_training(
         progress=report_preload_progress,
     )
     validation_batches = tuple(
-        tuple(preloaded_samples[sample] for sample in batch)
-        for batch in validation_sample_batches
+        tuple(preloaded_samples[sample] for sample in batch) for batch in validation_sample_batches
     )
     batches = tuple(
         tuple(preloaded_samples[sample] for sample in batch) for batch in sample_batches

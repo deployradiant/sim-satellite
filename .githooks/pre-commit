@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "error: uv is required to run the formatting pre-commit hook." >&2
+    exit 1
+fi
+
+echo "Running formatting check..."
+uv run ruff format --check .
