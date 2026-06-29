@@ -5,6 +5,7 @@ import click
 from sim_satellite import __version__
 from sim_satellite.data.landcoverai import cli as landcoverai_cli
 from sim_satellite.data.openearthmap import cli as openearthmap_cli
+from sim_satellite.data.segmentation import cli as segmentation_prepare_cli
 from sim_satellite.infer import cli as infer_cli
 from sim_satellite.segmentation import evaluate_cli as segmentation_evaluate_cli
 from sim_satellite.segmentation import predict_cli as segmentation_predict_cli
@@ -22,6 +23,7 @@ def cli() -> None:
 
 cli.add_command(landcoverai_cli)
 cli.add_command(openearthmap_cli)
+cli.add_command(segmentation_prepare_cli)
 cli.add_command(train_cli)
 cli.add_command(train_vae_cli)
 cli.add_command(infer_cli)
