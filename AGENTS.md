@@ -72,6 +72,12 @@ Use the `thermo-nuclear-code-quality-review` skill as the guide for strict maint
 - Future parallel Modal experiments should set a unique
   `SIM_SATELLITE_MODAL_APP_NAME` to avoid web endpoint label collisions.
 
+## Segmentation Workflow
+
+- Downstream segmentation/mask-generation classifiers should expose confidence
+  scores and support high-confidence-only labeling. Do not auto-label uncertain
+  predictions into training data without an explicit thresholding step.
+
 ## Git Workflow
 
 Agents may commit and push directly to `main` for this repository. Do not create a feature branch or pull request unless the user explicitly asks for one.
