@@ -10,6 +10,7 @@ from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.vae.research import (
     VAEResearchManifestConfig,
     build_vae_research_manifest,
+    load_vae_research_sweep_config_values,
 )
 
 
@@ -39,6 +40,24 @@ def test_build_vae_research_manifest_balances_classes_and_groups(tmp_path: Path)
     assert len(read_manifest(output_manifest_path)) == 8
     for class_name in OPENEARTHMAP_CLASSES[1:]:
         assert result.class_hits[class_name] >= 1
+
+
+def test_vae_research_sweep_config_accepts_class_and_edge_loss_weights() -> None:
+    config = load_vae_research_sweep_config_values(
+        {
+            "samples": 128,
+            "validation_samples": 16,
+            "edge_weight": 0.2,
+            "class_balanced_l1_weight": 0.4,
+            "class_balanced_edge_weight": 0.1,
+            "class_balanced_crop_probability": 0.5,
+        }
+    )
+
+    assert config.edge_weight == 0.2
+    assert config.class_balanced_l1_weight == 0.4
+    assert config.class_balanced_edge_weight == 0.1
+    assert config.class_balanced_crop_probability == 0.5
 
 
 def _write_research_fixture_manifest(tmp_path: Path) -> Path:

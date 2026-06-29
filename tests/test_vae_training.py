@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,17 @@ def test_vae_training_config_validates_exponential_reconstruction_settings() -> 
         load_vae_training_config_values({"reconstruction_exponential_scale": 0.0})
 
 
+def test_vae_training_config_validates_class_and_edge_loss_settings() -> None:
+    with pytest.raises(ValueError, match="edge_weight"):
+        load_vae_training_config_values({"edge_weight": -0.1})
+    with pytest.raises(ValueError, match="class_balanced_l1_weight"):
+        load_vae_training_config_values({"class_balanced_l1_weight": -0.1})
+    with pytest.raises(ValueError, match="class_balanced_edge_weight"):
+        load_vae_training_config_values({"class_balanced_edge_weight": -0.1})
+    with pytest.raises(ValueError, match="class_balanced_crop_probability"):
+        load_vae_training_config_values({"class_balanced_crop_probability": 1.1})
+
+
 def test_exponential_reconstruction_loss_rewards_near_exact_reconstruction() -> None:
     real = torch.zeros(2, 3, 8, 8)
     one_percent_error = torch.full_like(real[:1], 0.01)
@@ -69,6 +81,40 @@ def test_exponential_reconstruction_loss_rewards_near_exact_reconstruction() -> 
     )
 
     assert large > small * 5.0
+
+
+def test_class_balanced_pixel_loss_equalizes_classes() -> None:
+    per_pixel_error = torch.zeros(1, 4, 4)
+    per_pixel_error[:, :, :3] = 0.1
+    per_pixel_error[:, :, 3:] = 0.9
+    labels = torch.ones(1, 4, 4, dtype=torch.long)
+    labels[:, :, 3:] = 2
+
+    loss = vae_training._class_balanced_pixel_loss(
+        per_pixel_error,
+        labels,
+        include_unlabeled=False,
+    )
+
+    assert loss == pytest.approx(0.5)
+    assert loss > per_pixel_error.mean()
+
+
+def test_class_balanced_crop_targets_sparse_present_class() -> None:
+    image = torch.zeros(3, 8, 8)
+    labels = torch.zeros(8, 8, dtype=torch.long)
+    labels[7, 7] = 2
+    prepared = vae_training.PreparedTrainingTensor(image=image, labels=labels)
+
+    _image_crop, label_crop = vae_training._random_training_crop(
+        prepared,
+        4,
+        rng=random.Random(123),
+        config=VAETrainingConfig(class_balanced_crop_probability=1.0),
+    )
+
+    assert tuple(label_crop.shape) == (4, 4)
+    assert torch.any(label_crop == 2)
 
 
 def test_split_vae_samples_is_deterministic(tmp_path: Path) -> None:
@@ -187,6 +233,7 @@ def test_run_vae_training_writes_checkpoint_metrics_and_grid(tmp_path: Path) -> 
     assert payload["validation_image_count"] == 2
     assert "custom_vae_by_class" in payload
     assert payload["custom_vae_by_class"]["unlabeled"]["pixels"] == 512
+    assert {"edge", "class_balanced_l1", "class_balanced_edge"} <= set(payload["history"][0])
     assert payload["latent_stats"]["sample_count"] == 3
     assert len(payload["latent_stats"]["mean"]) == 4
     checkpoint = torch.load(result.checkpoint_path, map_location="cpu")

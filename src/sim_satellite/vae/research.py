@@ -93,6 +93,12 @@ class VAEResearchSweepConfig:
     mse_weight: float = 0.2
     reconstruction_exponential_weight: float = 0.5
     reconstruction_exponential_scale: float = 12.0
+    edge_weight: float = 0.0
+    class_balanced_l1_weight: float = 0.0
+    class_balanced_edge_weight: float = 0.0
+    include_unlabeled_in_class_loss: bool = False
+    class_balanced_crop_probability: float = 0.0
+    include_unlabeled_in_class_crop: bool = False
     cache_images: int = 256
     log_every: int = 250
     grid_samples: int = 8
@@ -319,6 +325,12 @@ def _trial_training_config(
         mse_weight=config.mse_weight,
         reconstruction_exponential_weight=config.reconstruction_exponential_weight,
         reconstruction_exponential_scale=config.reconstruction_exponential_scale,
+        edge_weight=config.edge_weight,
+        class_balanced_l1_weight=config.class_balanced_l1_weight,
+        class_balanced_edge_weight=config.class_balanced_edge_weight,
+        include_unlabeled_in_class_loss=config.include_unlabeled_in_class_loss,
+        class_balanced_crop_probability=config.class_balanced_crop_probability,
+        include_unlabeled_in_class_crop=config.include_unlabeled_in_class_crop,
         device="cuda",
         cache_images=config.cache_images,
         log_every=config.log_every,
@@ -763,6 +775,20 @@ def _validate_sweep_config(config: VAEResearchSweepConfig) -> None:
             raise ValueError(f"{name} must be positive")
     if config.train_fraction <= 0.0 or config.train_fraction >= 1.0:
         raise ValueError("train_fraction must be greater than 0 and less than 1")
+    for name in (
+        "kl_weight",
+        "mse_weight",
+        "reconstruction_exponential_weight",
+        "edge_weight",
+        "class_balanced_l1_weight",
+        "class_balanced_edge_weight",
+    ):
+        if getattr(config, name) < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+    if config.reconstruction_exponential_scale <= 0.0:
+        raise ValueError("reconstruction_exponential_scale must be positive")
+    if config.class_balanced_crop_probability < 0.0 or config.class_balanced_crop_probability > 1.0:
+        raise ValueError("class_balanced_crop_probability must be between 0 and 1")
     if config.samples <= config.validation_samples:
         raise ValueError("samples must be greater than validation_samples")
     remaining_after_train = config.samples - int(config.samples * config.train_fraction)

@@ -21,7 +21,11 @@ from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.data.prepared import load_prepared_sample
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
-from sim_satellite.vae.metrics import reconstruction_metrics, reconstruction_metrics_by_class
+from sim_satellite.vae.metrics import (
+    edge_map,
+    reconstruction_metrics,
+    reconstruction_metrics_by_class,
+)
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
 
@@ -45,6 +49,12 @@ class VAETrainingConfig:
     mse_weight: float = 0.2
     reconstruction_exponential_weight: float = 0.5
     reconstruction_exponential_scale: float = 12.0
+    edge_weight: float = 0.0
+    class_balanced_l1_weight: float = 0.0
+    class_balanced_edge_weight: float = 0.0
+    include_unlabeled_in_class_loss: bool = False
+    class_balanced_crop_probability: float = 0.0
+    include_unlabeled_in_class_crop: bool = False
     device: str = "auto"
     cache_images: int = 128
     log_every: int = 250
@@ -85,20 +95,26 @@ class VAETrainingResult:
 class TensorCache:
     def __init__(self, max_items: int) -> None:
         self.max_items = max_items
-        self._items: OrderedDict[Path, torch.Tensor] = OrderedDict()
+        self._items: OrderedDict[Path, PreparedTrainingTensor] = OrderedDict()
 
-    def get(self, sample: SatelliteSample) -> torch.Tensor:
+    def get(self, sample: SatelliteSample) -> PreparedTrainingTensor:
         cached = self._items.get(sample.prepared_path)
         if cached is not None:
             self._items.move_to_end(sample.prepared_path)
             return cached
 
-        image = _load_prepared_image(sample)
-        self._items[sample.prepared_path] = image
+        prepared = _load_prepared_training_tensor(sample)
+        self._items[sample.prepared_path] = prepared
         self._items.move_to_end(sample.prepared_path)
         while len(self._items) > self.max_items:
             self._items.popitem(last=False)
-        return image
+        return prepared
+
+
+@dataclass(frozen=True)
+class PreparedTrainingTensor:
+    image: torch.Tensor
+    labels: torch.Tensor
 
 
 def load_vae_training_config_file(config_path: Path) -> VAETrainingConfig:
@@ -199,14 +215,27 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
     model.train()
     final_loss = 0.0
     for step in range(1, config.steps + 1):
-        batch = torch.stack(
-            [
-                _random_crop(cache.get(rng.choice(train_samples)), config.image_size, rng)
-                for _ in range(config.batch_size)
-            ]
-        ).to(device)
+        batch_crops = (
+            _random_training_crop(
+                cache.get(rng.choice(train_samples)),
+                config.image_size,
+                rng,
+                config=config,
+            )
+            for _ in range(config.batch_size)
+        )
+        images, labels = zip(*batch_crops, strict=True)
+        batch = torch.stack(images).to(device)
+        batch_labels = torch.stack(labels).to(device)
         recon, mu, logvar = model(batch)
-        losses = _vae_losses(batch, recon, mu, logvar, config)
+        losses = _vae_losses(
+            batch,
+            recon,
+            mu,
+            logvar,
+            config,
+            labels=batch_labels,
+        )
         loss = losses["loss"]
         final_loss = float(loss.detach().cpu().item())
         optimizer.zero_grad(set_to_none=True)
@@ -308,11 +337,20 @@ def _validate_config(config: VAETrainingConfig) -> None:
         raise ValueError("train_fraction must be greater than 0 and less than 1")
     if config.validation_split not in {"sample", "city"}:
         raise ValueError("validation_split must be one of: sample, city")
-    for name in ("kl_weight", "mse_weight", "reconstruction_exponential_weight"):
+    for name in (
+        "kl_weight",
+        "mse_weight",
+        "reconstruction_exponential_weight",
+        "edge_weight",
+        "class_balanced_l1_weight",
+        "class_balanced_edge_weight",
+    ):
         if getattr(config, name) < 0.0:
             raise ValueError(f"{name} must be non-negative")
     if config.reconstruction_exponential_scale <= 0.0:
         raise ValueError("reconstruction_exponential_scale must be positive")
+    if config.class_balanced_crop_probability < 0.0 or config.class_balanced_crop_probability > 1.0:
+        raise ValueError("class_balanced_crop_probability must be between 0 and 1")
     if config.downsample_factor != 4:
         raise ValueError("downsample_factor must be 4")
     if config.image_size % config.downsample_factor != 0:
@@ -354,6 +392,19 @@ def _load_prepared_image(sample: SatelliteSample) -> torch.Tensor:
     return _prepared_image_to_float(image, sample=sample)
 
 
+def _load_prepared_training_tensor(sample: SatelliteSample) -> PreparedTrainingTensor:
+    prepared = load_prepared_sample(sample.prepared_path, torch=torch)
+    return PreparedTrainingTensor(
+        image=_prepared_image_to_float(prepared.image, sample=sample),
+        labels=prepared.mask.long(),
+    )
+
+
+def _useful_class_ids(*, include_unlabeled: bool) -> tuple[int, ...]:
+    start_class = 0 if include_unlabeled else 1
+    return tuple(range(start_class, len(OPENEARTHMAP_CLASSES)))
+
+
 def _prepared_image_to_float(image: torch.Tensor, *, sample: SatelliteSample) -> torch.Tensor:
     if image.ndim != 3:
         raise RuntimeError(f"Prepared image must have shape HWC or CHW: {sample.prepared_path}")
@@ -388,6 +439,72 @@ def _random_crop(image: torch.Tensor, size: int, rng: random.Random) -> torch.Te
     return image[:, top : top + size, left : left + size]
 
 
+def _random_training_crop(
+    prepared: PreparedTrainingTensor,
+    size: int,
+    rng: random.Random,
+    *,
+    config: VAETrainingConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    image = prepared.image
+    labels = prepared.labels
+    _, height, width = image.shape
+    if height < size or width < size:
+        return _resize_training_pair(image, labels, size)
+    if rng.random() < config.class_balanced_crop_probability:
+        crop_window = _class_balanced_crop_window(
+            labels,
+            size=size,
+            rng=rng,
+            include_unlabeled=config.include_unlabeled_in_class_crop,
+        )
+        if crop_window is not None:
+            top, left = crop_window
+            return (
+                image[:, top : top + size, left : left + size],
+                labels[top : top + size, left : left + size].contiguous(),
+            )
+    top = rng.randint(0, height - size)
+    left = rng.randint(0, width - size)
+    return (
+        image[:, top : top + size, left : left + size],
+        labels[top : top + size, left : left + size].contiguous(),
+    )
+
+
+def _class_balanced_crop_window(
+    labels: torch.Tensor,
+    *,
+    size: int,
+    rng: random.Random,
+    include_unlabeled: bool,
+) -> tuple[int, int] | None:
+    counts = torch.bincount(
+        labels.reshape(-1),
+        minlength=len(OPENEARTHMAP_CLASSES),
+    )[: len(OPENEARTHMAP_CLASSES)]
+    present_classes = [
+        class_id
+        for class_id in _useful_class_ids(include_unlabeled=include_unlabeled)
+        if int(counts[class_id].item()) > 0
+    ]
+    if not present_classes:
+        return None
+    class_id = rng.choice(present_classes)
+    pixels = torch.nonzero(labels == class_id, as_tuple=False)
+    if pixels.numel() == 0:
+        return None
+    y, x = pixels[rng.randrange(pixels.shape[0])].tolist()
+    height, width = labels.shape
+    top_min = max(0, int(y) - size + 1)
+    top_max = min(int(y), height - size)
+    left_min = max(0, int(x) - size + 1)
+    left_max = min(int(x), width - size)
+    if top_min > top_max or left_min > left_max:
+        return None
+    return rng.randint(top_min, top_max), rng.randint(left_min, left_max)
+
+
 def _center_crop(image: torch.Tensor, size: int) -> torch.Tensor:
     _, height, width = image.shape
     if height < size or width < size:
@@ -409,22 +526,7 @@ def _center_crop_pair(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     _, height, width = image.shape
     if height < size or width < size:
-        resized_image = F.interpolate(
-            image.unsqueeze(0),
-            size=(size, size),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
-        resized_labels = (
-            F.interpolate(
-                labels.float().view(1, 1, labels.shape[0], labels.shape[1]),
-                size=(size, size),
-                mode="nearest",
-            )
-            .view(size, size)
-            .long()
-        )
-        return resized_image, resized_labels
+        return _resize_training_pair(image, labels, size)
     top = (height - size) // 2
     left = (width - size) // 2
     return (
@@ -433,12 +535,37 @@ def _center_crop_pair(
     )
 
 
+def _resize_training_pair(
+    image: torch.Tensor,
+    labels: torch.Tensor,
+    size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    resized_image = F.interpolate(
+        image.unsqueeze(0),
+        size=(size, size),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+    resized_labels = (
+        F.interpolate(
+            labels.float().view(1, 1, labels.shape[0], labels.shape[1]),
+            size=(size, size),
+            mode="nearest",
+        )
+        .view(size, size)
+        .long()
+    )
+    return resized_image, resized_labels
+
+
 def _vae_losses(
     real: torch.Tensor,
     recon: torch.Tensor,
     mu: torch.Tensor,
     logvar: torch.Tensor,
     config: VAETrainingConfig,
+    *,
+    labels: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     l1 = F.l1_loss(recon, real)
     mse = F.mse_loss(recon, real)
@@ -449,11 +576,29 @@ def _vae_losses(
         recon_unit,
         scale=config.reconstruction_exponential_scale,
     )
+    edge = _edge_reconstruction_loss(real_unit, recon_unit)
+    class_balanced_l1 = _optional_class_balanced_loss(
+        real_unit,
+        recon_unit,
+        labels=labels,
+        config=config,
+        metric="l1",
+    )
+    class_balanced_edge = _optional_class_balanced_loss(
+        real_unit,
+        recon_unit,
+        labels=labels,
+        config=config,
+        metric="edge",
+    )
     kl = -0.5 * torch.mean(1 + logvar - mu.square() - logvar.exp())
     loss = (
         l1
         + config.mse_weight * mse
         + config.reconstruction_exponential_weight * reconstruction_exponential
+        + config.edge_weight * edge
+        + config.class_balanced_l1_weight * class_balanced_l1
+        + config.class_balanced_edge_weight * class_balanced_edge
         + config.kl_weight * kl
     )
     return {
@@ -461,6 +606,9 @@ def _vae_losses(
         "l1": l1,
         "mse": mse,
         "reconstruction_exponential": reconstruction_exponential,
+        "edge": edge,
+        "class_balanced_l1": class_balanced_l1,
+        "class_balanced_edge": class_balanced_edge,
         "kl": kl,
     }
 
@@ -473,6 +621,75 @@ def _reconstruction_exponential_loss(
 ) -> torch.Tensor:
     per_sample_mae = (real_unit - recon_unit).abs().mean(dim=(1, 2, 3))
     return torch.expm1(per_sample_mae * scale).mean() / scale
+
+
+def _edge_reconstruction_loss(real_unit: torch.Tensor, recon_unit: torch.Tensor) -> torch.Tensor:
+    return F.l1_loss(edge_map(real_unit, torch=torch), edge_map(recon_unit, torch=torch))
+
+
+def _optional_class_balanced_loss(
+    real_unit: torch.Tensor,
+    recon_unit: torch.Tensor,
+    *,
+    labels: torch.Tensor | None,
+    config: VAETrainingConfig,
+    metric: str,
+) -> torch.Tensor:
+    if metric == "l1":
+        enabled = config.class_balanced_l1_weight > 0.0
+        per_pixel_error = (real_unit - recon_unit).abs().mean(dim=1)
+    elif metric == "edge":
+        enabled = config.class_balanced_edge_weight > 0.0
+        per_pixel_error = (
+            (edge_map(real_unit, torch=torch) - edge_map(recon_unit, torch=torch)).abs().mean(dim=1)
+        )
+    else:
+        raise ValueError(f"Unknown class-balanced loss metric: {metric}")
+
+    if not enabled:
+        return real_unit.new_tensor(0.0)
+    if labels is None:
+        raise ValueError("Class-balanced VAE losses require labels")
+    return _class_balanced_pixel_loss(
+        per_pixel_error,
+        labels,
+        include_unlabeled=config.include_unlabeled_in_class_loss,
+    )
+
+
+def _class_balanced_pixel_loss(
+    per_pixel_error: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    include_unlabeled: bool,
+) -> torch.Tensor:
+    if labels.ndim != 3:
+        raise ValueError(f"Expected class labels with shape (N, H, W), got {labels.ndim}D")
+    if labels.shape[0] != per_pixel_error.shape[0]:
+        raise ValueError(
+            "Class labels must have the same batch size as per-pixel errors: "
+            f"{tuple(labels.shape)} != {tuple(per_pixel_error.shape)}"
+        )
+    if tuple(labels.shape[-2:]) != tuple(per_pixel_error.shape[-2:]):
+        labels = (
+            F.interpolate(
+                labels.float().unsqueeze(1),
+                size=per_pixel_error.shape[-2:],
+                mode="nearest",
+            )
+            .squeeze(1)
+            .long()
+        )
+
+    start_class = 0 if include_unlabeled else 1
+    class_losses = []
+    for class_id in range(start_class, len(OPENEARTHMAP_CLASSES)):
+        mask = labels == class_id
+        if bool(mask.any().item()):
+            class_losses.append(per_pixel_error[mask].mean())
+    if not class_losses:
+        return per_pixel_error.mean()
+    return torch.stack(class_losses).mean()
 
 
 def _custom_reconstruct(
