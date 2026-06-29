@@ -53,18 +53,6 @@ class MaskMetricState:
             histogram_bins=histogram_bins,
         )
 
-    def validate_shape(self, *, class_count: int, image_channels: int) -> None:
-        if int(self.pixel_count.shape[0]) != class_count:
-            raise ValueError(
-                "All semantic mask batches must have the same class count: "
-                f"{int(self.pixel_count.shape[0])} != {class_count}"
-            )
-        if int(self.rgb_generated_sum.shape[1]) != image_channels:
-            raise ValueError(
-                "All image batches must have the same channel count for mask metrics: "
-                f"{int(self.rgb_generated_sum.shape[1])} != {image_channels}"
-            )
-
     def payload(self) -> dict[str, Any]:
         pixel_count = self.pixel_count
         valid = pixel_count > 0.0
@@ -116,19 +104,33 @@ class MaskMetricState:
         }
 
 
-@dataclass
 class GenerationMetricAccumulator:
     """Accumulate paired generated-vs-real image metrics over batches."""
 
-    sample_count: int = 0
-    mask_histogram_bins: int = 16
-    _mse_sum: float = 0.0
-    _psnr_sum: float = 0.0
-    _psnr_count: int = 0
-    _ssim_sum: float = 0.0
-    _mask_state: MaskMetricState | None = None
+    def __init__(
+        self,
+        *,
+        class_count: int,
+        image_channels: int,
+        torch: Any,
+        mask_histogram_bins: int = 16,
+    ) -> None:
+        self.class_count = class_count
+        self.image_channels = image_channels
+        self.sample_count = 0
+        self.mask_histogram_bins = mask_histogram_bins
+        self._mse_sum = 0.0
+        self._psnr_sum = 0.0
+        self._psnr_count = 0
+        self._ssim_sum = 0.0
+        self._mask_state = MaskMetricState.create(
+            class_count=class_count,
+            image_channels=image_channels,
+            histogram_bins=mask_histogram_bins,
+            torch=torch,
+        )
 
-    def update(self, generated: Any, real: Any, *, torch: Any, semantic_mask: Any = None) -> None:
+    def update(self, generated: Any, real: Any, *, semantic_mask: Any, torch: Any) -> None:
         generated = generated.detach().float().clamp(0.0, 1.0)
         real = real.detach().float().clamp(0.0, 1.0)
         if generated.shape != real.shape:
@@ -152,8 +154,7 @@ class GenerationMetricAccumulator:
             self._psnr_sum += float(psnr.sum().detach().cpu().item())
             self._psnr_count += int(finite_psnr.sum().detach().cpu().item())
         self._ssim_sum += float(batch_ssim.sum().detach().cpu().item())
-        if semantic_mask is not None:
-            self._update_mask_metrics(generated, real, semantic_mask, torch=torch)
+        self._update_mask_metrics(generated, real, semantic_mask, torch=torch)
 
     def _update_mask_metrics(
         self,
@@ -177,20 +178,26 @@ class GenerationMetricAccumulator:
                 "Semantic masks must match generated image batch and spatial shape: "
                 f"{tuple(semantic_mask.shape)} vs {tuple(generated.shape)}"
             )
-        if semantic_mask.shape[1] < 1:
-            raise ValueError("Semantic masks must contain at least one class channel")
+        if int(semantic_mask.shape[1]) != self.class_count:
+            raise ValueError(
+                "Semantic masks must match accumulator class count: "
+                f"{int(semantic_mask.shape[1])} != {self.class_count}"
+            )
+        if int(generated.shape[1]) != self.image_channels:
+            raise ValueError(
+                "Image batches must match accumulator channel count: "
+                f"{int(generated.shape[1])} != {self.image_channels}"
+            )
 
-        class_count = int(semantic_mask.shape[1])
-        image_channels = int(generated.shape[1])
-        state = self._mask_state_for(class_count, image_channels, torch=torch)
-
+        state = self._mask_state
+        class_count = self.class_count
         labels = semantic_mask.argmax(dim=1).long()
         flat_labels = labels.reshape(-1)
         pixel_count = torch.bincount(flat_labels, minlength=class_count).detach().cpu().double()
         state.pixel_count += pixel_count
         state.sample_count += int(generated.shape[0])
 
-        for channel in range(image_channels):
+        for channel in range(self.image_channels):
             generated_values = generated[:, channel, :, :].reshape(-1)
             real_values = real[:, channel, :, :].reshape(-1)
             state.rgb_generated_sum[:, channel] += (
@@ -246,27 +253,6 @@ class GenerationMetricAccumulator:
                 real_gradient[boundary_mask].sum().detach().cpu().item()
             )
 
-    def _mask_state_for(
-        self,
-        class_count: int,
-        image_channels: int,
-        *,
-        torch: Any,
-    ) -> MaskMetricState:
-        if self._mask_state is None:
-            self._mask_state = MaskMetricState.create(
-                class_count=class_count,
-                image_channels=image_channels,
-                histogram_bins=self.mask_histogram_bins,
-                torch=torch,
-            )
-        else:
-            self._mask_state.validate_shape(
-                class_count=class_count,
-                image_channels=image_channels,
-            )
-        return self._mask_state
-
     def payload(
         self,
         *,
@@ -297,13 +283,8 @@ class GenerationMetricAccumulator:
             "psnr_exact_match_count": self.sample_count - self._psnr_count,
             "ssim": self._ssim_sum / self.sample_count,
         }
-        payload.update(self._mask_payload())
+        payload.update(self._mask_state.payload())
         return payload
-
-    def _mask_payload(self) -> dict[str, Any]:
-        if self._mask_state is None:
-            return {}
-        return self._mask_state.payload()
 
 
 def disabled_generation_metrics_payload() -> dict[str, Any]:

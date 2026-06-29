@@ -17,7 +17,6 @@ from sim_satellite.train import (
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
     _autocast_context,
     _load_training_samples,
-    _load_training_state,
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
@@ -284,15 +283,10 @@ def test_resume_checkpoint_requires_full_training_state(tmp_path: Path) -> None:
     torch.save(checkpoint, checkpoint_path)
 
     with pytest.raises(RuntimeError, match="optimizer_state"):
-        _load_training_state(
+        training_log.load_training_checkpoint(
             checkpoint_path,
-            model=model,
-            optimizer=optimizer,
-            generator=generator,
-            device_generator=device_generator,
             torch=torch,
-            model_config=model_config,
-            device=torch.device("cpu"),
+            map_location=torch.device("cpu"),
         )
 
 

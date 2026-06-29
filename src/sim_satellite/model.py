@@ -40,15 +40,10 @@ class ModelConfig:
         unknown = sorted(set(values) - names)
         if unknown:
             raise ValueError(f"Unknown model config fields: {', '.join(unknown)}")
-        return cls(**{name: values[name] for name in names if name in values})
-
-    @classmethod
-    def from_checkpoint_dict(cls, values: Mapping[str, Any]) -> ModelConfig:
-        names = {field.name for field in fields(cls)}
         missing = sorted(names - set(values))
         if missing:
-            raise ValueError(f"Model checkpoint config is missing fields: {', '.join(missing)}")
-        return cls.from_dict(values)
+            raise ValueError(f"Model config is missing fields: {', '.join(missing)}")
+        return cls(**{name: values[name] for name in names})
 
 
 def build_model(config: ModelConfig | None = None) -> ConditionalUNet:

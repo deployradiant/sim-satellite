@@ -139,7 +139,7 @@ def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerat
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
     model_state = checkpoint["model_state"]
     try:
-        model_config = ModelConfig.from_checkpoint_dict(checkpoint["model_config"])
+        model_config = ModelConfig.from_dict(checkpoint["model_config"])
     except ValueError as exc:
         raise RuntimeError(
             f"Inference checkpoint model_config is invalid: {checkpoint_path}. {exc}"

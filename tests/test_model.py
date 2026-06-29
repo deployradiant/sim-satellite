@@ -10,9 +10,9 @@ def test_model_config_defaults_to_scaling_law_width() -> None:
     assert ModelConfig().hidden_channels == 64
 
 
-def test_checkpoint_model_config_requires_all_fields() -> None:
+def test_model_config_requires_all_fields() -> None:
     with pytest.raises(ValueError, match="missing fields"):
-        ModelConfig.from_checkpoint_dict({"image_size": 32})
+        ModelConfig.from_dict({"image_size": 32})
 
 
 def test_model_rejects_image_size_that_makes_full_attention_too_large() -> None:

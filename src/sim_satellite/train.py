@@ -513,22 +513,26 @@ def _load_training_state(
     list[training_log.TrainingLossRecord],
     list[training_log.ValidationLossRecord],
 ]:
-    checkpoint = training_log.load_training_checkpoint(path, torch=torch, map_location=device)
-    if checkpoint.model_config != model_config:
+    checkpoint, checkpoint_model_config = training_log.load_training_checkpoint(
+        path,
+        torch=torch,
+        map_location=device,
+    )
+    if checkpoint_model_config != model_config:
         raise ValueError("Resume checkpoint model_config does not match the requested model")
 
-    model.load_state_dict(checkpoint.model_state)
-    optimizer.load_state_dict(checkpoint.optimizer_state)
-    generator.set_state(checkpoint.generator_state)
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    generator.set_state(checkpoint["generator_state"])
     if device_generator is not None:
-        if checkpoint.device_generator_state is None:
+        if checkpoint["device_generator_state"] is None:
             raise RuntimeError(f"Resume checkpoint is missing device generator state: {path}")
-        device_generator.set_state(checkpoint.device_generator_state)
+        device_generator.set_state(checkpoint["device_generator_state"])
     return (
-        checkpoint.step,
-        checkpoint.final_loss,
-        checkpoint.losses,
-        checkpoint.validation_losses,
+        checkpoint["step"],
+        checkpoint["final_loss"],
+        checkpoint["losses"],
+        checkpoint["validation_losses"],
     )
 
 
@@ -688,7 +692,11 @@ def _evaluate_final_generation_metrics(
         generation_steps=config.generation_metrics_steps,
         guidance_scale=config.generation_metrics_guidance_scale,
     )
-    accumulator = evaluation_metrics.GenerationMetricAccumulator()
+    accumulator = evaluation_metrics.GenerationMetricAccumulator(
+        class_count=model_config.mask_channels,
+        image_channels=model_config.image_channels,
+        torch=torch,
+    )
     was_training = model.training
     model.eval()
     with torch.no_grad():
