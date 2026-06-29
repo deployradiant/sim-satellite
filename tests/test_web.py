@@ -89,7 +89,12 @@ def test_web_generate_uses_generation_only_config(
         load_calls.append((checkpoint_path, device))
         return loaded_generator
 
-    def fake_generate(generator: object, generation_config: GenerationConfig) -> SimpleNamespace:
+    def fake_generate(
+        generator: object,
+        generation_config: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         assert generator is loaded_generator
         received["config"] = generation_config
         return SimpleNamespace(image=object())
@@ -100,15 +105,10 @@ def test_web_generate_uses_generation_only_config(
     app = web.create_app(config)
     assert load_calls == []
 
-    response = _request(
-        app,
-        "POST",
-        "/api/generate",
-        json_body={"index": 0, "seed": 42, "steps": 2},
-    )
+    events = _stream_events(app, {"index": 0, "seed": 42, "steps": 2})
+    complete = events[-1]
 
-    assert response.status_code == 200
-    assert response.json()["image"] == "data:image/png;base64,cG5n"
+    assert complete["image"] == "data:image/png;base64,cG5n"
     generation_config = received["config"]
     assert isinstance(generation_config, GenerationConfig)
     assert set(generation_config.__dataclass_fields__) == {
@@ -142,7 +142,12 @@ def test_web_generate_uses_requested_comparison_checkpoint(
         load_calls.append(checkpoint_path)
         return SimpleNamespace(checkpoint_path=checkpoint_path)
 
-    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+    def fake_generate(
+        generator: SimpleNamespace,
+        _: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
 
     monkeypatch.setattr(web, "load_generator", fake_load_generator)
@@ -150,16 +155,11 @@ def test_web_generate_uses_requested_comparison_checkpoint(
     monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
     app = web.create_app(config)
 
-    response = _request(
-        app,
-        "POST",
-        "/api/generate",
-        json_body={"index": 0, "checkpoint": "comparison"},
-    )
+    events = _stream_events(app, {"index": 0, "checkpoint": "comparison"})
+    complete = events[-1]
 
-    assert response.status_code == 200
-    assert response.json()["checkpointId"] == "comparison"
-    assert response.json()["checkpointLabel"] == config.comparison_checkpoint_label
+    assert complete["checkpointId"] == "comparison"
+    assert complete["checkpointLabel"] == config.comparison_checkpoint_label
     assert load_calls == [comparison_checkpoint]
 
 
@@ -275,14 +275,16 @@ def test_web_checkpoint_glob_waits_for_first_checkpoint(tmp_path: Path) -> None:
     )
 
     state = _request(app, "GET", "/api/state")
-    response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    response = _request(app, "POST", "/api/generate/stream", json_body={"index": 0})
 
     assert state.status_code == 200
     checkpoint = _checkpoint_payload(state.json(), "primary")
     assert checkpoint["path"] == ""
     assert checkpoint["available"] is False
-    assert response.status_code == 503
-    assert "No web app checkpoints match" in response.json()["detail"]
+    assert response.status_code == 200
+    events = _response_events(response)
+    assert events[-1]["event"] == "error"
+    assert "No web app checkpoints match" in events[-1]["detail"]
 
 
 def test_web_generation_reloads_when_latest_checkpoint_changes(
@@ -299,7 +301,12 @@ def test_web_generation_reloads_when_latest_checkpoint_changes(
         load_calls.append(checkpoint_path)
         return SimpleNamespace(checkpoint_path=checkpoint_path)
 
-    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+    def fake_generate(
+        generator: SimpleNamespace,
+        _: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
 
     monkeypatch.setattr(web, "load_generator", fake_load_generator)
@@ -314,12 +321,12 @@ def test_web_generation_reloads_when_latest_checkpoint_changes(
         )
     )
 
-    first_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    first_events = _stream_events(app, {"index": 0})
     next_checkpoint.write_bytes(b"next")
-    second_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    second_events = _stream_events(app, {"index": 0})
 
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
+    assert first_events[-1]["event"] == "complete"
+    assert second_events[-1]["event"] == "complete"
     assert load_calls == [first_checkpoint, next_checkpoint]
 
 
@@ -335,7 +342,12 @@ def test_web_generation_reloads_when_checkpoint_file_is_replaced(
         load_calls.append(checkpoint_path)
         return SimpleNamespace(checkpoint_path=checkpoint_path)
 
-    def fake_generate(generator: SimpleNamespace, _: GenerationConfig) -> SimpleNamespace:
+    def fake_generate(
+        generator: SimpleNamespace,
+        _: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         return SimpleNamespace(image=object(), checkpoint_path=generator.checkpoint_path)
 
     monkeypatch.setattr(web, "load_generator", fake_load_generator)
@@ -343,12 +355,12 @@ def test_web_generation_reloads_when_checkpoint_file_is_replaced(
     monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
     app = web.create_app(config)
 
-    first_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    first_events = _stream_events(app, {"index": 0})
     checkpoint_path.write_bytes(b"replacement checkpoint")
-    second_response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    second_events = _stream_events(app, {"index": 0})
 
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
+    assert first_events[-1]["event"] == "complete"
+    assert second_events[-1]["event"] == "complete"
     assert load_calls == [checkpoint_path, checkpoint_path]
 
 
@@ -374,13 +386,8 @@ def test_web_generate_stream_reports_progress(
     monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
     app = web.create_app(config)
     assert any(getattr(route, "path", "") == "/api/generate/stream" for route in app.routes)
-    prepared = web._prepare_generation(
-        web.GenerateRequest(index=0, steps=3),
-        web._load_samples(config),
-        config,
-    )
 
-    events = [json.loads(line) for line in web._generate_stream(prepared, config, lambda: object())]
+    events = _stream_events(app, {"index": 0, "steps": 3})
     assert [event["event"] for event in events] == [
         "start",
         "step",
@@ -404,11 +411,11 @@ def test_web_generate_rejects_bad_request_fields(
     config, _ = _write_web_fixture(tmp_path)
     app = web.create_app(config)
 
-    bad_index = _request(app, "POST", "/api/generate", json_body={"index": 99})
+    bad_index = _request(app, "POST", "/api/generate/stream", json_body={"index": 99})
     assert bad_index.status_code == 400
     assert bad_index.json()["detail"] == "Sample index out of range: 99"
 
-    bad_steps = _request(app, "POST", "/api/generate", json_body={"index": 0, "steps": 0})
+    bad_steps = _request(app, "POST", "/api/generate/stream", json_body={"index": 0, "steps": 0})
     assert bad_steps.status_code == 400
     assert bad_steps.json()["detail"] == "steps must be positive"
 
@@ -421,7 +428,12 @@ def test_web_generate_uses_edited_mask_image(
     edited_mask = Image.new("RGB", (4, 4), OPENEARTHMAP_RGB["building"])
     received: dict[str, Path] = {}
 
-    def fake_generate(generator: object, generation_config: GenerationConfig) -> SimpleNamespace:
+    def fake_generate(
+        generator: object,
+        generation_config: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         mask_path = Path(generation_config.mask_path)
         received["mask_path"] = mask_path
         assert mask_path != original_mask_path
@@ -437,15 +449,10 @@ def test_web_generate_uses_edited_mask_image(
     monkeypatch.setattr(web, "_image_tensor_png", lambda image, display_size: b"png")
     app = web.create_app(config)
 
-    response = _request(
-        app,
-        "POST",
-        "/api/generate",
-        json_body={"index": 0, "maskImage": _png_data_uri(edited_mask)},
-    )
+    events = _stream_events(app, {"index": 0, "maskImage": _png_data_uri(edited_mask)})
+    complete = events[-1]
 
-    assert response.status_code == 200
-    assert response.json()["maskEdited"] is True
+    assert complete["maskEdited"] is True
     assert not received["mask_path"].exists()
 
 
@@ -459,7 +466,7 @@ def test_web_generate_rejects_invalid_edited_mask_image(
     response = _request(
         app,
         "POST",
-        "/api/generate",
+        "/api/generate/stream",
         json_body={"index": 0, "maskImage": "not-a-data-uri"},
     )
 
@@ -477,7 +484,7 @@ def test_web_generate_rejects_unmapped_edited_mask_color(
     response = _request(
         app,
         "POST",
-        "/api/generate",
+        "/api/generate/stream",
         json_body={"index": 0, "maskImage": _png_data_uri(edited_mask)},
     )
 
@@ -495,7 +502,7 @@ def test_web_generate_rejects_wrong_size_edited_mask(
     response = _request(
         app,
         "POST",
-        "/api/generate",
+        "/api/generate/stream",
         json_body={"index": 0, "maskImage": _png_data_uri(edited_mask)},
     )
 
@@ -520,7 +527,7 @@ def test_web_generate_rejects_oversized_mask_payload_before_decode(
     response = _request(
         app,
         "POST",
-        "/api/generate",
+        "/api/generate/stream",
         json_body={"index": 0, "maskImage": oversized_payload},
     )
 
@@ -528,7 +535,7 @@ def test_web_generate_rejects_oversized_mask_payload_before_decode(
     assert response.json()["detail"] == "maskImage is too large"
 
 
-def test_web_generate_keeps_server_errors_as_server_errors(
+def test_web_generate_streams_server_errors_as_error_events(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -537,16 +544,23 @@ def test_web_generate_keeps_server_errors_as_server_errors(
     def fake_load_generator(checkpoint_path: str, *, device: str) -> object:
         return object()
 
-    def broken_generate(generator: object, generation_config: GenerationConfig) -> SimpleNamespace:
+    def broken_generate(
+        generator: object,
+        generation_config: GenerationConfig,
+        *,
+        progress: Any,
+    ) -> SimpleNamespace:
         raise RuntimeError("bad checkpoint")
 
     monkeypatch.setattr(web, "load_generator", fake_load_generator)
     monkeypatch.setattr(web, "generate_image_with_model", broken_generate)
     app = web.create_app(config)
 
-    response = _request(app, "POST", "/api/generate", json_body={"index": 0})
+    response = _request(app, "POST", "/api/generate/stream", json_body={"index": 0})
 
-    assert response.status_code == 500
+    assert response.status_code == 200
+    events = _response_events(response)
+    assert events[-1] == {"event": "error", "detail": "bad checkpoint"}
 
 
 def test_web_create_app_rejects_missing_checkpoint(tmp_path: Path) -> None:
@@ -576,6 +590,7 @@ def test_web_uses_prepared_data_when_raw_files_are_not_mounted(tmp_path: Path) -
             mask_path=mask_path,
             prepared_path=prepared_path,
             split="train",
+            source="openearthmap",
         ),
         torch=torch,
         config=ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),
@@ -653,6 +668,16 @@ def _image_data(image: Image.Image) -> Any:
     return image.getdata()
 
 
+def _stream_events(app: Any, json_body: dict[str, Any]) -> list[dict[str, Any]]:
+    response = _request(app, "POST", "/api/generate/stream", json_body=json_body)
+    assert response.status_code == 200
+    return _response_events(response)
+
+
+def _response_events(response: SimpleNamespace) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in response.content.decode("utf-8").splitlines()]
+
+
 def _request(
     app: Any,
     method: str,
@@ -680,7 +705,7 @@ def _request(
 
         scope = {
             "type": "http",
-            "asgi": {"version": "3.0"},
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
             "http_version": "1.1",
             "method": method,
             "scheme": "http",

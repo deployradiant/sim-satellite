@@ -14,6 +14,48 @@ from sim_satellite.model import ModelConfig
 MetricValue = float | int
 TrainingLossRecord = dict[str, MetricValue | str]
 ValidationLossRecord = dict[str, MetricValue | str]
+_TRAINING_CHECKPOINT_KEYS = (
+    "model_state",
+    "optimizer_state",
+    "generator_state",
+    "device_generator_state",
+    "model_config",
+    "training_config",
+    "step",
+    "losses",
+    "validation_losses",
+    "generation_metrics",
+    "final_loss",
+    "metrics_path",
+    "loss_plot_path",
+)
+
+
+def load_training_checkpoint(
+    path: Path,
+    *,
+    torch: Any,
+    map_location: Any,
+) -> tuple[Mapping[str, Any], ModelConfig]:
+    if not path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {path}")
+    payload = torch.load(path, map_location=map_location)
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"Resume checkpoint must be a mapping: {path}")
+
+    missing = [key for key in _TRAINING_CHECKPOINT_KEYS if key not in payload]
+    if missing:
+        raise RuntimeError(f"Resume checkpoint is missing {', '.join(missing)}: {path}")
+
+    checkpoint_model_config = payload["model_config"]
+    if not isinstance(checkpoint_model_config, Mapping):
+        raise RuntimeError(f"Resume checkpoint model_config must be a mapping: {path}")
+    try:
+        model_config = ModelConfig.from_dict(checkpoint_model_config)
+    except ValueError as exc:
+        raise RuntimeError(f"Resume checkpoint model_config is invalid: {path}. {exc}") from exc
+
+    return payload, model_config
 
 
 def print_train_start(

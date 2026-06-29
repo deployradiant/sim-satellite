@@ -7,6 +7,9 @@ from sim_satellite.data.landcoverai import cli as landcoverai_cli
 from sim_satellite.data.loveda import cli as loveda_cli
 from sim_satellite.data.openearthmap import cli as openearthmap_cli
 from sim_satellite.infer import cli as infer_cli
+from sim_satellite.segmentation import evaluate_cli as segmentation_evaluate_cli
+from sim_satellite.segmentation import predict_cli as segmentation_predict_cli
+from sim_satellite.segmentation import train_cli as segmentation_train_cli
 from sim_satellite.train import cli as train_cli
 from sim_satellite.vae.training import cli as train_vae_cli
 from sim_satellite.web import cli as web_cli
@@ -24,6 +27,9 @@ cli.add_command(openearthmap_cli)
 cli.add_command(train_cli)
 cli.add_command(train_vae_cli)
 cli.add_command(infer_cli)
+cli.add_command(segmentation_train_cli)
+cli.add_command(segmentation_evaluate_cli)
+cli.add_command(segmentation_predict_cli)
 cli.add_command(web_cli)
 
 

@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
-from PIL import Image
-
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 
 
 @dataclass(frozen=True)
@@ -22,11 +18,6 @@ class ImageColorStats:
     chroma_std: float
     saturation_mean: float
     saturation_std: float
-
-
-def image_color_stats(image: torch.Tensor) -> ImageColorStats:
-    """Return simple RGB, chroma, and saturation stats for an image tensor."""
-    return image_batch_color_stats(rgb_image_tensor(image).unsqueeze(0))
 
 
 def image_batch_color_stats(images: torch.Tensor) -> ImageColorStats:
@@ -79,17 +70,6 @@ def image_saturation(image: torch.Tensor) -> torch.Tensor:
     maximum = image.amax(dim=-1)
     chroma = image.amax(dim=-1) - image.amin(dim=-1)
     return torch.where(maximum > 0.0, chroma / maximum.clamp_min(1e-12), torch.zeros_like(maximum))
-
-
-def load_rgb_image(path: Path) -> torch.Tensor:
-    if path.suffix.lower() not in IMAGE_SUFFIXES:
-        raise ValueError(f"Unsupported image file suffix {path.suffix!r}: {path}")
-
-    with Image.open(path) as image:
-        image = image.convert("RGB")
-        width, height = image.size
-        values = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
-    return values.view(height, width, 3).float() / 255.0
 
 
 def rgb_image_tensor(image: torch.Tensor) -> torch.Tensor:

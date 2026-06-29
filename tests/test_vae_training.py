@@ -204,6 +204,7 @@ def _write_manifest_with_prepared_samples(
                 ),
                 prepared_path=prepared_path,
                 split="train",
+                source="fixture",
             )
         )
 

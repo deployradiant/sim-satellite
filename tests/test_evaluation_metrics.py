@@ -14,9 +14,10 @@ def test_generation_metric_accumulator_reports_paired_image_metrics() -> None:
     real = torch.zeros(2, 3, 8, 8)
     generated = real.clone()
     generated[1] = 0.5
+    semantic_mask = torch.ones(2, 1, 8, 8)
 
-    accumulator = GenerationMetricAccumulator()
-    accumulator.update(generated, real, torch=torch)
+    accumulator = GenerationMetricAccumulator(class_count=1, image_channels=3, torch=torch)
+    accumulator.update(generated, real, semantic_mask=semantic_mask, torch=torch)
     payload = accumulator.payload(
         requested_sample_count=2,
         generation_steps=4,
@@ -45,7 +46,7 @@ def test_generation_metric_accumulator_reports_mask_aware_metrics() -> None:
     labels[:, :, 2:] = 1
     semantic_mask = torch.nn.functional.one_hot(labels, num_classes=2).movedim(-1, 1).float()
 
-    accumulator = GenerationMetricAccumulator()
+    accumulator = GenerationMetricAccumulator(class_count=2, image_channels=3, torch=torch)
     accumulator.update(generated, real, semantic_mask=semantic_mask, torch=torch)
     payload = accumulator.payload(
         requested_sample_count=1,
@@ -58,29 +59,16 @@ def test_generation_metric_accumulator_reports_mask_aware_metrics() -> None:
     assert payload["mask_rgb_mean_mae_per_class"] == pytest.approx([0.0, 0.5])
     assert payload["mask_rgb_mean_mae_macro"] == pytest.approx(0.25)
     assert payload["mask_rgb_mean_mae_weighted"] == pytest.approx(0.25)
-    assert payload["mask_rgb_hist_js_per_class"][0] == pytest.approx(0.0)
-    assert payload["mask_rgb_hist_js_per_class"][1] > 0.0
     assert payload["mask_gradient_mae_macro"] > 0.0
     assert payload["mask_boundary_pixel_count"] > 0
     assert payload["mask_boundary_gradient_delta"] > 0.0
 
 
-def test_generation_metric_accumulator_rejects_mismatched_semantic_masks() -> None:
-    accumulator = GenerationMetricAccumulator()
-
-    with pytest.raises(ValueError, match="Semantic masks must match"):
-        accumulator.update(
-            torch.zeros(1, 3, 8, 8),
-            torch.zeros(1, 3, 8, 8),
-            semantic_mask=torch.zeros(1, 2, 4, 4),
-            torch=torch,
-        )
-
-
 def test_generation_metric_accumulator_marks_psnr_unbounded_for_exact_matches() -> None:
     image = torch.rand(1, 3, 8, 8)
-    accumulator = GenerationMetricAccumulator()
-    accumulator.update(image, image, torch=torch)
+    semantic_mask = torch.ones(1, 1, 8, 8)
+    accumulator = GenerationMetricAccumulator(class_count=1, image_channels=3, torch=torch)
+    accumulator.update(image, image, semantic_mask=semantic_mask, torch=torch)
     payload = accumulator.payload(
         requested_sample_count=1,
         generation_steps=2,

@@ -50,11 +50,6 @@ def generate_conditioned_images(
     return (image.clamp(-1.0, 1.0) + 1.0) / 2.0
 
 
-def flow_inference_schedule(steps: int) -> tuple[tuple[float, float], ...]:
-    step_size = 1.0 / float(steps)
-    return tuple(((step - 0.5) * step_size, step_size) for step in reversed(range(1, steps + 1)))
-
-
 def flow_inference_tensors(steps: int, *, torch: Any, device: Any) -> tuple[Any, float]:
     step_size = 1.0 / float(steps)
     timesteps = torch.tensor(

@@ -1,0 +1,18 @@
+{
+  "checkpoint_path": "artifacts/segmentation-study-2026-06-28-200k/deeplab_lite_noaug_lr3e-4_alldata_s200000_val256.pt",
+  "class_iou": {
+    "agriculture land": 0.46629956364631653,
+    "bareland": 0.0285511314868927,
+    "building": 0.6024368405342102,
+    "developed space": 0.3829457461833954,
+    "rangeland": 0.3510180413722992,
+    "road": 0.4367803931236267,
+    "tree": 0.5621559619903564,
+    "unlabeled": 0.7964696884155273,
+    "water": 0.4985838234424591
+  },
+  "mean_iou": 0.41609643772244453,
+  "pixel_accuracy": 0.6263217329978943,
+  "samples": 256,
+  "tiles": 4096
+}

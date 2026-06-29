@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from sim_satellite.data.loader import SatelliteSample
@@ -54,23 +54,16 @@ def _should_report(current: int, total: int) -> bool:
 
 
 def load_batch(
-    samples: tuple[SatelliteSample, ...],
+    samples: tuple[PreparedSample, ...],
     crop_boxes: list[tuple[int, int, int, int]],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[Any, Any]:
-    missing_samples = tuple(sample for sample in samples if sample not in preloaded_samples)
-    assert not missing_samples, "Samples must be preloaded prepared data: " + ", ".join(
-        str(sample.prepared_path) for sample in missing_samples
-    )
-
     images: list[Any] = []
     mask_labels: list[Any] = []
-    for sample, crop_box in zip(samples, crop_boxes, strict=True):
-        prepared = preloaded_samples[sample]
+    for prepared, crop_box in zip(samples, crop_boxes, strict=True):
         left, top, right, bottom = crop_box
 
         image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
@@ -108,20 +101,14 @@ def load_batch(
 
 
 def random_square_crop_box(
-    sample: SatelliteSample,
+    sample: PreparedSample,
     *,
     crop_size: int,
     torch: Any,
     generator: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    assert sample in preloaded_samples, (
-        f"Sample must be preloaded prepared data: {sample.prepared_path}"
-    )
-    width, height = preloaded_samples[sample].size
+    width, height = sample.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
 
     max_left = width - size
     max_top = height - size
@@ -139,18 +126,12 @@ def random_square_crop_box(
 
 
 def center_square_crop_box(
-    sample: SatelliteSample,
+    sample: PreparedSample,
     *,
     crop_size: int,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    assert sample in preloaded_samples, (
-        f"Sample must be preloaded prepared data: {sample.prepared_path}"
-    )
-    width, height = preloaded_samples[sample].size
+    width, height = sample.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
     left = (width - size) // 2
     top = (height - size) // 2
     return left, top, left + size, top + size
