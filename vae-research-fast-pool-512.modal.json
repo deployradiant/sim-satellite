@@ -1,0 +1,13 @@
+{
+  "base_manifest_path": "data/openearthmap/manifest.jsonl",
+  "class_index_path": "data/openearthmap/research/openearthmap-class-index-v1.json",
+  "output_manifest_path": "data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl",
+  "report_path": "artifacts/vae-research/openearthmap-vae-fast-balanced-512-v1.json",
+  "samples": 512,
+  "seed": 20270629,
+  "min_class_pixels": 64,
+  "max_group_fraction": 0.05,
+  "max_location_bucket_fraction": 0.025,
+  "split": "train",
+  "output_split": "train"
+}

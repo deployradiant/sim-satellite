@@ -3,13 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from click.testing import CliRunner
 
+from sim_satellite.cli import cli
 from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.vae.research import (
     VAEResearchManifestConfig,
+    _sample_group,
     build_vae_research_manifest,
+    load_vae_research_manifest_config_values,
     load_vae_research_sweep_config_values,
 )
 
@@ -35,6 +39,7 @@ def test_build_vae_research_manifest_balances_classes_and_groups(tmp_path: Path)
     assert result.selected_groups == 4
     assert result.missing_classes == []
     assert max(result.group_counts.values()) <= 2
+    assert max(result.location_bucket_counts.values()) <= 2
     assert output_manifest_path.exists()
     assert report_path.exists()
     assert len(read_manifest(output_manifest_path)) == 8
@@ -47,6 +52,7 @@ def test_vae_research_sweep_config_accepts_class_and_edge_loss_weights() -> None
         {
             "samples": 128,
             "validation_samples": 16,
+            "max_location_bucket_fraction": 0.25,
             "edge_weight": 0.2,
             "class_balanced_l1_weight": 0.4,
             "class_balanced_edge_weight": 0.1,
@@ -55,9 +61,46 @@ def test_vae_research_sweep_config_accepts_class_and_edge_loss_weights() -> None
     )
 
     assert config.edge_weight == 0.2
+    assert config.max_location_bucket_fraction == 0.25
     assert config.class_balanced_l1_weight == 0.4
     assert config.class_balanced_edge_weight == 0.1
     assert config.class_balanced_crop_probability == 0.5
+
+
+def test_vae_research_manifest_config_accepts_class_index_and_location_balance() -> None:
+    config = load_vae_research_manifest_config_values(
+        {
+            "class_index_path": "data/openearthmap/research/openearthmap-class-index-v1.json",
+            "samples": 128,
+            "max_group_fraction": 0.1,
+            "max_location_bucket_fraction": 0.05,
+        }
+    )
+
+    assert config.class_index_path.endswith("openearthmap-class-index-v1.json")
+    assert config.samples == 128
+    assert config.max_group_fraction == 0.1
+    assert config.max_location_bucket_fraction == 0.05
+
+
+def test_vae_research_group_keeps_multiword_openearthmap_region() -> None:
+    root = Path("/data/openearthmap")
+    sample = SatelliteSample(
+        image_path=root / "extracted/OpenEarthMap_wo_xBD/al_qurnah/images/al_qurnah_1.tif",
+        mask_path=root / "extracted/OpenEarthMap_wo_xBD/al_qurnah/labels/al_qurnah_1.tif",
+        prepared_path=root / "prepared/OpenEarthMap_wo_xBD/al_qurnah/images/al_qurnah_1.pt",
+        split="train",
+        source="openearthmap",
+    )
+
+    assert _sample_group(sample) == "openearthmap:al_qurnah"
+
+
+def test_cli_exposes_vae_research_manifest_command() -> None:
+    result = CliRunner().invoke(cli, ["vae-research-manifest", "--help"])
+
+    assert result.exit_code == 0
+    assert "--target [local|modal]" in result.output
 
 
 def _write_research_fixture_manifest(tmp_path: Path) -> Path:

@@ -104,10 +104,10 @@ separate hand-tuned sharpness loss.
 
 The OpenEarthMap data command downloads, extracts, and prepares the dataset
 locally under `data/openearthmap/`. It writes `manifest.jsonl` and prepared
-tensor samples under `data/openearthmap/prepared/`. Modal training downloads,
-extracts, and prepares the same dataset on the remote box's local
-`/data/openearthmap` scratch disk before training starts, so the full local data
-tree does not need to be uploaded into a shared Modal data volume.
+tensor samples under `data/openearthmap/prepared/`. Modal training uses the
+persistent Modal data volume mounted at `/data`; OpenEarthMap lives under
+`/data/openearthmap` and is reused between runs instead of being redownloaded
+into throwaway scratch space.
 The command can also be called directly as a package script:
 
 ```bash
@@ -121,6 +121,22 @@ changing preparation behavior, rebuild them with:
 ```bash
 uv run sim-satellite openearthmap --force-prepared
 ```
+
+For fast VAE research loops, build a fixed balanced OpenEarthMap pool in the
+Modal data volume before launching many seed sweeps:
+
+```bash
+uv run sim-satellite vae-research-manifest --target modal vae-research-fast-pool-512.modal.json
+uv run sim-satellite vae-research-sweep --target modal vae-research-fast-pool-sweep.modal.json
+```
+
+The fast pool config writes
+`/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
+balance report under `/artifacts/vae-research/`. It balances useful land-cover
+classes, region groups, and region plus tile-id location buckets. OpenEarthMap
+does not provide true latitude/longitude coordinates in the prepared manifest,
+so the location buckets are an explicit path-derived proxy rather than real
+geospatial coordinates.
 
 For local CUDA PyTorch debugging runs, put `"steps": 1` in the training JSON:
 

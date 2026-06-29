@@ -37,6 +37,12 @@ See README.md for architecture.
   generated research/mix manifests in the Modal `/data` volume whenever they are
   reused across runs. Commit the data volume after download, extraction,
   preparation, or manifest generation.
+- Before launching expensive VAE seed sweeps, prefer a fixed small OpenEarthMap
+  research pool such as `vae-research-fast-pool-512.modal.json`, then run fast
+  sweeps against that pool. The pool should report class, region/group, and
+  location-bucket balance; OpenEarthMap prepared manifests do not include true
+  latitude/longitude coordinates, so path-derived tile buckets are only a
+  coordinate proxy.
 - Keep local preparation useful for inspection and local debugging with
   `uv run sim-satellite openearthmap`, but do not require the local checkout to
   contain the full dataset before starting Modal training.

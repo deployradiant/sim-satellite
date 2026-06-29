@@ -12,6 +12,7 @@ from sim_satellite.data.loader import SatelliteSample, read_manifest, write_mani
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
 from sim_satellite.training_config import TrainingConfig
+from sim_satellite.vae.research import VAEResearchManifestConfig
 from sim_satellite.vae.training import VAETrainingConfig
 from sim_satellite.web import WebConfig
 
@@ -253,6 +254,51 @@ def test_modal_vae_training_enters_app_run_with_valid_data(
     }
 
 
+def test_modal_vae_research_manifest_maps_dataset_to_data_volume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
+    fake_app = _FakeApp()
+    fake_vae_research_manifest_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(
+        monkeypatch,
+        fake_app,
+        vae_research_manifest_remote=fake_vae_research_manifest_remote,
+    )
+
+    result = modal_app.run_vae_research_manifest_target(
+        VAEResearchManifestConfig(
+            base_manifest_path="data/openearthmap/manifest.jsonl",
+            class_index_path="data/openearthmap/research/openearthmap-class-index-v1.json",
+            output_manifest_path="data/openearthmap/research/fast.jsonl",
+            report_path="artifacts/vae-research/fast.json",
+            samples=128,
+        )
+    )
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_app.enter_calls == 1
+    assert fake_app.exit_calls == 1
+    assert fake_vae_research_manifest_remote.received == {
+        **asdict(
+            VAEResearchManifestConfig(
+                base_manifest_path="data/openearthmap/manifest.jsonl",
+                class_index_path="data/openearthmap/research/openearthmap-class-index-v1.json",
+                output_manifest_path="data/openearthmap/research/fast.jsonl",
+                report_path="artifacts/vae-research/fast.json",
+                samples=128,
+            )
+        ),
+        "base_manifest_path": "/data/openearthmap/manifest.jsonl",
+        "class_index_path": "/data/openearthmap/research/openearthmap-class-index-v1.json",
+        "output_manifest_path": "/data/openearthmap/research/fast.jsonl",
+        "report_path": "/artifacts/vae-research/fast.json",
+    }
+
+
 def test_modal_web_config_uses_artifact_checkpoint_and_remote_local_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -301,6 +347,12 @@ def test_modal_data_path_maps_inside_modal_container(
 
     with pytest.raises(ValueError, match="under local data/"):
         modal_app._modal_data_path("/tmp/manifest.jsonl", field_name="manifest_path")
+
+
+def test_modal_openearthmap_research_manifest_uses_dataset_root() -> None:
+    assert modal_app._modal_data_dir_for_manifest("/data/openearthmap/research/fast.jsonl") == Path(
+        "/data/openearthmap"
+    )
 
 
 def test_modal_landcoverai_mix_ratio_parses_manifest_parent() -> None:
@@ -490,14 +542,19 @@ def _install_modal_fakes(
     *,
     train_remote: object | None = None,
     train_vae_remote: object | None = None,
+    vae_research_manifest_remote: object | None = None,
     infer_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
     train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
+    vae_research_manifest_remote = (
+        vae_research_manifest_remote if vae_research_manifest_remote is not None else object()
+    )
     infer_remote = infer_remote if infer_remote is not None else object()
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
     monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
+    monkeypatch.setattr(modal_app, "vae_research_manifest_remote", vae_research_manifest_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
 
 

@@ -22,12 +22,15 @@ from sim_satellite.vae.training import VAETrainingConfig, run_vae_training
 ProgressReporter = Callable[[str], None]
 DEFAULT_VAE_RESEARCH_ARTIFACT_DIR = "artifacts/vae-research"
 DEFAULT_VAE_RESEARCH_MANIFEST_DIR = "data/openearthmap/research"
-CLASS_INDEX_VERSION = 1
+CLASS_INDEX_VERSION = 2
+SUPPORTED_CLASS_INDEX_VERSIONS = {1, CLASS_INDEX_VERSION}
+LOCATION_BUCKETS_PER_GROUP = 4
 
 
 @dataclass(frozen=True)
 class VAEResearchManifestConfig:
     base_manifest_path: str = DEFAULT_MANIFEST_PATH
+    class_index_path: str = ""
     output_manifest_path: str = (
         f"{DEFAULT_VAE_RESEARCH_MANIFEST_DIR}/vae-balanced-openearthmap.jsonl"
     )
@@ -38,6 +41,7 @@ class VAEResearchManifestConfig:
     seed: int = 20260629
     min_class_pixels: int = 64
     max_group_fraction: float = 0.15
+    max_location_bucket_fraction: float = 0.15
     include_unlabeled: bool = False
 
     @classmethod
@@ -59,6 +63,7 @@ class VAEResearchManifestResult:
     class_hits: dict[str, int]
     class_pixel_fraction: dict[str, float]
     group_counts: dict[str, int]
+    location_bucket_counts: dict[str, int]
     missing_classes: list[str]
 
 
@@ -77,6 +82,7 @@ class VAEResearchSweepConfig:
     training_seed: int = 90210
     min_class_pixels: int = 64
     max_group_fraction: float = 0.15
+    max_location_bucket_fraction: float = 0.15
     include_unlabeled: bool = False
     train_fraction: float = 0.82
     validation_split: str = "city"
@@ -121,6 +127,7 @@ class VAEResearchSweepResult:
 class _SampleClassInfo:
     sample: SatelliteSample
     group: str
+    location_bucket: str
     class_counts: tuple[int, ...]
     total_pixels: int
 
@@ -132,21 +139,44 @@ def build_vae_research_manifest(
 ) -> VAEResearchManifestResult:
     _validate_manifest_config(config)
     base_manifest_path = Path(config.base_manifest_path)
-    candidates = _samples_for_split(base_manifest_path, config.split)
-    if not candidates:
-        raise RuntimeError(f"No samples for split `{config.split}` in {base_manifest_path}")
+    if config.class_index_path:
+        infos = _load_or_build_sample_index(
+            base_manifest_path,
+            split=config.split,
+            class_index_path=Path(config.class_index_path),
+            progress=progress,
+        )
+    else:
+        candidates = _samples_for_split(base_manifest_path, config.split)
+        if not candidates:
+            raise RuntimeError(f"No samples for split `{config.split}` in {base_manifest_path}")
 
-    _report(progress, f"Analyzing {len(candidates)} prepared masks for class balance")
-    infos = _analyze_samples(
-        candidates,
-        progress=progress,
-    )
+        _report(progress, f"Analyzing {len(candidates)} prepared masks for class balance")
+        infos = _analyze_samples(
+            candidates,
+            progress=progress,
+        )
     _require_class_coverage(
         infos,
         min_class_pixels=config.min_class_pixels,
         include_unlabeled=config.include_unlabeled,
     )
     return _build_vae_research_manifest_from_infos(config, infos, progress=progress)
+
+
+def load_vae_research_manifest_config_file(config_path: Path) -> VAEResearchManifestConfig:
+    values = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(values, Mapping):
+        raise ValueError("VAE research manifest config JSON must be an object")
+    return load_vae_research_manifest_config_values(values)
+
+
+def load_vae_research_manifest_config_values(
+    values: Mapping[str, Any],
+) -> VAEResearchManifestConfig:
+    config = VAEResearchManifestConfig.from_dict(values)
+    _validate_manifest_config(config)
+    return config
 
 
 def _build_vae_research_manifest_from_infos(
@@ -174,7 +204,12 @@ def _build_vae_research_manifest_from_infos(
             {
                 "config": asdict(config),
                 "result": asdict(result),
-                "group_source": "source plus path region inferred from image path",
+                "group_source": "source plus region inferred from image path",
+                "location_bucket_source": (
+                    "region plus filename tile id modulo "
+                    f"{LOCATION_BUCKETS_PER_GROUP}; OpenEarthMap manifests do not "
+                    "include true latitude/longitude coordinates"
+                ),
                 "classes": list(OPENEARTHMAP_CLASSES),
             },
             indent=2,
@@ -186,7 +221,8 @@ def _build_vae_research_manifest_from_infos(
     _report(
         progress,
         f"Wrote balanced VAE manifest with {result.selected_samples} samples "
-        f"across {result.selected_groups} groups",
+        f"across {result.selected_groups} groups and "
+        f"{len(result.location_bucket_counts)} location buckets",
     )
     return result
 
@@ -229,6 +265,7 @@ def run_vae_research_sweep(
             seed=dataset_seed,
             min_class_pixels=config.min_class_pixels,
             max_group_fraction=config.max_group_fraction,
+            max_location_bucket_fraction=config.max_location_bucket_fraction,
             include_unlabeled=config.include_unlabeled,
         )
         _report(
@@ -386,7 +423,7 @@ def _load_sample_index(
         return None
     if not isinstance(payload, Mapping):
         return None
-    if payload.get("version") != CLASS_INDEX_VERSION:
+    if payload.get("version") not in SUPPORTED_CLASS_INDEX_VERSIONS:
         return None
     if payload.get("base_manifest_path") != str(base_manifest_path):
         return None
@@ -435,6 +472,7 @@ def _sample_info_index_record(info: _SampleClassInfo) -> dict[str, Any]:
         "split": info.sample.split,
         "source": info.sample.source,
         "group": info.group,
+        "location_bucket": info.location_bucket,
         "class_counts": list(info.class_counts),
         "total_pixels": info.total_pixels,
     }
@@ -446,15 +484,18 @@ def _sample_info_from_index_record(record: object) -> _SampleClassInfo:
     class_counts = record["class_counts"]
     if not isinstance(class_counts, list):
         raise TypeError("class_counts must be a list")
+    sample = SatelliteSample(
+        image_path=Path(str(record["image_path"])),
+        mask_path=Path(str(record["mask_path"])),
+        prepared_path=Path(str(record["prepared_path"])),
+        split=str(record["split"]),
+        source=str(record["source"]),
+    )
+    group = _sample_group(sample)
     return _SampleClassInfo(
-        sample=SatelliteSample(
-            image_path=Path(str(record["image_path"])),
-            mask_path=Path(str(record["mask_path"])),
-            prepared_path=Path(str(record["prepared_path"])),
-            split=str(record["split"]),
-            source=str(record["source"]),
-        ),
-        group=str(record["group"]),
+        sample=sample,
+        group=group,
+        location_bucket=_sample_location_bucket(sample, group=group),
         class_counts=tuple(int(value) for value in class_counts),
         total_pixels=int(record["total_pixels"]),
     )
@@ -472,10 +513,12 @@ def _analyze_samples(
             prepared.mask.long().reshape(-1),
             minlength=len(OPENEARTHMAP_CLASSES),
         )[: len(OPENEARTHMAP_CLASSES)]
+        group = _sample_group(sample)
         infos.append(
             _SampleClassInfo(
                 sample=sample,
-                group=_sample_group(sample),
+                group=group,
+                location_bucket=_sample_location_bucket(sample, group=group),
                 class_counts=tuple(int(value) for value in counts.tolist()),
                 total_pixels=int(prepared.mask.numel()),
             )
@@ -525,6 +568,15 @@ def _select_balanced_samples(
     groups = sorted({info.group for info in infos})
     group_quota = max(1, math.ceil(target / max(1, min(len(groups), target))))
     max_group_samples = max(1, math.ceil(target * config.max_group_fraction))
+    location_buckets = sorted({info.location_bucket for info in infos})
+    location_bucket_quota = max(
+        1,
+        math.ceil(target / max(1, min(len(location_buckets), target))),
+    )
+    max_location_bucket_samples = max(
+        1,
+        math.ceil(target * config.max_location_bucket_fraction),
+    )
     rng = random.Random(config.seed)
     tie_breakers = {id(info): rng.random() for info in infos}
 
@@ -532,13 +584,16 @@ def _select_balanced_samples(
     selected_ids: set[int] = set()
     selected_class_hits = [0 for _ in OPENEARTHMAP_CLASSES]
     selected_group_counts: dict[str, int] = {}
+    selected_location_bucket_counts: dict[str, int] = {}
 
     while len(selected) < target:
-        allow_group_overflow = _remaining_without_group_overflow(
+        allow_balance_overflow = _remaining_without_balance_overflow(
             infos,
             selected_ids,
             selected_group_counts,
             max_group_samples,
+            selected_location_bucket_counts,
+            max_location_bucket_samples,
         ) < target - len(selected)
         best = max(
             (
@@ -546,16 +601,22 @@ def _select_balanced_samples(
                 for info in infos
                 if id(info) not in selected_ids
                 and (
-                    allow_group_overflow
-                    or selected_group_counts.get(info.group, 0) < max_group_samples
+                    allow_balance_overflow
+                    or (
+                        selected_group_counts.get(info.group, 0) < max_group_samples
+                        and selected_location_bucket_counts.get(info.location_bucket, 0)
+                        < max_location_bucket_samples
+                    )
                 )
             ),
             key=lambda info: _selection_score(
                 info,
                 selected_class_hits=selected_class_hits,
                 selected_group_counts=selected_group_counts,
+                selected_location_bucket_counts=selected_location_bucket_counts,
                 class_quota=class_quota,
                 group_quota=group_quota,
+                location_bucket_quota=location_bucket_quota,
                 min_class_pixels=config.min_class_pixels,
                 class_availability=class_availability,
                 tie_breaker=tie_breakers[id(info)],
@@ -564,6 +625,9 @@ def _select_balanced_samples(
         selected.append(best)
         selected_ids.add(id(best))
         selected_group_counts[best.group] = selected_group_counts.get(best.group, 0) + 1
+        selected_location_bucket_counts[best.location_bucket] = (
+            selected_location_bucket_counts.get(best.location_bucket, 0) + 1
+        )
         for class_id in active_class_ids:
             if best.class_counts[class_id] >= config.min_class_pixels:
                 selected_class_hits[class_id] += 1
@@ -576,8 +640,10 @@ def _selection_score(
     *,
     selected_class_hits: Sequence[int],
     selected_group_counts: Mapping[str, int],
+    selected_location_bucket_counts: Mapping[str, int],
     class_quota: Mapping[int, int],
     group_quota: int,
+    location_bucket_quota: int,
     min_class_pixels: int,
     class_availability: Sequence[int],
     tie_breaker: float,
@@ -593,20 +659,36 @@ def _selection_score(
     group_count = selected_group_counts.get(info.group, 0)
     group_score = max(0, group_quota - group_count) / group_quota
     group_penalty = group_count / max(1, group_quota)
-    return 4.0 * class_score + group_score - 0.05 * group_penalty + tie_breaker * 1e-6
+    location_bucket_count = selected_location_bucket_counts.get(info.location_bucket, 0)
+    location_bucket_score = (
+        max(0, location_bucket_quota - location_bucket_count) / location_bucket_quota
+    )
+    location_bucket_penalty = location_bucket_count / max(1, location_bucket_quota)
+    return (
+        4.0 * class_score
+        + group_score
+        + 0.5 * location_bucket_score
+        - 0.05 * group_penalty
+        - 0.03 * location_bucket_penalty
+        + tie_breaker * 1e-6
+    )
 
 
-def _remaining_without_group_overflow(
+def _remaining_without_balance_overflow(
     infos: Sequence[_SampleClassInfo],
     selected_ids: set[int],
     selected_group_counts: Mapping[str, int],
     max_group_samples: int,
+    selected_location_bucket_counts: Mapping[str, int],
+    max_location_bucket_samples: int,
 ) -> int:
     return sum(
         1
         for info in infos
         if id(info) not in selected_ids
         and selected_group_counts.get(info.group, 0) < max_group_samples
+        and selected_location_bucket_counts.get(info.location_bucket, 0)
+        < max_location_bucket_samples
     )
 
 
@@ -620,9 +702,13 @@ def _manifest_result(
     class_pixels = [0 for _ in OPENEARTHMAP_CLASSES]
     total_pixels = 0
     group_counts: dict[str, int] = {}
+    location_bucket_counts: dict[str, int] = {}
     for info in selected:
         total_pixels += info.total_pixels
         group_counts[info.group] = group_counts.get(info.group, 0) + 1
+        location_bucket_counts[info.location_bucket] = (
+            location_bucket_counts.get(info.location_bucket, 0) + 1
+        )
         for class_id, count in enumerate(info.class_counts):
             class_pixels[class_id] += count
 
@@ -651,6 +737,7 @@ def _manifest_result(
             for class_id in range(len(OPENEARTHMAP_CLASSES))
         },
         group_counts=dict(sorted(group_counts.items())),
+        location_bucket_counts=dict(sorted(location_bucket_counts.items())),
         missing_classes=missing_classes,
     )
 
@@ -693,12 +780,30 @@ def _sample_group(sample: SatelliteSample) -> str:
             tail = parts[index + 1 :]
             if len(tail) > 1:
                 return f"{sample.source}:{tail[0]}"
+            if index > 0:
+                return f"{sample.source}:{parts[index - 1]}"
             if tail:
                 return f"{sample.source}:{_stem_group(Path(tail[0]).stem)}"
     parent = sample.image_path.parent.name
     if parent:
         return f"{sample.source}:{parent}"
     return f"{sample.source}:{_stem_group(sample.image_path.stem)}"
+
+
+def _sample_location_bucket(sample: SatelliteSample, *, group: str) -> str:
+    tile_id = _trailing_tile_id(sample.image_path.stem)
+    if tile_id is None:
+        return f"{group}:tile-unknown"
+    return f"{group}:tile-{tile_id % LOCATION_BUCKETS_PER_GROUP}"
+
+
+def _trailing_tile_id(stem: str) -> int | None:
+    index = len(stem)
+    while index > 0 and stem[index - 1].isdigit():
+        index -= 1
+    if index == len(stem):
+        return None
+    return int(stem[index:])
 
 
 def _stem_group(stem: str) -> str:
@@ -749,6 +854,8 @@ def _validate_manifest_config(config: VAEResearchManifestConfig) -> None:
         raise ValueError("samples must be positive")
     if config.max_group_fraction <= 0.0 or config.max_group_fraction > 1.0:
         raise ValueError("max_group_fraction must be greater than 0 and at most 1")
+    if config.max_location_bucket_fraction <= 0.0 or config.max_location_bucket_fraction > 1.0:
+        raise ValueError("max_location_bucket_fraction must be greater than 0 and at most 1")
     for name in ("base_manifest_path", "output_manifest_path", "report_path", "split"):
         if not getattr(config, name):
             raise ValueError(f"{name} is required")
@@ -798,6 +905,8 @@ def _validate_sweep_config(config: VAEResearchSweepConfig) -> None:
         )
     if config.max_group_fraction <= 0.0 or config.max_group_fraction > 1.0:
         raise ValueError("max_group_fraction must be greater than 0 and at most 1")
+    if config.max_location_bucket_fraction <= 0.0 or config.max_location_bucket_fraction > 1.0:
+        raise ValueError("max_location_bucket_fraction must be greater than 0 and at most 1")
     if config.validation_split not in {"sample", "city"}:
         raise ValueError("validation_split must be one of: sample, city")
     if config.downsample_factor != 4:
@@ -828,6 +937,35 @@ def _should_report(current: int, total: int) -> bool:
     if current == total or total <= 10:
         return True
     return current % max(1, total // 10) == 0
+
+
+@click.command(
+    "vae-research-manifest",
+    help="Build one balanced OpenEarthMap VAE research manifest without training.",
+)
+@click.option(
+    "--target",
+    type=click.Choice(["local", "modal"]),
+    default="modal",
+    show_default=True,
+    help="Execution target.",
+)
+@click.argument(
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+)
+def manifest_cli(target: str, config_path: Path) -> None:
+    try:
+        config = load_vae_research_manifest_config_file(config_path)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise click.ClickException(str(error)) from error
+    if target == "modal":
+        from sim_satellite.modal_app import run_vae_research_manifest_target
+
+        result = run_vae_research_manifest_target(config)
+    else:
+        result = asdict(build_vae_research_manifest(config, progress=click.echo))
+    click.echo(json.dumps(result, indent=2))
 
 
 @click.command(

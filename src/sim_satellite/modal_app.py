@@ -37,7 +37,9 @@ from sim_satellite.training_config import (
     load_training_config_values,
 )
 from sim_satellite.vae.research import (
+    VAEResearchManifestConfig,
     VAEResearchSweepConfig,
+    build_vae_research_manifest,
     run_vae_research_sweep,
 )
 from sim_satellite.vae.training import (
@@ -184,6 +186,30 @@ def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.function(
     image=image,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes=modal_volumes,
+)
+def vae_research_manifest_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_openearthmap_data(config["base_manifest_path"])
+    artifact_volume.reload()
+    data_volume.reload()
+    result = asdict(
+        build_vae_research_manifest(
+            VAEResearchManifestConfig.from_dict(config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_vae_research_manifest_progress",
+                message=message,
+            ),
+        )
+    )
+    _commit_modal_volumes()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
     timeout=MODAL_TRAINING_TIMEOUT,
     gpu=MODAL_TRAINING_GPU,
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
@@ -311,6 +337,15 @@ def run_vae_training_target(
             return train_vae_remote.spawn(modal_config).get()
 
 
+def run_vae_research_manifest_target(
+    config: VAEResearchManifestConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_vae_research_manifest_config(config)
+    with modal.enable_output():
+        with app.run():
+            return vae_research_manifest_remote.spawn(modal_config).get()
+
+
 def run_vae_research_sweep_target(
     config: VAEResearchSweepConfig,
 ) -> dict[str, Any]:
@@ -368,6 +403,25 @@ def _modal_vae_training_config(config: VAETrainingConfig) -> dict[str, Any]:
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["metrics_path"] = _modal_artifact_path(config.metrics_path)
     values["grid_path"] = _modal_artifact_path(config.grid_path)
+    return values
+
+
+def _modal_vae_research_manifest_config(config: VAEResearchManifestConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["base_manifest_path"] = _modal_data_path(
+        config.base_manifest_path,
+        field_name="base_manifest_path",
+    )
+    if config.class_index_path:
+        values["class_index_path"] = _modal_data_path(
+            config.class_index_path,
+            field_name="class_index_path",
+        )
+    values["output_manifest_path"] = _modal_data_path(
+        config.output_manifest_path,
+        field_name="output_manifest_path",
+    )
+    values["report_path"] = _modal_artifact_path(config.report_path)
     return values
 
 
@@ -814,6 +868,12 @@ def _modal_data_dir_for_manifest(manifest_path: str) -> Path:
         raise ValueError(
             f"Modal manifest_path must be under {MODAL_DATA_ROOT}: {manifest_path!r}"
         ) from None
+    try:
+        manifest.relative_to(MODAL_OPENEARTHMAP_DATA_DIR)
+    except ValueError:
+        pass
+    else:
+        return MODAL_OPENEARTHMAP_DATA_DIR
     return manifest.parent
 
 
