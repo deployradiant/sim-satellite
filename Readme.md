@@ -55,6 +55,25 @@ Final mask-conditioned generation metrics can be enabled with
 `validation_holdout_patterns` so the generated images are compared against
 held-out real images. The training result and metrics JSON record MSE, PSNR,
 and SSIM.
+Existing checkpoints can be compared without retraining by evaluating them on
+the same fixed validation masks. The evaluator loads the selected prepared
+validation tensors once, runs each checkpoint against the same crops and seeds,
+and writes both JSON and Markdown tables:
+
+```bash
+uv run sim-satellite generation-metrics train.openearthmap-from-dataset-mix20-h100-b10-8k.json \
+  --target modal \
+  --checkpoint artifacts/checkpoint-a.pt \
+  --checkpoint artifacts/checkpoint-b.pt \
+  --samples 60 \
+  --steps 60 \
+  --validation-split val \
+  --output-json artifacts/openearthmap-generation-metrics.json \
+  --output-markdown artifacts/openearthmap-generation-metrics.md
+```
+
+Use `--dry-run` to validate checkpoint paths, output paths, and deterministic
+validation sample selection without loading model weights or requiring a GPU.
 
 Native satellite VAE training is available as a separate reconstruction audit
 step before latent flow-matching experiments. The 50% OpenEarthMap config trains

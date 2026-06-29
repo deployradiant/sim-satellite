@@ -22,6 +22,7 @@ from sim_satellite.data.loader import SatelliteSample, read_manifest, write_mani
 from sim_satellite.data.loveda import download_and_prepare_loveda
 from sim_satellite.data.openearthmap import download_and_prepare_openearthmap
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
+from sim_satellite.generation_evaluation import evaluate_generation_metrics_for_checkpoints
 from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
@@ -195,6 +196,34 @@ def train_remote(config: dict[str, Any]) -> dict[str, Any]:
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
 )
+def generation_metrics_remote(
+    config: dict[str, Any],
+    checkpoint_paths: list[str],
+    output_json_path: str,
+    output_markdown_path: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    _ensure_modal_training_data(config["manifest_path"])
+    artifact_volume.reload()
+    result = evaluate_generation_metrics_for_checkpoints(
+        load_training_config_values(config),
+        checkpoint_paths=tuple(Path(path) for path in checkpoint_paths),
+        output_json_path=Path(output_json_path),
+        output_markdown_path=Path(output_markdown_path),
+        dry_run=dry_run,
+    )
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes={str(MODAL_ARTIFACT_ROOT): artifact_volume},
+)
 def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_openearthmap_data(config["manifest_path"])
     result = asdict(run_vae_training(load_vae_training_config_values(config)))
@@ -294,6 +323,29 @@ def run_training_target(
     with modal.enable_output():
         with app.run():
             return train_remote.spawn(modal_config).get()
+
+
+def run_generation_metrics_target(
+    config: TrainingConfig,
+    *,
+    checkpoint_paths: tuple[Path, ...],
+    output_json_path: Path,
+    output_markdown_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    modal_config = _modal_training_config(config)
+    modal_checkpoint_paths = [
+        _modal_artifact_path(str(checkpoint_path)) for checkpoint_path in checkpoint_paths
+    ]
+    with modal.enable_output():
+        with app.run():
+            return generation_metrics_remote.spawn(
+                modal_config,
+                modal_checkpoint_paths,
+                _modal_artifact_path(str(output_json_path)),
+                _modal_artifact_path(str(output_markdown_path)),
+                dry_run,
+            ).get()
 
 
 def run_vae_training_target(
