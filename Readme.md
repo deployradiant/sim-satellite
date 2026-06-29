@@ -346,3 +346,17 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   LandCover20, and LandCover20+LoveDA20 A/B artifacts had generated-image
   metrics disabled, so future merge decisions should compare fixed-seed visual
   panels plus generated-image metrics, not aggregate flow loss alone.
+- 2026-06-29 PDT: AutoResearch follow-up added `sim-satellite generation-metrics`
+  so existing checkpoints can be evaluated on the same fixed validation masks
+  without retraining. The command supports local and Modal targets and writes
+  JSON plus Markdown comparison tables. A train-resume attempt to evaluate the
+  older 25M pixel checkpoint on the LC50 60-mask/60-step protocol prepared
+  OpenEarthMap successfully but failed before generation because the checkpoint
+  was trained with `model_config.seed=2026` while the eval config used seed
+  `20260628`; the training resume path requires exact model-config equality.
+  Decision: use the new evaluator for checkpoint comparison because it loads
+  each checkpoint's own model config while keeping the evaluation seed fixed for
+  sample/noise selection. Existing artifact metrics suggest pausing LoveDA or
+  LandCover mix work and prioritizing the stronger architectural candidates:
+  full-data latent flow with h128/VAE200k/guidance 2, then a 512px repaint
+  checkpoint generation-metrics gate.
