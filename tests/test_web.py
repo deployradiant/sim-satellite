@@ -576,6 +576,7 @@ def test_web_uses_prepared_data_when_raw_files_are_not_mounted(tmp_path: Path) -
             mask_path=mask_path,
             prepared_path=prepared_path,
             split="train",
+            source="openearthmap",
         ),
         torch=torch,
         config=ModelConfig(mask_channels=len(OPENEARTHMAP_CLASSES)),

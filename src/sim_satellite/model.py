@@ -40,7 +40,10 @@ class ModelConfig:
         unknown = sorted(set(values) - names)
         if unknown:
             raise ValueError(f"Unknown model config fields: {', '.join(unknown)}")
-        return cls(**{name: values[name] for name in names if name in values})
+        missing = sorted(names - set(values))
+        if missing:
+            raise ValueError(f"Model config is missing fields: {', '.join(missing)}")
+        return cls(**{name: values[name] for name in names})
 
 
 def build_model(config: ModelConfig | None = None) -> ConditionalUNet:

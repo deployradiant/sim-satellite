@@ -32,7 +32,7 @@ def test_cli_target_resolves_default_manifest_mask(
     mask_path.write_bytes(b"mask")
     manifest_path.write_text(
         '{"image": "image.png", "mask": "mask.png", '
-        '"prepared": "prepared/sample.pt", "split": "train"}\n',
+        '"prepared": "prepared/sample.pt", "split": "train", "source": "fixture"}\n',
         encoding="utf-8",
     )
     received: dict[str, InferenceConfig] = {}
@@ -77,6 +77,7 @@ def test_inference_rejects_malformed_checkpoints(
     cases = (
         ({"model_state": {}}, "missing model_config"),
         ({"model_config": {}}, "missing model_state"),
+        ({"model_config": {}, "model_state": {}}, "model_config is invalid"),
         (["not", "a", "mapping"], "checkpoint must be a mapping"),
     )
 

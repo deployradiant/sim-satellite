@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
 from sim_satellite.data.tensors import labels_to_one_hot
 from sim_satellite.model import ModelConfig
+
+
+@dataclass(frozen=True)
+class PreloadedSample:
+    sample: SatelliteSample
+    prepared: PreparedSample
 
 
 def unique_samples(
@@ -33,12 +40,15 @@ def preload_samples(
     samples: tuple[SatelliteSample, ...],
     *,
     progress: Callable[[int, int], None] | None = None,
-) -> dict[SatelliteSample, PreparedSample]:
+) -> dict[SatelliteSample, PreloadedSample]:
     import torch
 
-    preloaded: dict[SatelliteSample, PreparedSample] = {}
+    preloaded: dict[SatelliteSample, PreloadedSample] = {}
     for index, sample in enumerate(samples, start=1):
-        preloaded[sample] = load_prepared_sample(sample.prepared_path, torch=torch)
+        preloaded[sample] = PreloadedSample(
+            sample=sample,
+            prepared=load_prepared_sample(sample.prepared_path, torch=torch),
+        )
         if progress is not None and _should_report(index, len(samples)):
             progress(index, len(samples))
     return preloaded
@@ -54,23 +64,17 @@ def _should_report(current: int, total: int) -> bool:
 
 
 def load_batch(
-    samples: tuple[SatelliteSample, ...],
+    samples: tuple[PreloadedSample, ...],
     crop_boxes: list[tuple[int, int, int, int]],
     *,
     torch: Any,
     model_config: ModelConfig,
     device: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[Any, Any]:
-    missing_samples = tuple(sample for sample in samples if sample not in preloaded_samples)
-    assert not missing_samples, "Samples must be preloaded prepared data: " + ", ".join(
-        str(sample.prepared_path) for sample in missing_samples
-    )
-
     images: list[Any] = []
     mask_labels: list[Any] = []
-    for sample, crop_box in zip(samples, crop_boxes, strict=True):
-        prepared = preloaded_samples[sample]
+    for preloaded_sample, crop_box in zip(samples, crop_boxes, strict=True):
+        prepared = preloaded_sample.prepared
         left, top, right, bottom = crop_box
 
         image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
@@ -108,20 +112,14 @@ def load_batch(
 
 
 def random_square_crop_box(
-    sample: SatelliteSample,
+    sample: PreloadedSample,
     *,
     crop_size: int,
     torch: Any,
     generator: Any,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    assert sample in preloaded_samples, (
-        f"Sample must be preloaded prepared data: {sample.prepared_path}"
-    )
-    width, height = preloaded_samples[sample].size
+    width, height = sample.prepared.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
 
     max_left = width - size
     max_top = height - size
@@ -139,18 +137,12 @@ def random_square_crop_box(
 
 
 def center_square_crop_box(
-    sample: SatelliteSample,
+    sample: PreloadedSample,
     *,
     crop_size: int,
-    preloaded_samples: Mapping[SatelliteSample, PreparedSample],
 ) -> tuple[int, int, int, int]:
-    assert sample in preloaded_samples, (
-        f"Sample must be preloaded prepared data: {sample.prepared_path}"
-    )
-    width, height = preloaded_samples[sample].size
+    width, height = sample.prepared.size
     size = min(width, height, crop_size)
-    if size < 1:
-        raise ValueError(f"Sample has invalid dimensions: {sample.image_path} is {(width, height)}")
     left = (width - size) // 2
     top = (height - size) // 2
     return left, top, left + size, top + size
