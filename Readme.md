@@ -49,6 +49,9 @@ uv run sim-satellite infer --target modal
 
 ### Development checks
 
+This repository accepts small documentation-only commits for local Git workflow
+verification.
+
 ```bash
 git config core.hooksPath .githooks
 uv run ruff format .
