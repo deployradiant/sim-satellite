@@ -18,9 +18,10 @@ from torch import nn
 from torch.nn import functional as F
 
 from sim_satellite.data.loader import SatelliteDataset, SatelliteSample
+from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.data.prepared import load_prepared_sample
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
-from sim_satellite.vae.metrics import reconstruction_metrics
+from sim_satellite.vae.metrics import reconstruction_metrics, reconstruction_metrics_by_class
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
 
@@ -77,6 +78,7 @@ class VAETrainingResult:
     validation_image_count: int
     final_loss: float
     custom_vae: dict[str, float]
+    custom_vae_by_class: dict[str, Any]
     latent_stats: dict[str, Any]
 
 
@@ -220,17 +222,23 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
             history.append(record)
             click.echo(json.dumps(record), err=True)
 
-    validation_real = torch.stack(
-        [
-            _center_crop(_load_prepared_image(sample), config.eval_size)
-            for sample in validation_samples
-        ]
-    )
+    validation_crops = [
+        _load_prepared_eval_crop(sample, config.eval_size) for sample in validation_samples
+    ]
+    validation_real = torch.stack([image for image, _labels in validation_crops])
+    validation_labels = torch.stack([labels for _image, labels in validation_crops])
     model.eval()
     custom_recon = _custom_reconstruct(model, validation_real, device=device)
     custom_metrics = reconstruction_metrics(
         _to_unit(validation_real),
         _to_unit(custom_recon),
+        torch=torch,
+    )
+    custom_metrics_by_class = reconstruction_metrics_by_class(
+        _to_unit(validation_real),
+        _to_unit(custom_recon),
+        validation_labels,
+        class_names=OPENEARTHMAP_CLASSES,
         torch=torch,
     )
     latent_stats = _latent_stats(model, train_samples, config=config, device=device)
@@ -259,6 +267,7 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         train_samples=train_samples,
         validation_samples=validation_samples,
         custom_metrics=custom_metrics,
+        custom_metrics_by_class=custom_metrics_by_class,
         latent_stats=latent_stats,
         checkpoint_path=checkpoint_path,
         grid_path=grid_path,
@@ -273,6 +282,7 @@ def run_vae_training(config: VAETrainingConfig) -> VAETrainingResult:
         validation_image_count=len(validation_samples),
         final_loss=final_loss,
         custom_vae=custom_metrics,
+        custom_vae_by_class=custom_metrics_by_class,
         latent_stats=latent_stats,
     )
 
@@ -341,6 +351,10 @@ def _training_device(config: VAETrainingConfig) -> torch.device:
 def _load_prepared_image(sample: SatelliteSample) -> torch.Tensor:
     prepared = load_prepared_sample(sample.prepared_path, torch=torch)
     image = prepared.image
+    return _prepared_image_to_float(image, sample=sample)
+
+
+def _prepared_image_to_float(image: torch.Tensor, *, sample: SatelliteSample) -> torch.Tensor:
     if image.ndim != 3:
         raise RuntimeError(f"Prepared image must have shape HWC or CHW: {sample.prepared_path}")
     if image.shape[-1] == 3:
@@ -348,6 +362,16 @@ def _load_prepared_image(sample: SatelliteSample) -> torch.Tensor:
     elif image.shape[0] != 3:
         raise RuntimeError(f"Prepared image must have 3 RGB channels: {sample.prepared_path}")
     return image.float() / 127.5 - 1.0
+
+
+def _load_prepared_eval_crop(
+    sample: SatelliteSample,
+    size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prepared = load_prepared_sample(sample.prepared_path, torch=torch)
+    image = _prepared_image_to_float(prepared.image, sample=sample)
+    labels = prepared.mask.long()
+    return _center_crop_pair(image, labels, size)
 
 
 def _random_crop(image: torch.Tensor, size: int, rng: random.Random) -> torch.Tensor:
@@ -376,6 +400,37 @@ def _center_crop(image: torch.Tensor, size: int) -> torch.Tensor:
     top = (height - size) // 2
     left = (width - size) // 2
     return image[:, top : top + size, left : left + size]
+
+
+def _center_crop_pair(
+    image: torch.Tensor,
+    labels: torch.Tensor,
+    size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _, height, width = image.shape
+    if height < size or width < size:
+        resized_image = F.interpolate(
+            image.unsqueeze(0),
+            size=(size, size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+        resized_labels = (
+            F.interpolate(
+                labels.float().view(1, 1, labels.shape[0], labels.shape[1]),
+                size=(size, size),
+                mode="nearest",
+            )
+            .view(size, size)
+            .long()
+        )
+        return resized_image, resized_labels
+    top = (height - size) // 2
+    left = (width - size) // 2
+    return (
+        image[:, top : top + size, left : left + size],
+        labels[top : top + size, left : left + size].contiguous(),
+    )
 
 
 def _vae_losses(
@@ -510,6 +565,7 @@ def _write_metrics(
     train_samples: Sequence[SatelliteSample],
     validation_samples: Sequence[SatelliteSample],
     custom_metrics: Mapping[str, float],
+    custom_metrics_by_class: Mapping[str, Any],
     latent_stats: Mapping[str, Any],
     checkpoint_path: Path,
     grid_path: Path,
@@ -521,6 +577,7 @@ def _write_metrics(
         "train_image_count": len(train_samples),
         "validation_image_count": len(validation_samples),
         "custom_vae": dict(custom_metrics),
+        "custom_vae_by_class": dict(custom_metrics_by_class),
         "latent_stats": dict(latent_stats),
         "checkpoint_path": str(checkpoint_path),
         "metrics_path": str(metrics_path),

@@ -36,6 +36,10 @@ from sim_satellite.training_config import (
     TrainingConfig,
     load_training_config_values,
 )
+from sim_satellite.vae.research import (
+    VAEResearchSweepConfig,
+    run_vae_research_sweep,
+)
 from sim_satellite.vae.training import (
     VAETrainingConfig,
     load_vae_training_config_values,
@@ -185,6 +189,33 @@ def train_vae_remote(config: dict[str, Any]) -> dict[str, Any]:
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes=modal_volumes,
 )
+def vae_research_sweep_remote(config: dict[str, Any]) -> dict[str, Any]:
+    _ensure_modal_openearthmap_data(config["base_manifest_path"])
+    artifact_volume.reload()
+    data_volume.reload()
+    result = asdict(
+        run_vae_research_sweep(
+            VAEResearchSweepConfig.from_dict(config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_vae_research_progress",
+                message=message,
+            ),
+            after_index=_commit_modal_volumes,
+            after_trial=_commit_modal_volumes,
+        )
+    )
+    _commit_modal_volumes()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_TRAINING_TIMEOUT,
+    gpu=MODAL_TRAINING_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes=modal_volumes,
+)
 def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
     artifact_volume.reload()
@@ -280,6 +311,15 @@ def run_vae_training_target(
             return train_vae_remote.spawn(modal_config).get()
 
 
+def run_vae_research_sweep_target(
+    config: VAEResearchSweepConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_vae_research_sweep_config(config)
+    with modal.enable_output():
+        with app.run():
+            return vae_research_sweep_remote.spawn(modal_config).get()
+
+
 def run_segmentation_training_target(
     config: SegmentationTrainingConfig,
 ) -> dict[str, Any]:
@@ -328,6 +368,22 @@ def _modal_vae_training_config(config: VAETrainingConfig) -> dict[str, Any]:
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["metrics_path"] = _modal_artifact_path(config.metrics_path)
     values["grid_path"] = _modal_artifact_path(config.grid_path)
+    return values
+
+
+def _modal_vae_research_sweep_config(config: VAEResearchSweepConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["base_manifest_path"] = _modal_data_path(
+        config.base_manifest_path,
+        field_name="base_manifest_path",
+    )
+    values["manifest_dir"] = _modal_data_path(config.manifest_dir, field_name="manifest_dir")
+    if config.class_index_path:
+        values["class_index_path"] = _modal_data_path(
+            config.class_index_path,
+            field_name="class_index_path",
+        )
+    values["artifact_dir"] = _modal_artifact_path(config.artifact_dir)
     return values
 
 
@@ -482,6 +538,11 @@ def _ensure_modal_openearthmap_data(manifest_path: str) -> None:
         scanned_images=result.scanned_images,
         missing_masks=result.missing_masks,
     )
+    data_volume.commit()
+
+
+def _commit_modal_volumes() -> None:
+    artifact_volume.commit()
     data_volume.commit()
 
 

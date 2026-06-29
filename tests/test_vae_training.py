@@ -9,7 +9,7 @@ import torch
 import sim_satellite.vae.training as vae_training
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
-from sim_satellite.vae.metrics import reconstruction_metrics
+from sim_satellite.vae.metrics import reconstruction_metrics, reconstruction_metrics_by_class
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 from sim_satellite.vae.training import (
     VAETrainingConfig,
@@ -129,6 +129,33 @@ def test_reconstruction_metrics_identical_images_are_strong() -> None:
     assert metrics["edge_mae"] == pytest.approx(0.0)
 
 
+def test_reconstruction_metrics_by_class_reports_absent_classes() -> None:
+    real = torch.zeros(1, 3, 4, 4)
+    reconstructed = real.clone()
+    reconstructed[:, :, :, 2:] = 0.5
+    labels = torch.zeros(1, 4, 4, dtype=torch.long)
+    labels[:, :, 2:] = 1
+
+    metrics = reconstruction_metrics_by_class(
+        real,
+        reconstructed,
+        labels,
+        class_names=("background", "changed", "absent"),
+        torch=torch,
+    )
+
+    assert metrics["background"]["pixels"] == 8
+    assert metrics["background"]["mae"] == pytest.approx(0.0)
+    assert metrics["changed"]["pixels"] == 8
+    assert metrics["changed"]["mae"] == pytest.approx(0.5)
+    assert metrics["absent"] == {
+        "pixels": 0,
+        "mae": None,
+        "mse": None,
+        "edge_mae": None,
+    }
+
+
 def test_run_vae_training_writes_checkpoint_metrics_and_grid(tmp_path: Path) -> None:
     manifest_path = _write_manifest_with_prepared_samples(tmp_path, count=6, image_size=16)
     config = VAETrainingConfig(
@@ -158,6 +185,8 @@ def test_run_vae_training_writes_checkpoint_metrics_and_grid(tmp_path: Path) -> 
     payload = json.loads(Path(result.metrics_path).read_text(encoding="utf-8"))
     assert payload["train_image_count"] == 3
     assert payload["validation_image_count"] == 2
+    assert "custom_vae_by_class" in payload
+    assert payload["custom_vae_by_class"]["unlabeled"]["pixels"] == 512
     assert payload["latent_stats"]["sample_count"] == 3
     assert len(payload["latent_stats"]["mean"]) == 4
     checkpoint = torch.load(result.checkpoint_path, map_location="cpu")
