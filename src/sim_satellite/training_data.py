@@ -3,19 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 from sim_satellite.data.loader import SatelliteSample
 from sim_satellite.data.prepared import PreparedSample, load_prepared_sample
 from sim_satellite.data.tensors import labels_to_one_hot
 from sim_satellite.model import ModelConfig
-
-
-@dataclass(frozen=True)
-class PreloadedSample:
-    sample: SatelliteSample
-    prepared: PreparedSample
 
 
 def unique_samples(
@@ -40,15 +33,12 @@ def preload_samples(
     samples: tuple[SatelliteSample, ...],
     *,
     progress: Callable[[int, int], None] | None = None,
-) -> dict[SatelliteSample, PreloadedSample]:
+) -> dict[SatelliteSample, PreparedSample]:
     import torch
 
-    preloaded: dict[SatelliteSample, PreloadedSample] = {}
+    preloaded: dict[SatelliteSample, PreparedSample] = {}
     for index, sample in enumerate(samples, start=1):
-        preloaded[sample] = PreloadedSample(
-            sample=sample,
-            prepared=load_prepared_sample(sample.prepared_path, torch=torch),
-        )
+        preloaded[sample] = load_prepared_sample(sample.prepared_path, torch=torch)
         if progress is not None and _should_report(index, len(samples)):
             progress(index, len(samples))
     return preloaded
@@ -64,7 +54,7 @@ def _should_report(current: int, total: int) -> bool:
 
 
 def load_batch(
-    samples: tuple[PreloadedSample, ...],
+    samples: tuple[PreparedSample, ...],
     crop_boxes: list[tuple[int, int, int, int]],
     *,
     torch: Any,
@@ -73,8 +63,7 @@ def load_batch(
 ) -> tuple[Any, Any]:
     images: list[Any] = []
     mask_labels: list[Any] = []
-    for preloaded_sample, crop_box in zip(samples, crop_boxes, strict=True):
-        prepared = preloaded_sample.prepared
+    for prepared, crop_box in zip(samples, crop_boxes, strict=True):
         left, top, right, bottom = crop_box
 
         image = prepared.image[top:bottom, left:right, :].permute(2, 0, 1)
@@ -112,13 +101,13 @@ def load_batch(
 
 
 def random_square_crop_box(
-    sample: PreloadedSample,
+    sample: PreparedSample,
     *,
     crop_size: int,
     torch: Any,
     generator: Any,
 ) -> tuple[int, int, int, int]:
-    width, height = sample.prepared.size
+    width, height = sample.size
     size = min(width, height, crop_size)
 
     max_left = width - size
@@ -137,11 +126,11 @@ def random_square_crop_box(
 
 
 def center_square_crop_box(
-    sample: PreloadedSample,
+    sample: PreparedSample,
     *,
     crop_size: int,
 ) -> tuple[int, int, int, int]:
-    width, height = sample.prepared.size
+    width, height = sample.size
     size = min(width, height, crop_size)
     left = (width - size) // 2
     top = (height - size) // 2
