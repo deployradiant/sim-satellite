@@ -360,3 +360,16 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   LandCover mix work and prioritizing the stronger architectural candidates:
   full-data latent flow with h128/VAE200k/guidance 2, then a 512px repaint
   checkpoint generation-metrics gate.
+- 2026-06-29 PDT: The new evaluator successfully ran the 25M pixel checkpoint
+  on the same 60-mask/60-step OpenEarth validation protocol as LC50:
+  `SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-generation-metrics-25m-gen60-20260629 uv run sim-satellite generation-metrics ... --target modal`.
+  It wrote `/artifacts/eval-openearthmap-flow-unet-25m-256-pixel-train25-lr2e4-h100-b10-20k-gen60-metrics.{json,md}`.
+  Compared with the LC50 data-mix checkpoint, the 25M pixel checkpoint improved
+  MSE `0.057532 -> 0.036895`, SSIM `0.153104 -> 0.238492`, RGB macro MAE
+  `0.098093 -> 0.045278`, and gradient macro MAE `0.172310 -> 0.140412`; its
+  boundary gradient delta worsened `0.069003 -> 0.112594`. Decision: this is a
+  clear overall generated-image metric win over more data mixing, but boundary
+  fidelity remains a weakness. The 512px repaint checkpoint was not evaluated
+  from this branch because its checkpoint model config includes
+  `extra_mask_channels=1`, which the current PR branch model does not support;
+  that requires a separate compatibility/integration pass.
