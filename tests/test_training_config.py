@@ -15,6 +15,7 @@ from sim_satellite.train import (
     TIMESTEP_UNIFORM_MIX_PROBABILITY,
     _autocast_context,
     _load_training_samples,
+    _load_training_state,
     _load_validation_batches,
     _sample_flow_timesteps,
     _training_device,
@@ -296,6 +297,49 @@ def test_generation_metrics_load_validation_batches_without_periodic_validation(
         )
 
 
+def test_resume_checkpoint_loads_rng_state_on_cpu(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint placeholder")
+    model_config = TrainingConfig().model_config()
+    checkpoint = {
+        "model_config": asdict(model_config),
+        "model_state": {"weight": "model"},
+        "optimizer_state": {"state": "optimizer"},
+        "generator_state": "cpu-generator-state",
+        "device_generator_state": "device-generator-state",
+        "step": 7,
+        "final_loss": 0.25,
+        "losses": [{"step": 7, "loss": 0.25, "task": "base"}],
+        "validation_losses": [{"step": 7, "loss": 0.5, "task": "base"}],
+    }
+    fake_torch = _FakeCheckpointTorch(checkpoint)
+    model = _FakeStateful()
+    optimizer = _FakeStateful()
+    generator = _FakeGenerator()
+    device_generator = _FakeGenerator()
+
+    step, final_loss, losses, validation_losses = _load_training_state(
+        checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        generator=generator,
+        device_generator=device_generator,
+        torch=fake_torch,
+        model_config=model_config,
+        device=torch.device("cuda"),
+    )
+
+    assert fake_torch.load_calls == [(checkpoint_path, "cpu")]
+    assert model.loaded_state == {"weight": "model"}
+    assert optimizer.loaded_state == {"state": "optimizer"}
+    assert generator.loaded_state == "cpu-generator-state"
+    assert device_generator.loaded_state == "device-generator-state"
+    assert step == 7
+    assert final_loss == 0.25
+    assert losses == [{"step": 7, "loss": 0.25, "task": "base"}]
+    assert validation_losses == [{"step": 7, "loss": 0.5, "task": "base"}]
+
+
 class _FakeTorch:
     bfloat16 = object()
 
@@ -321,3 +365,29 @@ class _FakeCuda:
 
     def is_available(self) -> bool:
         return self.available
+
+
+class _FakeCheckpointTorch:
+    def __init__(self, checkpoint: dict[str, object]) -> None:
+        self.checkpoint = checkpoint
+        self.load_calls: list[tuple[Path, str]] = []
+
+    def load(self, path: Path, *, map_location: str) -> dict[str, object]:
+        self.load_calls.append((path, map_location))
+        return self.checkpoint
+
+
+class _FakeStateful:
+    def __init__(self) -> None:
+        self.loaded_state: object | None = None
+
+    def load_state_dict(self, state: object) -> None:
+        self.loaded_state = state
+
+
+class _FakeGenerator:
+    def __init__(self) -> None:
+        self.loaded_state: object | None = None
+
+    def set_state(self, state: object) -> None:
+        self.loaded_state = state

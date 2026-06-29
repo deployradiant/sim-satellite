@@ -515,7 +515,7 @@ def _load_training_state(
 ]:
     if not path.exists():
         raise FileNotFoundError(f"Resume checkpoint not found: {path}")
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location="cpu")
     checkpoint_model_config = checkpoint.get("model_config")
     if (
         not isinstance(checkpoint_model_config, Mapping)
