@@ -135,6 +135,11 @@ baseline and `vae-research-fast-pool-3k.modal.json` as the longer class-aware
 fast-pool run. The 2026-06-30 results are recorded in
 `docs/vae_fast_pool_findings_2026_06_30.md`.
 
+After validating the 512-entry fast pool, use
+`vae-research-balanced-pool-2048.modal.json` and
+`vae-research-balanced-pool-2048-3k.modal.json` to run the broader cached
+research-pool check.
+
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
 balance report under `/artifacts/vae-research/`. It balances useful land-cover

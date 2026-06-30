@@ -82,3 +82,87 @@ as a research loop.
 This is not yet a final OpenEarthMap-scale VAE. The next step should be a
 larger selected-pool or full-dataset follow-up using the same objective, with
 continued seed variation and class/location balance checks.
+
+## 2048-Pool Follow-Up
+
+The next scale-up used a larger fixed balanced pool:
+
+- Pool config: `vae-research-balanced-pool-2048.modal.json`
+- Sweep config: `vae-research-balanced-pool-2048-3k.modal.json`
+- Pool manifest:
+  `/data/openearthmap/research/openearthmap-vae-balanced-2048-v1.jsonl`
+- Pool report:
+  `/artifacts/vae-research/openearthmap-vae-balanced-2048-v1.json`
+
+The 2048-entry pool covered all useful classes, all 75 region groups, and all
+297 location buckets. The largest region group had 34 samples and the largest
+location bucket had 10 samples.
+
+Each sweep trial selected 512 samples from the 2048-entry pool. Every trial
+covered all 75 groups and all 297 location buckets, with at most 7 samples per
+group and at most 2 samples per location bucket.
+
+The H100 launch did not schedule a remote function, so the sweep was run on L4:
+
+```bash
+SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-pool2048-3k-l4 \
+SIM_SATELLITE_MODAL_TRAINING_GPU=L4 \
+uv run sim-satellite vae-research-sweep --target modal \
+  vae-research-balanced-pool-2048-3k.modal.json
+```
+
+### 2048-Pool Metrics
+
+| Metric | Fast 512 class-aware 3k mean | 2048-pool class-aware 3k mean | 2048-pool stdev |
+| --- | ---: | ---: | ---: |
+| SSIM | 0.93415443 | 0.92656055 | 0.00345857 |
+| MSE | 0.00113155 | 0.00124463 | 0.00015969 |
+| PSNR | 31.07351112 | 30.71814442 | 0.54051311 |
+| Edge MAE | 0.03390769 | 0.03694961 | 0.00226572 |
+| Mean RGB MAE | 0.00567766 | 0.00543460 | 0.00159614 |
+
+The larger pool is harder than the 512-pool loop, but the run remained stable:
+SSIM ranged from 0.92171597 to 0.93062192 across six seeds. The best and worst
+grids both retained coherent roads, roofs, fields, bare ground, and dense
+settlement structure.
+
+### 2048-Pool Class Error
+
+| Class | 2048-pool MAE mean | 2048-pool MAE stdev | 2048-pool edge MAE mean |
+| --- | ---: | ---: | ---: |
+| bareland | 0.01895016 | 0.00439065 | 0.03022265 |
+| rangeland | 0.02168292 | 0.00180207 | 0.03516635 |
+| developed space | 0.02432272 | 0.00339402 | 0.03971926 |
+| road | 0.01761492 | 0.00168390 | 0.02690030 |
+| tree | 0.02686892 | 0.00335886 | 0.04573643 |
+| water | 0.01417257 | 0.00351677 | 0.02087757 |
+| agriculture land | 0.01632885 | 0.00344994 | 0.02421504 |
+| building | 0.02802968 | 0.00221212 | 0.04458218 |
+
+Best 2048-pool trial:
+
+- Trial index: `4`
+- Checkpoint:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-3k-t04-data20274737-train1006705.pt`
+- Grid:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-3k-t04-data20274737-train1006705-grid.png`
+- Summary:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-3k-sweep-summary.json`
+
+Worst-SSIM 2048-pool trial:
+
+- Trial index: `5`
+- SSIM: `0.92171597`
+- Checkpoint:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-3k-t05-data20275746-train1015881.pt`
+- Grid:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-3k-t05-data20275746-train1015881-grid.png`
+
+### 2048-Pool Interpretation
+
+The 2048-pool result is a better research signal than the 512-pool result. The
+absolute metrics are slightly lower, but the model remains stable across seeds
+while seeing much broader sample diversity. That makes the class-aware 3k
+recipe credible enough for the next step: either a 5k run on the 2048 pool to
+see whether the residual edge/class softness is undertraining, or a 1024-sample
+per-trial sweep from the full OpenEarthMap manifest.
