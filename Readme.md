@@ -130,6 +130,11 @@ uv run sim-satellite vae-research-manifest --target modal vae-research-fast-pool
 uv run sim-satellite vae-research-sweep --target modal vae-research-fast-pool-sweep.modal.json
 ```
 
+Use `vae-research-fast-pool-wide-sweep.modal.json` as the paired old-objective
+baseline and `vae-research-fast-pool-3k.modal.json` as the longer class-aware
+fast-pool run. The 2026-06-30 results are recorded in
+`docs/vae_fast_pool_findings_2026_06_30.md`.
+
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
 balance report under `/artifacts/vae-research/`. It balances useful land-cover
