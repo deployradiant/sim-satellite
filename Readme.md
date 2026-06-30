@@ -138,7 +138,8 @@ fast-pool run. The 2026-06-30 results are recorded in
 After validating the 512-entry fast pool, use
 `vae-research-balanced-pool-2048.modal.json` and
 `vae-research-balanced-pool-2048-3k.modal.json` to run the broader cached
-research-pool check.
+research-pool check. Use `vae-research-balanced-pool-2048-5k.modal.json` for
+the current strongest 2048-pool VAE baseline.
 
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a

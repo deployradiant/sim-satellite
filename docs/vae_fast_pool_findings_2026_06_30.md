@@ -166,3 +166,81 @@ while seeing much broader sample diversity. That makes the class-aware 3k
 recipe credible enough for the next step: either a 5k run on the 2048 pool to
 see whether the residual edge/class softness is undertraining, or a 1024-sample
 per-trial sweep from the full OpenEarthMap manifest.
+
+## 2048-Pool 5k Follow-Up
+
+The 5k follow-up used the same 2048-entry pool, the same six dataset/training
+seed pairs, and the same per-trial 512-sample selection rules as the 3k
+2048-pool run.
+
+- Sweep config: `vae-research-balanced-pool-2048-5k.modal.json`
+- Summary:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-sweep-summary.json`
+
+The H100 launch issue from the 3k run did not recur when using A10G:
+
+```bash
+SIM_SATELLITE_MODAL_APP_NAME=sim-satellite-vae-pool2048-5k-a10g \
+SIM_SATELLITE_MODAL_TRAINING_GPU=A10G \
+uv run sim-satellite vae-research-sweep --target modal \
+  vae-research-balanced-pool-2048-5k.modal.json
+```
+
+### 5k Metrics
+
+The 5k run beat the 3k run on every paired seed for SSIM, MSE, PSNR, and edge
+MAE. Mean RGB MAE regressed slightly, so color calibration should still be
+watched before using this as a generative prior.
+
+| Metric | 2048-pool 3k mean | 2048-pool 5k mean | Delta | 5k stdev | Paired wins |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SSIM | 0.92656055 | 0.96027928 | +0.03371873 | 0.00253540 | 6/6 |
+| MSE | 0.00124463 | 0.00072574 | -0.00051889 | 0.00008841 | 6/6 |
+| PSNR | 30.71814442 | 32.85179202 | +2.13364760 | 0.31244827 | 6/6 |
+| Edge MAE | 0.03694961 | 0.02882640 | -0.00812321 | 0.00202065 | 6/6 |
+| Mean RGB MAE | 0.00543460 | 0.00609168 | +0.00065708 | 0.00162442 | 2/6 |
+
+Worst-seed SSIM improved from `0.92171597` at 3k to `0.95637470` at 5k.
+
+### 5k Class Error
+
+The 5k run improved mean class MAE for every useful class. It also improved
+mean class edge MAE for every useful class, with 6/6 paired wins on class edge
+MAE for all classes.
+
+| Class | 3k MAE mean | 5k MAE mean | MAE delta | 5k edge MAE mean |
+| --- | ---: | ---: | ---: | ---: |
+| bareland | 0.01895016 | 0.01500654 | -0.00394362 | 0.02398138 |
+| rangeland | 0.02168292 | 0.01729468 | -0.00438824 | 0.02745460 |
+| developed space | 0.02432272 | 0.01841936 | -0.00590336 | 0.03086322 |
+| road | 0.01761492 | 0.01363638 | -0.00397854 | 0.02140099 |
+| tree | 0.02686892 | 0.02089822 | -0.00597070 | 0.03580037 |
+| water | 0.01417257 | 0.01323104 | -0.00094154 | 0.01680455 |
+| agriculture land | 0.01632885 | 0.01457349 | -0.00175536 | 0.01915131 |
+| building | 0.02802968 | 0.02072318 | -0.00730650 | 0.03432937 |
+
+Best 5k trial:
+
+- Trial index: `4`
+- SSIM: `0.96292663`
+- Checkpoint:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t04-data20274737-train1006705.pt`
+- Grid:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t04-data20274737-train1006705-grid.png`
+
+Worst-SSIM 5k trial:
+
+- Trial index: `3`
+- SSIM: `0.95637470`
+- Checkpoint:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t03-data20273728-train997529.pt`
+- Grid:
+  `/artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t03-data20273728-train997529-grid.png`
+
+### 5k Interpretation
+
+The 2048-pool 3k model was undertrained. Extending to 5k produced large,
+seed-stable reconstruction gains and improved every useful class. The best and
+worst 5k grids both retained coherent roads, roofs, fields, vegetation
+boundaries, water or road edges, and dense settlement structure. The current
+best VAE research checkpoint is the 5k trial 4 checkpoint above.
