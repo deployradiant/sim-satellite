@@ -111,6 +111,7 @@ def predict_segmentation_masks(
     output_dir = Path(config.output_dir)
     mask_dir = output_dir / "masks"
     color_dir = output_dir / "color-masks"
+    confidence_dir = output_dir / "confidence-masks"
     manifest_path = output_dir / "manifest.jsonl"
     records: list[dict[str, Any]] = []
     for index, record in enumerate(image_records, start=1):
@@ -121,6 +122,7 @@ def predict_segmentation_masks(
             context_size=context_size,
             device=device,
             vae_encoder=vae_encoder,
+            confidence_threshold=config.confidence_threshold,
         )
         mask_path = mask_dir / _prediction_mask_name(index, record.image_path)
         _write_label_mask(mask_path, prediction["labels"])
@@ -129,17 +131,25 @@ def predict_segmentation_masks(
             color_path = color_dir / _prediction_mask_name(index, record.image_path)
             _write_color_mask(color_path, prediction["labels"])
             color_mask_path = str(color_path)
+        confidence_mask_path = ""
+        if config.save_confidence_masks:
+            confidence_path = confidence_dir / _prediction_mask_name(index, record.image_path)
+            _write_confidence_mask(confidence_path, prediction["confidence"])
+            confidence_mask_path = str(confidence_path)
 
         payload = {
             **record.metadata,
             "image": str(record.image_path),
             "mask": str(mask_path),
             "color_mask": color_mask_path,
+            "confidence_mask": confidence_mask_path,
             "source": record.source,
             "split": record.split,
             "prediction_source": "vae-fused-segmentation-classifier",
             "checkpoint": str(checkpoint_path),
+            "confidence_threshold": config.confidence_threshold,
             "mean_confidence": prediction["mean_confidence"],
+            "high_confidence_fraction": prediction["high_confidence_fraction"],
             "class_counts": prediction["class_counts"],
         }
         records.append(payload)
@@ -216,11 +226,14 @@ def _predict_image_mask(
     device: torch.device,
     vae_encoder: VAEFeatureEncoder,
     context_size: int = 0,
+    confidence_threshold: float = 0.0,
 ) -> dict[str, Any]:
     with Image.open(image_path) as source:
         image = source.convert("RGB")
         output = torch.zeros((image.height, image.width), dtype=torch.uint8)
+        confidence_output = torch.zeros((image.height, image.width), dtype=torch.float32)
         confidence_sum = 0.0
+        high_confidence_count = 0
         pixel_count = 0
         for crop_box in _tile_windows(image.size, image_size):
             crop = image.crop(crop_box)
@@ -271,13 +284,20 @@ def _predict_image_mask(
                 .squeeze(0)
                 .squeeze(0)
             )
+            high_confidence = confidence >= confidence_threshold
+            if confidence_threshold > 0.0:
+                labels = torch.where(high_confidence, labels, torch.zeros_like(labels))
             output[top:bottom, left:right] = labels
+            confidence_output[top:bottom, left:right] = confidence
             confidence_sum += float(confidence.sum().item())
+            high_confidence_count += int(high_confidence.sum().item())
             pixel_count += int(confidence.numel())
     counts = torch.bincount(output.long().flatten(), minlength=len(OPENEARTHMAP_CLASSES))
     return {
         "labels": output,
+        "confidence": confidence_output.clamp(0.0, 1.0),
         "mean_confidence": confidence_sum / pixel_count if pixel_count else 0.0,
+        "high_confidence_fraction": high_confidence_count / pixel_count if pixel_count else 0.0,
         "class_counts": {
             class_name: int(counts[index].item())
             for index, class_name in enumerate(OPENEARTHMAP_CLASSES)
@@ -356,6 +376,20 @@ def _write_color_mask(path: Path, labels: torch.Tensor) -> None:
     palette.extend([0] * (768 - len(palette)))
     image.putpalette(palette)
     image.convert("RGB").save(path)
+
+
+def _write_confidence_mask(path: Path, confidence: torch.Tensor) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = confidence.shape
+    values = (
+        confidence.to(device="cpu", dtype=torch.float32)
+        .clamp(0.0, 1.0)
+        .mul(255.0)
+        .round()
+        .to(torch.uint8)
+        .contiguous()
+    )
+    Image.frombytes("L", (width, height), values.numpy().tobytes()).save(path)
 
 
 def _prediction_mask_name(index: int, image_path: Path) -> str:

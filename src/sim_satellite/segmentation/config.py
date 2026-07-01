@@ -12,7 +12,7 @@ from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
 DEFAULT_SEGMENTATION_CHECKPOINT_PATH = "artifacts/openearthmap-vae-segmenter.pt"
 DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH = (
-    "artifacts/openearthmap-custom-vae-f4-c24-h32-train88-val300-200k.pt"
+    "artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t04-data20274737-train1006705.pt"
 )
 DEFAULT_SEGMENTATION_PREDICTION_DIR = "artifacts/segmentation-predictions"
 VAE_ASPP_UNET_MODEL_NAME = "vae-aspp-unet-v1"
@@ -82,6 +82,8 @@ class SegmentationPredictionConfig:
     images_dir: str = ""
     max_images: int = 0
     device: str = "cpu"
+    confidence_threshold: float = 0.0
+    save_confidence_masks: bool = True
     save_color_masks: bool = True
 
 
@@ -161,6 +163,8 @@ def _validate_prediction_config(config: SegmentationPredictionConfig) -> None:
         raise ValueError("pass exactly one of images_manifest_path or images_dir")
     if config.max_images < 0:
         raise ValueError("max_images must be non-negative")
+    if config.confidence_threshold < 0.0 or config.confidence_threshold > 1.0:
+        raise ValueError("confidence_threshold must be between 0 and 1")
 
 
 def load_segmentation_training_config_file(config_path: Path) -> SegmentationTrainingConfig:

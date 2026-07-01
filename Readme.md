@@ -141,6 +141,13 @@ After validating the 512-entry fast pool, use
 research-pool check. Use `vae-research-balanced-pool-2048-5k.modal.json` for
 the current strongest 2048-pool VAE baseline.
 
+To train the downstream VAE-fused segmentation classifier from that baseline,
+use `segmentation-vae-pool2048-5k-smoke.modal.json` for a fast Modal wiring
+check and `segmentation-vae-pool2048-5k.modal.json` for the longer run. Mask
+prediction writes class-id masks, color masks, and confidence masks by default;
+use `--confidence-threshold 0.85` on `segmentation-predict` to set low-confidence
+pixels to `unlabeled` before using predictions as generated labels.
+
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
 balance report under `/artifacts/vae-research/`. It balances useful land-cover

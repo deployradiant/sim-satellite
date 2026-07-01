@@ -100,6 +100,8 @@ def evaluate_cli(
 @click.option("--images-dir", default="")
 @click.option("--max-images", type=int, default=0, show_default=True)
 @click.option("--device", default="cpu", show_default=True)
+@click.option("--confidence-threshold", type=float, default=0.0, show_default=True)
+@click.option("--confidence-masks/--no-confidence-masks", default=True, show_default=True)
 @click.option("--color-masks/--no-color-masks", default=True, show_default=True)
 def predict_cli(
     checkpoint_path: str,
@@ -108,6 +110,8 @@ def predict_cli(
     images_dir: str,
     max_images: int,
     device: str,
+    confidence_threshold: float,
+    confidence_masks: bool,
     color_masks: bool,
 ) -> None:
     try:
@@ -119,6 +123,8 @@ def predict_cli(
                 images_dir=images_dir,
                 max_images=max_images,
                 device=device,
+                confidence_threshold=confidence_threshold,
+                save_confidence_masks=confidence_masks,
                 save_color_masks=color_masks,
             ),
             progress=click.echo,

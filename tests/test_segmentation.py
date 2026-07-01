@@ -298,10 +298,64 @@ def test_segmentation_predict_writes_class_id_and_color_masks(tmp_path: Path) ->
     assert len(records) == 1
     assert Path(records[0]["mask"]).exists()
     assert Path(records[0]["color_mask"]).exists()
+    assert Path(records[0]["confidence_mask"]).exists()
     assert records[0]["prediction_source"] == "vae-fused-segmentation-classifier"
+    assert records[0]["confidence_threshold"] == 0.0
+    assert 0.0 <= records[0]["mean_confidence"] <= 1.0
+    assert records[0]["high_confidence_fraction"] == 1.0
     with Image.open(records[0]["mask"]) as mask:
         assert mask.mode == "L"
         assert mask.size == (17, 19)
+    with Image.open(records[0]["confidence_mask"]) as confidence:
+        assert confidence.mode == "L"
+        assert confidence.size == (17, 19)
+
+
+def test_segmentation_predict_can_gate_low_confidence_pixels(tmp_path: Path) -> None:
+    vae_path = tmp_path / "vae.pt"
+    _write_vae_checkpoint(vae_path)
+    checkpoint_path = tmp_path / "segmenter.pt"
+    model = build_segmentation_model(
+        num_classes=len(OPENEARTHMAP_CLASSES),
+        vae_latent_channels=4,
+    )
+    _save_checkpoint(
+        checkpoint_path,
+        model,
+        config=asdict(
+            SegmentationTrainingConfig(
+                image_size=16,
+                vae_checkpoint_path=str(vae_path),
+            )
+        ),
+        metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
+        step=0,
+    )
+    image_path = tmp_path / "unlabeled" / "tile.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (16, 16), (32, 64, 96)).save(image_path)
+    images_manifest = tmp_path / "unlabeled.jsonl"
+    images_manifest.write_text(
+        json.dumps({"image": "unlabeled/tile.png", "source": "test-unlabeled"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = predict_segmentation_masks(
+        SegmentationPredictionConfig(
+            checkpoint_path=str(checkpoint_path),
+            images_manifest_path=str(images_manifest),
+            output_dir=str(tmp_path / "predictions"),
+            device="cpu",
+            confidence_threshold=1.0,
+        )
+    )
+
+    record = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert record["confidence_threshold"] == 1.0
+    assert record["high_confidence_fraction"] == 0.0
+    assert record["class_counts"] == {"unlabeled": 256}
+    with Image.open(record["mask"]) as mask:
+        assert set(mask.tobytes()) == {0}
 
 
 def test_prediction_manifest_requires_object_records(tmp_path: Path) -> None:
