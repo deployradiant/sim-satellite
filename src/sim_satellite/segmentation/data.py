@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -46,11 +47,13 @@ def _split_training_samples(
     if not manifest_path.exists():
         raise FileNotFoundError(f"Segmentation manifest not found: {manifest_path}")
 
+    _ensure_required_split_counts(manifest_path, config)
     train_candidates = _samples_for_split(manifest_path, config.split)
     if not train_candidates:
         raise RuntimeError(f"No samples for split `{config.split}` in {manifest_path}")
 
     if config.validation_split:
+        _ensure_disjoint_split_names(config.split, config.validation_split)
         validation_samples = _samples_for_split(manifest_path, config.validation_split)
         train_samples = train_candidates
     else:
@@ -98,11 +101,43 @@ def _samples_for_split(
     return tuple(sample for sample in samples if sample.split in split_names)
 
 
+def _ensure_required_split_counts(
+    manifest_path: str | Path,
+    config: SegmentationTrainingConfig,
+) -> None:
+    if not config.required_split_counts:
+        return
+    samples = tuple(read_manifest(manifest_path))
+    split_counts = Counter(sample.split for sample in samples)
+    missing = {
+        split_name: required_count
+        for split_name, required_count in config.required_split_counts.items()
+        if split_counts.get(split_name, 0) < required_count
+    }
+    if not missing:
+        return
+    details = ", ".join(
+        f"{split_name}: found {split_counts.get(split_name, 0)}, required {required_count}"
+        for split_name, required_count in sorted(missing.items())
+    )
+    raise RuntimeError(f"Segmentation manifest does not satisfy required_split_counts: {details}")
+
+
 def _split_names(value: str) -> tuple[str, ...]:
     names = tuple(name.strip() for name in value.split(",") if name.strip())
     if len(names) == 1 and names[0].lower() in {"*", "all"}:
         return ("*",)
     return names
+
+
+def _ensure_disjoint_split_names(train_split: str, validation_split: str) -> None:
+    train_names = set(_split_names(train_split))
+    validation_names = set(_split_names(validation_split))
+    if "*" in train_names or "*" in validation_names or train_names & validation_names:
+        raise ValueError(
+            "validation_split must not overlap split; omit validation_split to create a "
+            "seeded holdout from the training split"
+        )
 
 
 def _limit_samples(
@@ -308,6 +343,40 @@ def _random_square_crop_box(
     left = 0 if width == size else rng.randrange(0, width - size + 1)
     top = 0 if height == size else rng.randrange(0, height - size + 1)
     return left, top, left + size, top + size
+
+
+def _class_balanced_crop_box(
+    prepared: PreparedSample,
+    crop_size: int,
+    rng: random.Random,
+    *,
+    class_id: int,
+    min_target_pixels: int = 1,
+) -> tuple[int, int, int, int] | None:
+    if min_target_pixels < 1:
+        raise ValueError("min_target_pixels must be positive")
+    width, height = prepared.size
+    size = min(width, height, crop_size)
+    if size < 1:
+        raise ValueError(f"Prepared sample has invalid size: {prepared.size}")
+
+    pixels = torch.nonzero(prepared.mask == class_id, as_tuple=False)
+    if pixels.numel() == 0:
+        return None
+    y, x = pixels[rng.randrange(pixels.shape[0])].tolist()
+    top_min = max(0, int(y) - size + 1)
+    top_max = min(int(y), height - size)
+    left_min = max(0, int(x) - size + 1)
+    left_max = min(int(x), width - size)
+    if top_min > top_max or left_min > left_max:
+        return None
+    top = rng.randint(top_min, top_max)
+    left = rng.randint(left_min, left_max)
+    crop_box = (left, top, left + size, top + size)
+    target_pixels = int((prepared.mask[top : top + size, left : left + size] == class_id).sum())
+    if target_pixels < min_target_pixels:
+        return None
+    return crop_box
 
 
 def _tile_windows(

@@ -76,6 +76,108 @@ def _multiclass_dice_loss(
     return 1.0 - dice.mean()
 
 
+def _focal_cross_entropy_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    class_weights: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    if gamma < 0.0:
+        raise ValueError("focal_gamma must be non-negative")
+    ce_loss = F.cross_entropy(logits, labels, weight=class_weights, reduction="none")
+    log_probability = F.log_softmax(logits, dim=1)
+    target_log_probability = log_probability.gather(1, labels.long().unsqueeze(1)).squeeze(1)
+    probability = target_log_probability.exp()
+    return ((1.0 - probability).pow(gamma) * ce_loss).mean()
+
+
+def _lovasz_softmax_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    include_unlabeled: bool,
+    max_pixels: int = 0,
+) -> torch.Tensor:
+    if max_pixels < 0:
+        raise ValueError("lovasz_max_pixels must be non-negative")
+    probabilities = logits.softmax(dim=1)
+    flat_probabilities = probabilities.permute(0, 2, 3, 1).reshape(-1, logits.shape[1])
+    flat_labels = labels.reshape(-1).long()
+    start_class = 0 if include_unlabeled else 1
+    if max_pixels > 0 and flat_labels.numel() > max_pixels:
+        indices = _lovasz_sample_indices(
+            flat_labels,
+            num_classes=logits.shape[1],
+            start_class=start_class,
+            max_pixels=max_pixels,
+        )
+        flat_probabilities = flat_probabilities[indices]
+        flat_labels = flat_labels[indices]
+
+    class_losses: list[torch.Tensor] = []
+    for class_id in range(start_class, logits.shape[1]):
+        foreground = (flat_labels == class_id).float()
+        if foreground.sum() == 0:
+            continue
+        errors = (foreground - flat_probabilities[:, class_id]).abs()
+        sorted_errors, order = torch.sort(errors, descending=True)
+        sorted_foreground = foreground[order]
+        class_losses.append(torch.dot(sorted_errors, _lovasz_gradient(sorted_foreground)))
+    if not class_losses:
+        return logits.sum() * 0.0
+    return torch.stack(class_losses).mean()
+
+
+def _lovasz_sample_indices(
+    labels: torch.Tensor,
+    *,
+    num_classes: int,
+    start_class: int,
+    max_pixels: int,
+) -> torch.Tensor:
+    class_ids = tuple(range(start_class, num_classes))
+    per_class_budget = max(1, max_pixels // max(1, len(class_ids)))
+    selected: list[torch.Tensor] = []
+    for class_id in class_ids:
+        class_indices = torch.nonzero(labels == class_id, as_tuple=False).flatten()
+        if class_indices.numel() <= per_class_budget:
+            selected.append(class_indices)
+            continue
+        order = torch.randperm(class_indices.numel(), device=labels.device)[:per_class_budget]
+        selected.append(class_indices[order])
+
+    selected_indices = (
+        torch.cat([indices for indices in selected if indices.numel() > 0])
+        if selected
+        else torch.empty(0, dtype=torch.long, device=labels.device)
+    )
+    remaining = max_pixels - int(selected_indices.numel())
+    if remaining <= 0:
+        return selected_indices[:max_pixels]
+
+    available = torch.ones(labels.numel(), dtype=torch.bool, device=labels.device)
+    if selected_indices.numel() > 0:
+        available[selected_indices] = False
+    candidate_indices = torch.nonzero(available, as_tuple=False).flatten()
+    if candidate_indices.numel() == 0:
+        return selected_indices
+    if candidate_indices.numel() > remaining:
+        order = torch.randperm(candidate_indices.numel(), device=labels.device)[:remaining]
+        candidate_indices = candidate_indices[order]
+    return torch.cat((selected_indices, candidate_indices))
+
+
+def _lovasz_gradient(sorted_foreground: torch.Tensor) -> torch.Tensor:
+    total = sorted_foreground.sum()
+    intersection = total - sorted_foreground.cumsum(dim=0)
+    union = total + (1.0 - sorted_foreground).cumsum(dim=0)
+    jaccard = 1.0 - intersection / union.clamp_min(1e-6)
+    if sorted_foreground.numel() > 1:
+        jaccard[1:] = jaccard[1:] - jaccard[:-1]
+    return jaccard
+
+
 def _confusion_matrix(
     predictions: torch.Tensor,
     labels: torch.Tensor,

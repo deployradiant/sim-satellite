@@ -219,7 +219,7 @@ def test_modal_inference_enters_app_run_with_valid_data(
     }
 
 
-def test_modal_segmentation_training_maps_resume_checkpoint(
+def test_modal_segmentation_training_maps_from_scratch_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -235,7 +235,6 @@ def test_modal_segmentation_training_maps_resume_checkpoint(
 
     config = SegmentationTrainingConfig(
         checkpoint_path="artifacts/segmentation/production.pt",
-        resume_checkpoint_path="artifacts/segmentation/base.pt",
         manifest_path="data/openearthmap/manifest.jsonl",
         model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
         vae_checkpoint_path="",
@@ -251,7 +250,6 @@ def test_modal_segmentation_training_maps_resume_checkpoint(
         **asdict(config),
         "device": "cuda",
         "checkpoint_path": "/artifacts/segmentation/production.pt",
-        "resume_checkpoint_path": "/artifacts/segmentation/base.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
     }
 

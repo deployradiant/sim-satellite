@@ -95,7 +95,6 @@ def _load_segmentation_checkpoint(path: Path, *, device: str) -> SegmentationChe
         input_channels=_segmentation_input_channels(config),
         vae_latent_channels=vae_latent_channels,
         model_name=model_name,
-        pretrained_backbone=_checkpoint_pretrained_backbone(config, checkpoint_path=path),
     ).to(device)
     model.load_state_dict(state)
     model.eval()
@@ -114,19 +113,6 @@ def _checkpoint_model_name(config: Mapping[str, Any]) -> str:
     if not isinstance(raw_value, str):
         raise RuntimeError("Segmentation checkpoint config model_name must be a string")
     return raw_value
-
-
-def _checkpoint_pretrained_backbone(
-    config: Mapping[str, Any],
-    *,
-    checkpoint_path: Path,
-) -> bool:
-    raw_value = config.get("pretrained_backbone", False)
-    if isinstance(raw_value, bool):
-        return raw_value
-    raise RuntimeError(
-        f"Segmentation checkpoint config pretrained_backbone must be a boolean: {checkpoint_path}"
-    )
 
 
 def _checkpoint_vae_latent_channels(

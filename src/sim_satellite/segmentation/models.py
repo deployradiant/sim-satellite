@@ -23,7 +23,6 @@ def build_segmentation_model(
     input_channels: int = 3,
     vae_latent_channels: int,
     model_name: str = VAE_ASPP_UNET_MODEL_NAME,
-    pretrained_backbone: bool = False,
 ) -> nn.Module:
     if model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME:
         return SegmentationModelsPyTorchUNet(
@@ -31,7 +30,6 @@ def build_segmentation_model(
             decoder_attention_type="scse",
             input_channels=input_channels,
             num_classes=num_classes,
-            pretrained_backbone=pretrained_backbone,
         )
     if model_name not in (*LEGACY_SEGMENTATION_MODEL_NAMES, VAE_ASPP_UNET_MODEL_NAME):
         raise ValueError(f"Unsupported segmentation model: {model_name}")
@@ -84,7 +82,6 @@ class SegmentationModelsPyTorchUNet(nn.Module):
         decoder_attention_type: str | None,
         input_channels: int,
         num_classes: int,
-        pretrained_backbone: bool,
     ) -> None:
         super().__init__()
         import segmentation_models_pytorch as smp
@@ -94,23 +91,15 @@ class SegmentationModelsPyTorchUNet(nn.Module):
         if input_channels % 3 != 0:
             raise ValueError("SMP segmenters expect RGB channel groups")
 
-        encoder_weights = "imagenet" if pretrained_backbone else None
         self.model = smp.Unet(
             encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
+            encoder_weights=None,
             in_channels=input_channels,
             classes=num_classes,
             decoder_attention_type=decoder_attention_type,
         )
         mean = (0.0, 0.0, 0.0)
         std = (1.0, 1.0, 1.0)
-        if encoder_weights is not None:
-            preprocessing = smp.encoders.get_preprocessing_params(
-                encoder_name,
-                pretrained=encoder_weights,
-            )
-            mean = tuple(float(value) for value in preprocessing["mean"])
-            std = tuple(float(value) for value in preprocessing["std"])
         channel_groups = input_channels // 3
         self.input_channels = input_channels
         self.register_buffer(

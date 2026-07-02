@@ -13,7 +13,7 @@ import sim_satellite.segmentation.cli as segmentation_cli
 from sim_satellite.cli import cli
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
-from sim_satellite.data.prepared import PreparedSample, write_prepared_sample
+from sim_satellite.data.prepared import PREPARED_DATA_VERSION, PreparedSample, write_prepared_sample
 from sim_satellite.model import ModelConfig
 from sim_satellite.segmentation.checkpoint import _load_segmentation_checkpoint, _save_checkpoint
 from sim_satellite.segmentation.config import (
@@ -29,6 +29,7 @@ from sim_satellite.segmentation.data import (
     _augment_segmentation_sample,
     _context_crop_box,
     _prepared_crop,
+    _PreparedSampleCache,
     _samples_for_split,
     _shuffled_limit_samples,
     _tile_windows,
@@ -48,7 +49,9 @@ from sim_satellite.segmentation.metrics import (
 from sim_satellite.segmentation.models import build_segmentation_model
 from sim_satellite.segmentation.training import (
     _apply_class_weight_multipliers,
+    _sample_training_batch,
     _segmentation_learning_rate,
+    _segmentation_training_loss,
     train_segmentation_model,
 )
 from sim_satellite.segmentation.vae import _load_vae_feature_encoder
@@ -122,9 +125,16 @@ def test_production_openearth_training_recipe_loads() -> None:
     _validate_training_config(config)
     assert config.model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
     assert config.vae_checkpoint_path == ""
-    assert config.resume_checkpoint_path
     assert config.evaluation_stride == 256
     assert config.evaluation_feather_blending is True
+    assert "resume_checkpoint_path" not in asdict(config)
+    assert "class_index_path" not in asdict(config)
+    assert "pretrained_backbone" not in asdict(config)
+    assert config.focal_weight == pytest.approx(0.25)
+    assert config.lovasz_weight == pytest.approx(0.2)
+    assert config.class_balanced_crop_probability == pytest.approx(0.75)
+    assert config.crop_scale_min == pytest.approx(0.85)
+    assert config.crop_scale_max == pytest.approx(1.15)
 
 
 def test_segmentation_training_cosine_lr_reaches_minimum() -> None:
@@ -147,6 +157,78 @@ def test_segmentation_class_weight_multipliers_renormalize_present_classes() -> 
 
     assert adjusted[road_id] > adjusted.mean()
     assert adjusted.mean() == pytest.approx(1.0)
+
+
+def test_segmentation_training_loss_includes_production_terms() -> None:
+    labels = torch.tensor([[[1, 2], [1, 2]]])
+    logits = torch.zeros((1, len(OPENEARTHMAP_CLASSES), 2, 2), dtype=torch.float32)
+    weights = torch.ones(len(OPENEARTHMAP_CLASSES), dtype=torch.float32)
+
+    base = _segmentation_training_loss(
+        logits,
+        labels,
+        class_weights=weights,
+        dice_weight=0.35,
+        focal_weight=0.0,
+        focal_gamma=2.0,
+        lovasz_weight=0.0,
+        lovasz_max_pixels=0,
+    )
+    production = _segmentation_training_loss(
+        logits,
+        labels,
+        class_weights=weights,
+        dice_weight=0.35,
+        focal_weight=0.25,
+        focal_gamma=2.0,
+        lovasz_weight=0.2,
+        lovasz_max_pixels=4,
+    )
+
+    assert production > base
+
+
+def test_segmentation_training_batch_can_target_class_balanced_crops(tmp_path: Path) -> None:
+    sample = SatelliteSample(
+        image_path=tmp_path / "images" / "tile.png",
+        mask_path=tmp_path / "masks" / "tile.png",
+        prepared_path=tmp_path / "prepared" / "tile.pt",
+        split="train",
+        source="fixture",
+    )
+    image = torch.zeros((16, 16, 3), dtype=torch.uint8)
+    mask = torch.zeros((16, 16), dtype=torch.uint8)
+    road_id = OPENEARTHMAP_CLASSES.index("road")
+    mask[8:12, 8:12] = road_id
+    sample.prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "version": PREPARED_DATA_VERSION,
+            "image": image,
+            "mask": mask,
+            "size": (16, 16),
+        },
+        sample.prepared_path,
+    )
+    cache = _PreparedSampleCache(max_samples=2)
+
+    batch_samples, crop_boxes = _sample_training_batch(
+        (sample,),
+        cache=cache,
+        config=SegmentationTrainingConfig(
+            image_size=8,
+            batch_size=1,
+            class_balanced_crop_probability=1.0,
+            class_balanced_crop_min_pixels=1,
+        ),
+        rng=__import__("random").Random(123),
+        class_sample_index={road_id: (sample,)},
+        class_sampling_weights={road_id: 1.0},
+    )
+
+    assert batch_samples == (sample,)
+    left, top, right, bottom = crop_boxes[0]
+    assert int(mask[top:bottom, left:right].eq(road_id).sum()) > 0
 
 
 def test_segmentation_class_weights_and_dice_loss_are_directional() -> None:

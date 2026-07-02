@@ -38,12 +38,14 @@ The production recipe is committed as:
 train.openearthmap-segmentation-production-openearth-v1.json
 ```
 
-It fine-tunes the SMP U-Net EfficientNet-B4 SCSE model from the previous polish
-checkpoint, using the official OpenEarth `train` split and validating on `val`.
-The recipe uses `512` pixel crops, batch size `4`, cosine learning rate decay
-from `2e-6` to `2e-7`, Dice plus class-weighted cross entropy, low unlabeled
-weight, class-weight multipliers for hard built/road/vegetation classes, and
-overlapping feathered validation tiles with stride `256`.
+It trains the SMP U-Net EfficientNet-B4 SCSE model from scratch, using the
+official OpenEarth `train` split and validating on `val`. The recipe does not
+take a resume checkpoint or generated class-index artifact as input.
+The recipe uses `512` pixel crops with crop-scale jitter, batch size `4`, cosine
+learning rate decay from `2e-6` to `2e-7`, Dice plus class-weighted cross
+entropy, focal loss, Lovasz loss, low unlabeled weight, class-weight multipliers
+for hard built/road/vegetation classes, class-balanced crop sampling by scanning
+the prepared masks, and overlapping feathered validation tiles with stride `256`.
 
 Run it on Modal:
 

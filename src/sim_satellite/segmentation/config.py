@@ -31,7 +31,6 @@ SEGMENTATION_LR_SCHEDULES = ("constant", "cosine")
 class SegmentationTrainingConfig:
     manifest_path: str = DEFAULT_MANIFEST_PATH
     checkpoint_path: str = DEFAULT_SEGMENTATION_CHECKPOINT_PATH
-    resume_checkpoint_path: str = ""
     model_name: str = VAE_ASPP_UNET_MODEL_NAME
     split: str = "train"
     validation_split: str = ""
@@ -39,24 +38,29 @@ class SegmentationTrainingConfig:
     validation_fraction: float = 0.2
     max_train_samples: int = 0
     max_validation_samples: int = 128
+    required_split_counts: dict[str, int] = field(default_factory=dict)
     steps: int = 2000
     batch_size: int = 8
     image_size: int = 128
     context_size: int = 0
     vae_checkpoint_path: str = DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH
     vae_normalize_latents: bool = True
-    pretrained_backbone: bool = False
     learning_rate: float = 3e-4
     min_learning_rate: float = 0.0
     lr_schedule: str = "constant"
     weight_decay: float = 1e-4
     dice_weight: float = 0.5
+    focal_weight: float = 0.0
+    focal_gamma: float = 2.0
+    lovasz_weight: float = 0.0
+    lovasz_max_pixels: int = 0
     class_weight_power: float = 0.5
     class_weight_multipliers: dict[str, float] = field(default_factory=dict)
     unlabeled_weight: float = 0.25
     eval_every: int = 250
     evaluation_stride: int = 0
     evaluation_feather_blending: bool = False
+    log_every: int = 0
     device: str = "cpu"
     seed: int = 2026
     cache_samples: int = 128
@@ -65,6 +69,11 @@ class SegmentationTrainingConfig:
     rotate_probability: float = 0.75
     color_jitter_strength: float = 0.15
     blur_probability: float = 0.1
+    crop_scale_min: float = 1.0
+    crop_scale_max: float = 1.0
+    class_balanced_crop_probability: float = 0.0
+    class_balanced_crop_weights: dict[str, float] = field(default_factory=dict)
+    class_balanced_crop_min_pixels: int = 16
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> SegmentationTrainingConfig:
@@ -166,7 +175,9 @@ def _validate_training_config(config: SegmentationTrainingConfig) -> None:
         raise ValueError(
             "model_name must be one of: " + ", ".join(SUPPORTED_SEGMENTATION_MODEL_NAMES)
         )
-    for name in ("pretrained_backbone", "evaluation_feather_blending"):
+    for name in (
+        "evaluation_feather_blending",
+    ):
         if not isinstance(getattr(config, name), bool):
             raise ValueError(f"{name} must be a boolean")
     if config.validation_fraction <= 0.0 or config.validation_fraction >= 1.0:
@@ -180,6 +191,8 @@ def _validate_training_config(config: SegmentationTrainingConfig) -> None:
         "cache_samples",
         "context_size",
         "evaluation_stride",
+        "log_every",
+        "lovasz_max_pixels",
     ):
         if getattr(config, name) < 0:
             raise ValueError(f"{name} must be non-negative")
@@ -194,16 +207,37 @@ def _validate_training_config(config: SegmentationTrainingConfig) -> None:
         raise ValueError("min_learning_rate must be non-negative")
     if config.min_learning_rate > config.learning_rate:
         raise ValueError("min_learning_rate must be less than or equal to learning_rate")
-    for name in ("weight_decay", "dice_weight", "class_weight_power", "unlabeled_weight"):
+    for name in (
+        "weight_decay",
+        "dice_weight",
+        "focal_weight",
+        "focal_gamma",
+        "lovasz_weight",
+        "class_weight_power",
+        "unlabeled_weight",
+    ):
         if getattr(config, name) < 0.0:
             raise ValueError(f"{name} must be non-negative")
     _validate_class_weight_mapping(config.class_weight_multipliers, "class_weight_multipliers")
+    _validate_class_weight_mapping(
+        config.class_balanced_crop_weights,
+        "class_balanced_crop_weights",
+    )
+    _validate_required_split_counts(config.required_split_counts)
     for name in ("flip_probability", "rotate_probability", "blur_probability"):
         value = getattr(config, name)
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{name} must be between 0 and 1")
+    if config.class_balanced_crop_probability < 0.0 or config.class_balanced_crop_probability > 1.0:
+        raise ValueError("class_balanced_crop_probability must be between 0 and 1")
     if config.color_jitter_strength < 0.0:
         raise ValueError("color_jitter_strength must be non-negative")
+    if config.crop_scale_min <= 0.0 or config.crop_scale_max <= 0.0:
+        raise ValueError("crop scale bounds must be positive")
+    if config.crop_scale_min > config.crop_scale_max:
+        raise ValueError("crop_scale_min must be less than or equal to crop_scale_max")
+    if config.class_balanced_crop_min_pixels < 1:
+        raise ValueError("class_balanced_crop_min_pixels must be positive")
     if not config.manifest_path:
         raise ValueError("manifest_path is required")
     if not config.checkpoint_path:
@@ -225,6 +259,18 @@ def _validate_class_weight_mapping(value: object, name: str) -> None:
             raise ValueError(f"{name}[{class_name!r}] must be numeric")
         if float(weight) < 0.0:
             raise ValueError(f"{name}[{class_name!r}] must be non-negative")
+
+
+def _validate_required_split_counts(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("required_split_counts must be an object mapping split names to counts")
+    for split_name, count in value.items():
+        if not isinstance(split_name, str) or not split_name.strip():
+            raise ValueError("required_split_counts contains an invalid split name")
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise ValueError(f"required_split_counts[{split_name!r}] must be an integer")
+        if count < 0:
+            raise ValueError(f"required_split_counts[{split_name!r}] must be non-negative")
 
 
 def _validate_prediction_config(config: SegmentationPredictionConfig) -> None:
