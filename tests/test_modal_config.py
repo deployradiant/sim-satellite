@@ -11,7 +11,11 @@ from sim_satellite import modal_app
 from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
-from sim_satellite.segmentation import SegmentationPredictionConfig
+from sim_satellite.segmentation import (
+    SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+    SegmentationPredictionConfig,
+    SegmentationTrainingConfig,
+)
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.vae.research import VAEResearchManifestConfig
 from sim_satellite.vae.training import VAETrainingConfig
@@ -212,6 +216,43 @@ def test_modal_inference_enters_app_run_with_valid_data(
         "output_path": "/artifacts/generated/sample.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "mask_path": "/data/openearthmap/extracted/train/labels/tile.png",
+    }
+
+
+def test_modal_segmentation_training_maps_resume_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_data_file(tmp_path, "openearthmap/manifest.jsonl")
+    fake_app = _FakeApp()
+    fake_train_segmentation_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(
+        monkeypatch,
+        fake_app,
+        train_segmentation_remote=fake_train_segmentation_remote,
+    )
+
+    config = SegmentationTrainingConfig(
+        checkpoint_path="artifacts/segmentation/production.pt",
+        resume_checkpoint_path="artifacts/segmentation/base.pt",
+        manifest_path="data/openearthmap/manifest.jsonl",
+        model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+        vae_checkpoint_path="",
+    )
+
+    result = modal_app.run_segmentation_training_target(config)
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_app.enter_calls == 1
+    assert fake_app.exit_calls == 1
+    assert fake_train_segmentation_remote.received == {
+        **asdict(config),
+        "device": "cuda",
+        "checkpoint_path": "/artifacts/segmentation/production.pt",
+        "resume_checkpoint_path": "/artifacts/segmentation/base.pt",
+        "manifest_path": "/data/openearthmap/manifest.jsonl",
     }
 
 
@@ -582,12 +623,16 @@ def _install_modal_fakes(
     *,
     train_remote: object | None = None,
     train_vae_remote: object | None = None,
+    train_segmentation_remote: object | None = None,
     vae_research_manifest_remote: object | None = None,
     infer_remote: object | None = None,
     predict_segmentation_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
     train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
+    train_segmentation_remote = (
+        train_segmentation_remote if train_segmentation_remote is not None else object()
+    )
     vae_research_manifest_remote = (
         vae_research_manifest_remote if vae_research_manifest_remote is not None else object()
     )
@@ -598,6 +643,7 @@ def _install_modal_fakes(
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
     monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
+    monkeypatch.setattr(modal_app, "train_segmentation_remote", train_segmentation_remote)
     monkeypatch.setattr(modal_app, "vae_research_manifest_remote", vae_research_manifest_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
     monkeypatch.setattr(modal_app, "predict_segmentation_remote", predict_segmentation_remote)

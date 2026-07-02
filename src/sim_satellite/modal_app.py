@@ -254,6 +254,7 @@ def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
                 "modal_segmentation_training_progress",
                 message=message,
             ),
+            after_save=artifact_volume.commit,
         )
     )
     artifact_volume.commit()
@@ -488,6 +489,8 @@ def _modal_segmentation_training_config(config: SegmentationTrainingConfig) -> d
     values = asdict(config)
     values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    if config.resume_checkpoint_path:
+        values["resume_checkpoint_path"] = _modal_artifact_path(config.resume_checkpoint_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     if config.vae_checkpoint_path:
         values["vae_checkpoint_path"] = _modal_artifact_path(config.vae_checkpoint_path)

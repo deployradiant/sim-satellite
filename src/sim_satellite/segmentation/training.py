@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import random
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from sim_satellite.segmentation.config import (
     SegmentationTrainingConfig,
     SegmentationTrainingResult,
     _validate_training_config,
+    segmentation_model_uses_vae_features,
 )
 from sim_satellite.segmentation.data import (
     _load_segmentation_batch,
@@ -39,6 +42,7 @@ def train_segmentation_model(
     config: SegmentationTrainingConfig,
     *,
     progress: ProgressReporter | None = None,
+    after_save: Callable[[], None] | None = None,
 ) -> SegmentationTrainingResult:
     _validate_training_config(config)
     _seed_everything(config.seed)
@@ -47,13 +51,20 @@ def train_segmentation_model(
     train_samples, validation_samples = _split_training_samples(config)
     cache = _PreparedSampleCache(max_samples=config.cache_samples)
     checkpoint_config = asdict(config)
-    vae_encoder = _load_vae_feature_encoder(checkpoint_config, device=device)
-    checkpoint_config["vae_latent_channels"] = vae_encoder.latent_channels
+    vae_encoder = None
+    vae_latent_channels = 0
+    if segmentation_model_uses_vae_features(config.model_name):
+        vae_encoder = _load_vae_feature_encoder(checkpoint_config, device=device)
+        vae_latent_channels = vae_encoder.latent_channels
+        checkpoint_config["vae_latent_channels"] = vae_encoder.latent_channels
     model = build_segmentation_model(
         num_classes=len(OPENEARTHMAP_CLASSES),
         input_channels=_segmentation_input_channels(config),
-        vae_latent_channels=vae_encoder.latent_channels,
+        vae_latent_channels=vae_latent_channels,
+        model_name=config.model_name,
+        pretrained_backbone=config.pretrained_backbone,
     ).to(device)
+    _load_resume_checkpoint(model, config, device=device, progress=progress)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -66,6 +77,10 @@ def train_segmentation_model(
         power=config.class_weight_power,
         unlabeled_weight=config.unlabeled_weight,
         progress=progress,
+    )
+    class_weights = _apply_class_weight_multipliers(
+        class_weights,
+        config.class_weight_multipliers,
     ).to(device)
 
     rng = random.Random(config.seed)
@@ -77,11 +92,15 @@ def train_segmentation_model(
 
     _report(
         progress,
-        f"Training VAE-fused segmenter on {len(train_samples)} samples; "
+        f"Training {config.model_name} segmenter on {len(train_samples)} samples; "
         f"validating on {len(validation_samples)} samples",
     )
     model.train()
     for step in range(1, config.steps + 1):
+        _set_optimizer_learning_rate(
+            optimizer,
+            _segmentation_learning_rate(config, step=step),
+        )
         batch_samples = tuple(
             train_samples[rng.randrange(len(train_samples))] for _ in range(config.batch_size)
         )
@@ -103,7 +122,7 @@ def train_segmentation_model(
         logits = _forward_segmentation_model(
             model,
             images,
-            vae_latents=_encode_vae_features(vae_encoder, images),
+            vae_latents=_encode_vae_features(vae_encoder, images) if vae_encoder else None,
         )
         ce_loss = F.cross_entropy(logits, labels, weight=class_weights)
         dice_loss = _multiclass_dice_loss(
@@ -126,9 +145,11 @@ def train_segmentation_model(
                 validation_samples,
                 image_size=config.image_size,
                 context_size=config.context_size,
+                tile_stride=config.evaluation_stride,
                 device=device,
                 cache=cache,
                 vae_encoder=vae_encoder,
+                feather_blending=config.evaluation_feather_blending,
             )
             _report(
                 progress,
@@ -145,6 +166,8 @@ def train_segmentation_model(
                     metrics=metrics,
                     step=step,
                 )
+                if after_save is not None:
+                    after_save()
             model.train()
 
     final_metrics = _evaluate_samples(
@@ -152,9 +175,11 @@ def train_segmentation_model(
         validation_samples,
         image_size=config.image_size,
         context_size=config.context_size,
+        tile_stride=config.evaluation_stride,
         device=device,
         cache=cache,
         vae_encoder=vae_encoder,
+        feather_blending=config.evaluation_feather_blending,
     )
     if best_metrics is None:
         best_metrics = final_metrics
@@ -166,6 +191,8 @@ def train_segmentation_model(
             metrics=best_metrics,
             step=config.steps,
         )
+        if after_save is not None:
+            after_save()
 
     recent_losses = losses[-min(len(losses), 100) :]
     result = SegmentationTrainingResult(
@@ -206,6 +233,55 @@ def train_segmentation_model(
 
 def _count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
+
+
+def _load_resume_checkpoint(
+    model: torch.nn.Module,
+    config: SegmentationTrainingConfig,
+    *,
+    device: torch.device,
+    progress: ProgressReporter | None,
+) -> None:
+    if not config.resume_checkpoint_path:
+        return
+    checkpoint_path = Path(config.resume_checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Segmentation resume checkpoint not found: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model_state"), dict):
+        raise RuntimeError(
+            f"Segmentation resume checkpoint is missing model_state: {checkpoint_path}"
+        )
+    model.load_state_dict(checkpoint["model_state"])
+    _report(progress, f"Loaded segmentation resume checkpoint {checkpoint_path}")
+
+
+def _segmentation_learning_rate(config: SegmentationTrainingConfig, *, step: int) -> float:
+    if config.lr_schedule == "constant" or config.steps <= 1:
+        return config.learning_rate
+    progress = min(1.0, max(0.0, (step - 1) / (config.steps - 1)))
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return config.min_learning_rate + (config.learning_rate - config.min_learning_rate) * cosine
+
+
+def _set_optimizer_learning_rate(optimizer: torch.optim.Optimizer, value: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = value
+
+
+def _apply_class_weight_multipliers(
+    weights: torch.Tensor,
+    multipliers: dict[str, float],
+) -> torch.Tensor:
+    if not multipliers:
+        return weights
+    adjusted = weights.clone()
+    for class_name, multiplier in multipliers.items():
+        adjusted[OPENEARTHMAP_CLASSES.index(class_name)] *= float(multiplier)
+    nonzero = adjusted > 0
+    if bool(nonzero.any().item()):
+        adjusted[nonzero] = adjusted[nonzero] / adjusted[nonzero].mean()
+    return adjusted
 
 
 def _seed_everything(seed: int) -> None:

@@ -29,3 +29,38 @@ uv run sim-satellite segmentation-predict \
   --inference-preset production-openearth-v1 \
   --images-dir data/unseen/images
 ```
+
+## Training Practice
+
+The production recipe is committed as:
+
+```text
+train.openearthmap-segmentation-production-openearth-v1.json
+```
+
+It fine-tunes the SMP U-Net EfficientNet-B4 SCSE model from the previous polish
+checkpoint, using the official OpenEarth `train` split and validating on `val`.
+The recipe uses `512` pixel crops, batch size `4`, cosine learning rate decay
+from `2e-6` to `2e-7`, Dice plus class-weighted cross entropy, low unlabeled
+weight, class-weight multipliers for hard built/road/vegetation classes, and
+overlapping feathered validation tiles with stride `256`.
+
+Run it on Modal:
+
+```bash
+uv run sim-satellite segmentation-train \
+  train.openearthmap-segmentation-production-openearth-v1.json
+```
+
+Then evaluate the trained checkpoint with the same production inference
+calibration:
+
+```bash
+uv run sim-satellite segmentation-evaluate \
+  --target modal \
+  --inference-preset production-openearth-v1 \
+  --manifest data/openearthmap/manifest.jsonl \
+  --split val \
+  --max-samples 0 \
+  --output artifacts/modal-metrics/production-openearth-v1-official-val.json
+```

@@ -22,6 +22,8 @@ from sim_satellite.segmentation.config import (
     SegmentationEvaluationConfig,
     SegmentationPredictionConfig,
     SegmentationTrainingConfig,
+    _validate_training_config,
+    load_segmentation_training_config_file,
 )
 from sim_satellite.segmentation.data import (
     _augment_segmentation_sample,
@@ -44,7 +46,11 @@ from sim_satellite.segmentation.metrics import (
     _segmentation_metrics,
 )
 from sim_satellite.segmentation.models import build_segmentation_model
-from sim_satellite.segmentation.training import train_segmentation_model
+from sim_satellite.segmentation.training import (
+    _apply_class_weight_multipliers,
+    _segmentation_learning_rate,
+    train_segmentation_model,
+)
 from sim_satellite.segmentation.vae import _load_vae_feature_encoder
 from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
@@ -93,6 +99,54 @@ def test_segmentation_class_logit_biases_adjust_logits() -> None:
     biased = _apply_class_logit_biases(logits, {"building": 0.2})
 
     assert biased[building_id, 0, 0] > biased[road_id, 0, 0]
+
+
+def test_smp_training_config_allows_empty_vae_checkpoint() -> None:
+    _validate_training_config(
+        SegmentationTrainingConfig(
+            model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+            vae_checkpoint_path="",
+        )
+    )
+
+    with pytest.raises(ValueError, match="vae_checkpoint_path"):
+        _validate_training_config(SegmentationTrainingConfig(vae_checkpoint_path=""))
+
+
+def test_production_openearth_training_recipe_loads() -> None:
+    config = load_segmentation_training_config_file(
+        Path(__file__).parent.parent
+        / "train.openearthmap-segmentation-production-openearth-v1.json"
+    )
+
+    _validate_training_config(config)
+    assert config.model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
+    assert config.vae_checkpoint_path == ""
+    assert config.resume_checkpoint_path
+    assert config.evaluation_stride == 256
+    assert config.evaluation_feather_blending is True
+
+
+def test_segmentation_training_cosine_lr_reaches_minimum() -> None:
+    config = SegmentationTrainingConfig(
+        learning_rate=1.0,
+        min_learning_rate=0.1,
+        lr_schedule="cosine",
+        steps=3,
+    )
+
+    assert _segmentation_learning_rate(config, step=1) == pytest.approx(1.0)
+    assert _segmentation_learning_rate(config, step=3) == pytest.approx(0.1)
+
+
+def test_segmentation_class_weight_multipliers_renormalize_present_classes() -> None:
+    road_id = OPENEARTHMAP_CLASSES.index("road")
+    weights = torch.ones(len(OPENEARTHMAP_CLASSES), dtype=torch.float32)
+
+    adjusted = _apply_class_weight_multipliers(weights, {"road": 2.0})
+
+    assert adjusted[road_id] > adjusted.mean()
+    assert adjusted.mean() == pytest.approx(1.0)
 
 
 def test_segmentation_class_weights_and_dice_loss_are_directional() -> None:

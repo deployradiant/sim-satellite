@@ -24,12 +24,15 @@ SUPPORTED_SEGMENTATION_MODEL_NAMES = (
     SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
     *LEGACY_SEGMENTATION_MODEL_NAMES,
 )
+SEGMENTATION_LR_SCHEDULES = ("constant", "cosine")
 
 
 @dataclass(frozen=True)
 class SegmentationTrainingConfig:
     manifest_path: str = DEFAULT_MANIFEST_PATH
     checkpoint_path: str = DEFAULT_SEGMENTATION_CHECKPOINT_PATH
+    resume_checkpoint_path: str = ""
+    model_name: str = VAE_ASPP_UNET_MODEL_NAME
     split: str = "train"
     validation_split: str = ""
     validation_holdout_patterns: str = ""
@@ -42,12 +45,18 @@ class SegmentationTrainingConfig:
     context_size: int = 0
     vae_checkpoint_path: str = DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH
     vae_normalize_latents: bool = True
+    pretrained_backbone: bool = False
     learning_rate: float = 3e-4
+    min_learning_rate: float = 0.0
+    lr_schedule: str = "constant"
     weight_decay: float = 1e-4
     dice_weight: float = 0.5
     class_weight_power: float = 0.5
+    class_weight_multipliers: dict[str, float] = field(default_factory=dict)
     unlabeled_weight: float = 0.25
     eval_every: int = 250
+    evaluation_stride: int = 0
+    evaluation_feather_blending: bool = False
     device: str = "cpu"
     seed: int = 2026
     cache_samples: int = 128
@@ -153,22 +162,42 @@ class SegmentationPredictionResult:
 
 
 def _validate_training_config(config: SegmentationTrainingConfig) -> None:
+    if config.model_name not in SUPPORTED_SEGMENTATION_MODEL_NAMES:
+        raise ValueError(
+            "model_name must be one of: " + ", ".join(SUPPORTED_SEGMENTATION_MODEL_NAMES)
+        )
+    for name in ("pretrained_backbone", "evaluation_feather_blending"):
+        if not isinstance(getattr(config, name), bool):
+            raise ValueError(f"{name} must be a boolean")
     if config.validation_fraction <= 0.0 or config.validation_fraction >= 1.0:
         raise ValueError("validation_fraction must be in (0, 1)")
     for name in ("steps", "batch_size", "image_size", "eval_every"):
         if getattr(config, name) < 1:
             raise ValueError(f"{name} must be positive")
-    for name in ("max_train_samples", "max_validation_samples", "cache_samples", "context_size"):
+    for name in (
+        "max_train_samples",
+        "max_validation_samples",
+        "cache_samples",
+        "context_size",
+        "evaluation_stride",
+    ):
         if getattr(config, name) < 0:
             raise ValueError(f"{name} must be non-negative")
     if config.context_size > 0 and config.context_size <= config.image_size:
         raise ValueError("context_size must be 0 or greater than image_size")
+    if config.lr_schedule not in SEGMENTATION_LR_SCHEDULES:
+        raise ValueError("lr_schedule must be one of: " + ", ".join(SEGMENTATION_LR_SCHEDULES))
     for name in ("learning_rate",):
         if getattr(config, name) <= 0.0:
             raise ValueError(f"{name} must be positive")
+    if config.min_learning_rate < 0.0:
+        raise ValueError("min_learning_rate must be non-negative")
+    if config.min_learning_rate > config.learning_rate:
+        raise ValueError("min_learning_rate must be less than or equal to learning_rate")
     for name in ("weight_decay", "dice_weight", "class_weight_power", "unlabeled_weight"):
         if getattr(config, name) < 0.0:
             raise ValueError(f"{name} must be non-negative")
+    _validate_class_weight_mapping(config.class_weight_multipliers, "class_weight_multipliers")
     for name in ("flip_probability", "rotate_probability", "blur_probability"):
         value = getattr(config, name)
         if value < 0.0 or value > 1.0:
@@ -179,8 +208,23 @@ def _validate_training_config(config: SegmentationTrainingConfig) -> None:
         raise ValueError("manifest_path is required")
     if not config.checkpoint_path:
         raise ValueError("checkpoint_path is required")
-    if not config.vae_checkpoint_path:
+    if segmentation_model_uses_vae_features(config.model_name) and not config.vae_checkpoint_path:
         raise ValueError("vae_checkpoint_path is required")
+
+
+def _validate_class_weight_mapping(value: object, name: str) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object mapping OpenEarthMap classes to weights")
+    from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
+
+    valid_class_names = set(OPENEARTHMAP_CLASSES)
+    for class_name, weight in value.items():
+        if not isinstance(class_name, str) or class_name not in valid_class_names:
+            raise ValueError(f"{name} contains unknown OpenEarthMap class name: {class_name!r}")
+        if not isinstance(weight, int | float) or isinstance(weight, bool):
+            raise ValueError(f"{name}[{class_name!r}] must be numeric")
+        if float(weight) < 0.0:
+            raise ValueError(f"{name}[{class_name!r}] must be non-negative")
 
 
 def _validate_prediction_config(config: SegmentationPredictionConfig) -> None:
