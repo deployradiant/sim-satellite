@@ -14,6 +14,7 @@ from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.segmentation.config import (
     SUPPORTED_SEGMENTATION_MODEL_NAMES,
     VAE_ASPP_UNET_MODEL_NAME,
+    segmentation_model_uses_vae_features,
 )
 from sim_satellite.segmentation.models import _segmentation_input_channels, build_segmentation_model
 from sim_satellite.segmentation.vae import VAEFeatureEncoder, _load_vae_feature_encoder
@@ -23,7 +24,8 @@ from sim_satellite.segmentation.vae import VAEFeatureEncoder, _load_vae_feature_
 class SegmentationCheckpoint:
     model: nn.Module
     config: dict[str, Any]
-    vae_encoder: VAEFeatureEncoder
+    classes: tuple[str, ...]
+    vae_encoder: VAEFeatureEncoder | None
 
 
 def _save_checkpoint(
@@ -35,9 +37,10 @@ def _save_checkpoint(
     step: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    model_name = _checkpoint_model_name(config)
     torch.save(
         {
-            "model": VAE_ASPP_UNET_MODEL_NAME,
+            "model": model_name,
             "model_state": model.state_dict(),
             "classes": list(OPENEARTHMAP_CLASSES),
             "config": config,
@@ -66,30 +69,64 @@ def _load_segmentation_checkpoint(path: Path, *, device: str) -> SegmentationChe
             f"expected one of {', '.join(SUPPORTED_SEGMENTATION_MODEL_NAMES)}: {path}"
         )
     classes = checkpoint.get("classes")
-    if not isinstance(classes, Sequence):
+    if not isinstance(classes, Sequence) or isinstance(classes, (str, bytes)):
         raise RuntimeError(f"Segmentation checkpoint classes must be a sequence: {path}")
-    if tuple(classes) != OPENEARTHMAP_CLASSES:
+    classes = tuple(str(class_name) for class_name in classes)
+    if classes != OPENEARTHMAP_CLASSES:
         raise RuntimeError(f"Segmentation checkpoint classes do not match OpenEarthMap: {path}")
     state = checkpoint.get("model_state")
     if not isinstance(state, Mapping):
         raise RuntimeError(f"Segmentation checkpoint is missing model_state: {path}")
-    vae_encoder = _load_vae_feature_encoder(
-        dict(config),
-        device=torch.device(device),
-        checkpoint_path=path,
-    )
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        input_channels=_segmentation_input_channels(config),
-        vae_latent_channels=_checkpoint_vae_latent_channels(
+    vae_encoder = None
+    vae_latent_channels = 0
+    if segmentation_model_uses_vae_features(model_name):
+        vae_encoder = _load_vae_feature_encoder(
+            dict(config),
+            device=torch.device(device),
+            checkpoint_path=path,
+        )
+        vae_latent_channels = _checkpoint_vae_latent_channels(
             config,
             vae_encoder=vae_encoder,
             checkpoint_path=path,
-        ),
+        )
+    model = build_segmentation_model(
+        num_classes=len(classes),
+        input_channels=_segmentation_input_channels(config),
+        vae_latent_channels=vae_latent_channels,
+        model_name=model_name,
+        pretrained_backbone=_checkpoint_pretrained_backbone(config, checkpoint_path=path),
     ).to(device)
     model.load_state_dict(state)
     model.eval()
-    return SegmentationCheckpoint(model=model, config=dict(config), vae_encoder=vae_encoder)
+    return SegmentationCheckpoint(
+        model=model,
+        config=dict(config),
+        classes=classes,
+        vae_encoder=vae_encoder,
+    )
+
+
+def _checkpoint_model_name(config: Mapping[str, Any]) -> str:
+    raw_value = config.get("model_name")
+    if raw_value is None:
+        return VAE_ASPP_UNET_MODEL_NAME
+    if not isinstance(raw_value, str):
+        raise RuntimeError("Segmentation checkpoint config model_name must be a string")
+    return raw_value
+
+
+def _checkpoint_pretrained_backbone(
+    config: Mapping[str, Any],
+    *,
+    checkpoint_path: Path,
+) -> bool:
+    raw_value = config.get("pretrained_backbone", False)
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise RuntimeError(
+        f"Segmentation checkpoint config pretrained_backbone must be a boolean: {checkpoint_path}"
+    )
 
 
 def _checkpoint_vae_latent_channels(

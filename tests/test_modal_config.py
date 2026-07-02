@@ -11,6 +11,7 @@ from sim_satellite import modal_app
 from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
+from sim_satellite.segmentation import SegmentationPredictionConfig
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.vae.research import VAEResearchManifestConfig
 from sim_satellite.vae.training import VAETrainingConfig
@@ -211,6 +212,45 @@ def test_modal_inference_enters_app_run_with_valid_data(
         "output_path": "/artifacts/generated/sample.pt",
         "manifest_path": "/data/openearthmap/manifest.jsonl",
         "mask_path": "/data/openearthmap/extracted/train/labels/tile.png",
+    }
+
+
+def test_modal_segmentation_prediction_enters_app_run_with_valid_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_data_file(tmp_path, "unseen/images/tile.png", content=b"image")
+    fake_app = _FakeApp()
+    fake_predict_segmentation_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(
+        monkeypatch,
+        fake_app,
+        predict_segmentation_remote=fake_predict_segmentation_remote,
+    )
+
+    config = SegmentationPredictionConfig(
+        checkpoint_path="artifacts/checkpoints/seg.pt",
+        class_logit_biases={"water": -0.8},
+        images_dir="data/unseen/images",
+        output_dir="artifacts/segmentation-predictions/production-openearth-v1",
+        tile_scales=(0.75, 1.0, 1.25),
+        feather_blending=True,
+        confidence_threshold=0.8,
+    )
+
+    result = modal_app.run_segmentation_prediction_target(config)
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    assert fake_app.enter_calls == 1
+    assert fake_app.exit_calls == 1
+    assert fake_predict_segmentation_remote.received == {
+        **asdict(config),
+        "device": "cuda",
+        "checkpoint_path": "/artifacts/checkpoints/seg.pt",
+        "images_dir": "/data/unseen/images",
+        "output_dir": "/artifacts/segmentation-predictions/production-openearth-v1",
     }
 
 
@@ -544,6 +584,7 @@ def _install_modal_fakes(
     train_vae_remote: object | None = None,
     vae_research_manifest_remote: object | None = None,
     infer_remote: object | None = None,
+    predict_segmentation_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
     train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
@@ -551,11 +592,15 @@ def _install_modal_fakes(
         vae_research_manifest_remote if vae_research_manifest_remote is not None else object()
     )
     infer_remote = infer_remote if infer_remote is not None else object()
+    predict_segmentation_remote = (
+        predict_segmentation_remote if predict_segmentation_remote is not None else object()
+    )
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
     monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
     monkeypatch.setattr(modal_app, "vae_research_manifest_remote", vae_research_manifest_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
+    monkeypatch.setattr(modal_app, "predict_segmentation_remote", predict_segmentation_remote)
 
 
 def _write_data_file(tmp_path: Path, relative_path: str, *, content: bytes = b"") -> Path:
@@ -622,15 +667,15 @@ class _FakeRemote:
     def __init__(self, app: _FakeApp, result: object) -> None:
         self.app = app
         self.result = result
-        self.received: object | None = None
+        self.received: dict[str, object] | None = None
 
-    def remote(self, config: object) -> object:
+    def remote(self, config: dict[str, object]) -> object:
         assert self.app.enter_calls == 1
         assert self.app.exit_calls == 0
         self.received = config
         return self.result
 
-    def spawn(self, config: object) -> _FakeFunctionCall:
+    def spawn(self, config: dict[str, object]) -> _FakeFunctionCall:
         assert self.app.enter_calls == 1
         assert self.app.exit_calls == 0
         self.received = config

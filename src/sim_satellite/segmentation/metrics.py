@@ -110,10 +110,15 @@ def _segmentation_metrics(
         if include_unlabeled_iou or class_id != 0:
             class_iou_values.append(value)
     total = int(confusion.sum().item())
+    labeled_total = int(confusion[1:].sum().item()) if confusion.shape[0] > 1 else 0
     pixel_accuracy = float(true_positive.sum().item() / total) if total else 0.0
+    labeled_pixel_accuracy = (
+        float(true_positive[1:].sum().item() / labeled_total) if labeled_total else 0.0
+    )
     mean_iou = sum(class_iou_values) / len(class_iou_values) if class_iou_values else 0.0
     return {
         "mean_iou": mean_iou,
         "pixel_accuracy": pixel_accuracy,
+        "labeled_pixel_accuracy": labeled_pixel_accuracy,
         "class_iou": class_iou,
     }

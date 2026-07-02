@@ -27,8 +27,10 @@ from sim_satellite.infer import (
 )
 from sim_satellite.segmentation import (
     SegmentationEvaluationConfig,
+    SegmentationPredictionConfig,
     SegmentationTrainingConfig,
     evaluate_segmentation_model,
+    predict_segmentation_masks,
     train_segmentation_model,
 )
 from sim_satellite.train import run_training
@@ -144,7 +146,7 @@ if LOCAL_LANDCOVERAI_ARCHIVE_PATH:
 
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 data_volume = modal.Volume.from_name(DATA_VOLUME_NAME, create_if_missing=True)
-modal_volumes = {
+modal_volumes: dict[Any, Any] = {
     str(MODAL_ARTIFACT_ROOT): artifact_volume,
     str(MODAL_DATA_ROOT): data_volume,
 }
@@ -269,7 +271,39 @@ def train_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
 def evaluate_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
     artifact_volume.reload()
-    result = asdict(evaluate_segmentation_model(SegmentationEvaluationConfig(**config)))
+    result = asdict(
+        evaluate_segmentation_model(
+            SegmentationEvaluationConfig(**config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_segmentation_evaluation_progress",
+                message=message,
+            ),
+        )
+    )
+    artifact_volume.commit()
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
+    gpu=MODAL_INFERENCE_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes=modal_volumes,
+)
+def predict_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
+    data_volume.reload()
+    artifact_volume.reload()
+    result = asdict(
+        predict_segmentation_masks(
+            SegmentationPredictionConfig(**config),
+            progress=lambda message: _print_modal_data_event(
+                "modal_segmentation_prediction_progress",
+                message=message,
+            ),
+        )
+    )
     artifact_volume.commit()
     result["execution_target"] = "modal"
     return result
@@ -373,6 +407,15 @@ def run_segmentation_evaluation_target(
             return evaluate_segmentation_remote.remote(modal_config)
 
 
+def run_segmentation_prediction_target(
+    config: SegmentationPredictionConfig,
+) -> dict[str, Any]:
+    modal_config = _modal_segmentation_prediction_config(config)
+    with modal.enable_output():
+        with app.run():
+            return predict_segmentation_remote.remote(modal_config)
+
+
 def run_inference_target(
     config: InferenceConfig,
 ) -> dict[str, Any]:
@@ -458,6 +501,21 @@ def _modal_segmentation_evaluation_config(config: SegmentationEvaluationConfig) 
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
     if config.output_path:
         values["output_path"] = _modal_artifact_path(config.output_path)
+    return values
+
+
+def _modal_segmentation_prediction_config(config: SegmentationPredictionConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["device"] = "cuda"
+    values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
+    values["output_dir"] = _modal_artifact_path(config.output_dir)
+    if config.images_manifest_path:
+        values["images_manifest_path"] = _modal_data_path(
+            config.images_manifest_path,
+            field_name="images_manifest_path",
+        )
+    if config.images_dir:
+        values["images_dir"] = _modal_data_path(config.images_dir, field_name="images_dir")
     return values
 
 

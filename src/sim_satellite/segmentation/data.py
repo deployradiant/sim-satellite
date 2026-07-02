@@ -313,14 +313,36 @@ def _random_square_crop_box(
 def _tile_windows(
     image_size: tuple[int, int],
     tile_size: int,
+    *,
+    stride: int = 0,
 ) -> tuple[tuple[int, int, int, int], ...]:
     width, height = image_size
     if width < 1 or height < 1:
         raise ValueError(f"Invalid image size: {image_size}")
+    if tile_size < 1:
+        raise ValueError("tile_size must be positive")
+    if stride < 0:
+        raise ValueError("stride must be non-negative")
+    if stride == 0:
+        stride = tile_size
+
     windows: list[tuple[int, int, int, int]] = []
-    for top in range(0, height, tile_size):
+    for top in _tile_starts(height, tile_size, stride):
         bottom = min(height, top + tile_size)
-        for left in range(0, width, tile_size):
+        for left in _tile_starts(width, tile_size, stride):
             right = min(width, left + tile_size)
             windows.append((left, top, right, bottom))
     return tuple(windows)
+
+
+def _tile_starts(extent: int, tile_size: int, stride: int) -> tuple[int, ...]:
+    if extent <= tile_size:
+        return (0,)
+    if stride >= tile_size:
+        return tuple(range(0, extent, tile_size))
+
+    starts = list(range(0, extent - tile_size + 1, stride))
+    final_start = extent - tile_size
+    if starts[-1] != final_start:
+        starts.append(final_start)
+    return tuple(starts)

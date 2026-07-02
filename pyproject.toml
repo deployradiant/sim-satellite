@@ -11,6 +11,8 @@ dependencies = [
     "matplotlib>=3.9",
     "modal>=1.0",
     "pillow>=10.0",
+    "segmentation-models-pytorch>=0.5.0",
+    "timm>=1.0",
     "torch>=2.3",
     "uvicorn>=0.30",
 ]

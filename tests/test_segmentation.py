@@ -9,6 +9,7 @@ import torch
 from click.testing import CliRunner
 from PIL import Image
 
+import sim_satellite.segmentation.cli as segmentation_cli
 from sim_satellite.cli import cli
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
@@ -16,6 +17,7 @@ from sim_satellite.data.prepared import PreparedSample, write_prepared_sample
 from sim_satellite.model import ModelConfig
 from sim_satellite.segmentation.checkpoint import _load_segmentation_checkpoint, _save_checkpoint
 from sim_satellite.segmentation.config import (
+    SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
     VAE_ASPP_UNET_MODEL_NAME,
     SegmentationEvaluationConfig,
     SegmentationPredictionConfig,
@@ -27,9 +29,12 @@ from sim_satellite.segmentation.data import (
     _prepared_crop,
     _samples_for_split,
     _shuffled_limit_samples,
+    _tile_windows,
 )
 from sim_satellite.segmentation.inference import (
+    _apply_class_logit_biases,
     _read_image_records,
+    _scaled_tile_windows_config,
     evaluate_segmentation_model,
     predict_segmentation_masks,
 )
@@ -60,6 +65,34 @@ def test_segmentation_metrics_exclude_unlabeled_from_mean_iou() -> None:
     assert metrics["class_iou"]["road"] == pytest.approx(0.75)
     assert metrics["class_iou"]["building"] == pytest.approx(2 / 3)
     assert metrics["mean_iou"] == pytest.approx((0.75 + 2 / 3) / 2)
+    assert metrics["labeled_pixel_accuracy"] == pytest.approx(5 / 6)
+
+
+def test_segmentation_tile_windows_support_overlap_and_cover_edges() -> None:
+    assert _tile_windows((17, 16), 16, stride=8) == (
+        (0, 0, 16, 16),
+        (1, 0, 17, 16),
+    )
+
+
+def test_segmentation_tile_scales_preserve_stride_ratio() -> None:
+    assert _scaled_tile_windows_config(
+        image_size=16,
+        tile_stride=8,
+        tile_scales=(0.75, 1.0, 1.25),
+    ) == ((12, 6), (16, 8), (20, 10))
+
+
+def test_segmentation_class_logit_biases_adjust_logits() -> None:
+    road_id = OPENEARTHMAP_CLASSES.index("road")
+    building_id = OPENEARTHMAP_CLASSES.index("building")
+    logits = torch.zeros((len(OPENEARTHMAP_CLASSES), 1, 1), dtype=torch.float32)
+    logits[road_id] = 1.0
+    logits[building_id] = 0.9
+
+    biased = _apply_class_logit_biases(logits, {"building": 0.2})
+
+    assert biased[building_id, 0, 0] > biased[road_id, 0, 0]
 
 
 def test_segmentation_class_weights_and_dice_loss_are_directional() -> None:
@@ -107,6 +140,21 @@ def test_segmentation_model_requires_vae_latent_channels() -> None:
             num_classes=len(OPENEARTHMAP_CLASSES),
             vae_latent_channels=0,
         )
+
+
+def test_smp_unet_b4_scse_model_does_not_require_vae_latents() -> None:
+    model = build_segmentation_model(
+        num_classes=len(OPENEARTHMAP_CLASSES),
+        vae_latent_channels=0,
+        model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+    )
+    model.eval()
+    image = torch.zeros((1, 3, 32, 32), dtype=torch.float32)
+
+    with torch.no_grad():
+        logits = model(image)
+
+    assert tuple(logits.shape) == (1, len(OPENEARTHMAP_CLASSES), 32, 32)
 
 
 def test_vae_aspp_unet_segmenter_accepts_vae_latents() -> None:
@@ -299,8 +347,10 @@ def test_segmentation_predict_writes_class_id_and_color_masks(tmp_path: Path) ->
     assert Path(records[0]["mask"]).exists()
     assert Path(records[0]["color_mask"]).exists()
     assert Path(records[0]["confidence_mask"]).exists()
-    assert records[0]["prediction_source"] == "vae-fused-segmentation-classifier"
+    assert records[0]["prediction_source"] == "segmentation-classifier"
+    assert records[0]["class_logit_biases"] == {}
     assert records[0]["confidence_threshold"] == 0.0
+    assert records[0]["feather_blending"] is False
     assert 0.0 <= records[0]["mean_confidence"] <= 1.0
     assert records[0]["high_confidence_fraction"] == 1.0
     with Image.open(records[0]["mask"]) as mask:
@@ -398,6 +448,7 @@ def test_vae_checkpoint_path_resolves_from_classifier_artifact_root(
 
     checkpoint = _load_segmentation_checkpoint(checkpoint_path, device="cpu")
 
+    assert checkpoint.vae_encoder is not None
     assert checkpoint.vae_encoder.latent_channels == vae_config.latent_channels
 
 
@@ -431,6 +482,7 @@ def test_legacy_deeplab_unet_checkpoint_name_still_loads(
 
     loaded = _load_segmentation_checkpoint(checkpoint_path, device="cpu")
 
+    assert loaded.vae_encoder is not None
     assert loaded.vae_encoder.latent_channels == vae_config.latent_channels
 
 
@@ -498,6 +550,76 @@ def test_segmentation_train_is_modal_only_and_evaluate_exposes_targets() -> None
     assert evaluate_help.exit_code == 0
     assert "--target" not in train_help.output
     assert "--target [modal|local]" in evaluate_help.output
+
+
+def test_segmentation_evaluate_production_preset_applies_calibrated_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[SegmentationEvaluationConfig, str]] = []
+
+    def fake_run(config: SegmentationEvaluationConfig, target: str) -> dict[str, object]:
+        captured.append((config, target))
+        return {"execution_target": target}
+
+    monkeypatch.setattr(segmentation_cli, "_run_evaluation_with_target", fake_run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "segmentation-evaluate",
+            "--target",
+            "modal",
+            "--inference-preset",
+            segmentation_cli.PRODUCTION_OPENEARTH_PRESET_NAME,
+        ],
+    )
+
+    assert result.exit_code == 0
+    config, target = captured[0]
+    assert target == "modal"
+    assert config.checkpoint_path == segmentation_cli.PRODUCTION_OPENEARTH_CHECKPOINT_PATH
+    assert config.class_logit_biases == segmentation_cli.PRODUCTION_OPENEARTH_CLASS_LOGIT_BIASES
+    assert config.confidence_threshold == segmentation_cli.PRODUCTION_OPENEARTH_CONFIDENCE_THRESHOLD
+    assert config.tile_stride == segmentation_cli.PRODUCTION_OPENEARTH_TILE_STRIDE
+    assert config.tile_scales == segmentation_cli.PRODUCTION_OPENEARTH_TILE_SCALES
+    assert config.feather_blending is True
+
+
+def test_segmentation_predict_production_preset_applies_calibrated_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[tuple[SegmentationPredictionConfig, str]] = []
+
+    def fake_run(config: SegmentationPredictionConfig, target: str) -> dict[str, object]:
+        captured.append((config, target))
+        return {"execution_target": target}
+
+    monkeypatch.setattr(segmentation_cli, "_run_prediction_with_target", fake_run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "segmentation-predict",
+            "--target",
+            "modal",
+            "--inference-preset",
+            segmentation_cli.PRODUCTION_OPENEARTH_PRESET_NAME,
+            "--images-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    config, target = captured[0]
+    assert target == "modal"
+    assert config.checkpoint_path == segmentation_cli.PRODUCTION_OPENEARTH_CHECKPOINT_PATH
+    assert config.class_logit_biases == segmentation_cli.PRODUCTION_OPENEARTH_CLASS_LOGIT_BIASES
+    assert config.confidence_threshold == segmentation_cli.PRODUCTION_OPENEARTH_CONFIDENCE_THRESHOLD
+    assert config.tile_stride == segmentation_cli.PRODUCTION_OPENEARTH_TILE_STRIDE
+    assert config.tile_scales == segmentation_cli.PRODUCTION_OPENEARTH_TILE_SCALES
+    assert config.feather_blending is True
+    assert config.output_dir == "artifacts/segmentation-predictions/production-openearth-v1"
 
 
 def _write_segmentation_fixture(tmp_path: Path, *, samples: int) -> Path:

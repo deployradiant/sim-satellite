@@ -9,7 +9,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from sim_satellite.segmentation.config import SegmentationTrainingConfig
+from sim_satellite.segmentation.config import (
+    LEGACY_SEGMENTATION_MODEL_NAMES,
+    SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+    VAE_ASPP_UNET_MODEL_NAME,
+    SegmentationTrainingConfig,
+)
 
 
 def build_segmentation_model(
@@ -17,7 +22,19 @@ def build_segmentation_model(
     num_classes: int,
     input_channels: int = 3,
     vae_latent_channels: int,
+    model_name: str = VAE_ASPP_UNET_MODEL_NAME,
+    pretrained_backbone: bool = False,
 ) -> nn.Module:
+    if model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME:
+        return SegmentationModelsPyTorchUNet(
+            encoder_name="efficientnet-b4",
+            decoder_attention_type="scse",
+            input_channels=input_channels,
+            num_classes=num_classes,
+            pretrained_backbone=pretrained_backbone,
+        )
+    if model_name not in (*LEGACY_SEGMENTATION_MODEL_NAMES, VAE_ASPP_UNET_MODEL_NAME):
+        raise ValueError(f"Unsupported segmentation model: {model_name}")
     return VAEASPPUNetSegmentationModel(
         num_classes=num_classes,
         input_channels=input_channels,
@@ -45,11 +62,82 @@ def _forward_segmentation_model(
     model: nn.Module,
     images: torch.Tensor,
     *,
-    vae_latents: torch.Tensor,
+    vae_latents: torch.Tensor | None,
 ) -> torch.Tensor:
-    if not isinstance(model, VAEASPPUNetSegmentationModel):
-        raise RuntimeError("VAE features require vae-aspp-unet-v1")
-    return model(images, vae_latents)
+    if isinstance(model, VAEASPPUNetSegmentationModel):
+        if vae_latents is None:
+            raise RuntimeError("VAE-fused segmentation requires VAE features")
+        return model(images, vae_latents)
+    if isinstance(model, SegmentationModelsPyTorchUNet):
+        return model(images)
+    raise RuntimeError(f"Unsupported segmentation model type: {type(model).__name__}")
+
+
+class SegmentationModelsPyTorchUNet(nn.Module):
+    _rgb_mean: torch.Tensor
+    _rgb_std: torch.Tensor
+
+    def __init__(
+        self,
+        *,
+        encoder_name: str,
+        decoder_attention_type: str | None,
+        input_channels: int,
+        num_classes: int,
+        pretrained_backbone: bool,
+    ) -> None:
+        super().__init__()
+        import segmentation_models_pytorch as smp
+
+        if input_channels < 1:
+            raise ValueError("input_channels must be positive")
+        if input_channels % 3 != 0:
+            raise ValueError("SMP segmenters expect RGB channel groups")
+
+        encoder_weights = "imagenet" if pretrained_backbone else None
+        self.model = smp.Unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=input_channels,
+            classes=num_classes,
+            decoder_attention_type=decoder_attention_type,
+        )
+        mean = (0.0, 0.0, 0.0)
+        std = (1.0, 1.0, 1.0)
+        if encoder_weights is not None:
+            preprocessing = smp.encoders.get_preprocessing_params(
+                encoder_name,
+                pretrained=encoder_weights,
+            )
+            mean = tuple(float(value) for value in preprocessing["mean"])
+            std = tuple(float(value) for value in preprocessing["std"])
+        channel_groups = input_channels // 3
+        self.input_channels = input_channels
+        self.register_buffer(
+            "_rgb_mean",
+            torch.tensor(mean * channel_groups, dtype=torch.float32).view(
+                1,
+                input_channels,
+                1,
+                1,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_rgb_std",
+            torch.tensor(std * channel_groups, dtype=torch.float32).view(
+                1,
+                input_channels,
+                1,
+                1,
+            ),
+            persistent=False,
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        if image.shape[1] != self.input_channels:
+            raise RuntimeError(f"SMP segmenters expect {self.input_channels} input channels")
+        return self.model((image - self._rgb_mean) / self._rgb_std)
 
 
 class VAEASPPUNetSegmentationModel(nn.Module):

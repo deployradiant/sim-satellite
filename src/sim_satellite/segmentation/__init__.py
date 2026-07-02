@@ -4,7 +4,9 @@ from sim_satellite.segmentation.cli import evaluate_cli, predict_cli, train_cli
 from sim_satellite.segmentation.config import (
     DEFAULT_SEGMENTATION_CHECKPOINT_PATH,
     DEFAULT_SEGMENTATION_PREDICTION_DIR,
+    DEFAULT_SEGMENTATION_PREDICTION_TILE_STRIDE,
     DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH,
+    SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
     VAE_ASPP_UNET_MODEL_NAME,
     SegmentationEvaluationConfig,
     SegmentationEvaluationResult,
@@ -27,7 +29,9 @@ from sim_satellite.segmentation.training import train_segmentation_model
 __all__ = [
     "DEFAULT_SEGMENTATION_CHECKPOINT_PATH",
     "DEFAULT_SEGMENTATION_PREDICTION_DIR",
+    "DEFAULT_SEGMENTATION_PREDICTION_TILE_STRIDE",
     "DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH",
+    "SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME",
     "VAE_ASPP_UNET_MODEL_NAME",
     "VAEASPPUNetSegmentationModel",
     "SegmentationEvaluationConfig",
