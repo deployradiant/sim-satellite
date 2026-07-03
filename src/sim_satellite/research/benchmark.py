@@ -46,14 +46,28 @@ RUN_RECORD_VERSION = 1
 REAL_ADHERENCE_CACHE_VERSION = 1
 REAL_ADHERENCE_CACHE_KIND = "real-mask-adherence"
 TARGET_DIRECTIONS = ("higher", "lower")
+EVAL_PROTOCOL_FIELDS = (
+    "manifest_path",
+    "split",
+    "seed",
+    "samples",
+    "image_size",
+    "segmentation_checkpoint_path",
+)
+SAMPLER_PROTOCOL_FIELDS = ("generation_steps", "guidance_scale", "precision", "batch_size")
 
 
 @dataclass(frozen=True)
 class BenchmarkProtocol:
-    """The frozen evaluation contract shared by every comparable run.
+    """The evaluation contract shared by every comparable run.
 
-    Never edit a committed protocol in place; copy the spec file to a new
-    version instead. Runs are only comparable within one protocol hash.
+    Only the eval-defining fields (EVAL_PROTOCOL_FIELDS) gate comparability:
+    they say what the model is measured on, are hashed into the eval hash, and
+    must never change in a committed spec — copy the file to a new version
+    instead. The sampler fields (generation_steps, guidance_scale, precision,
+    batch_size) configure the system under test: they are recorded per run and
+    shown on the leaderboard, but runs remain comparable across them because
+    what we care about is performance, however the model achieves it.
     """
 
     manifest_path: str = DEFAULT_MANIFEST_PATH
@@ -167,8 +181,15 @@ def load_benchmark_spec_values(values: Mapping[str, Any]) -> BenchmarkSpec:
     return spec
 
 
-def benchmark_protocol_hash(protocol: BenchmarkProtocol) -> str:
-    canonical = json.dumps(asdict(protocol), sort_keys=True)
+def benchmark_eval_hash(protocol: BenchmarkProtocol) -> str:
+    """Hash only what the model is measured on, not how it is sampled.
+
+    Sampler settings (steps, guidance, precision, batch size) are part of the
+    system under test, so changing them must not fragment the leaderboard.
+    """
+
+    eval_fields = {name: getattr(protocol, name) for name in EVAL_PROTOCOL_FIELDS}
+    canonical = json.dumps(eval_fields, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -244,7 +265,7 @@ def run_benchmark(
     started_at_epoch_utc = time.time()
     started_at_monotonic = time.monotonic()
     protocol = spec.protocol
-    protocol_hash = benchmark_protocol_hash(protocol)
+    eval_hash = benchmark_eval_hash(protocol)
     selection = select_benchmark_samples(protocol, manifest_path=options.manifest_path)
     device = torch.device(options.device)
 
@@ -261,7 +282,7 @@ def run_benchmark(
     scorer = _load_mask_adherence_scorer(
         spec,
         options,
-        protocol_hash=protocol_hash,
+        eval_hash=eval_hash,
         sample_digest=selection.sample_digest,
         real_adherence_cache=real_adherence_cache,
         progress=progress,
@@ -274,6 +295,7 @@ def run_benchmark(
     )
     preloaded = training_data.preload_samples(selection.eval_samples)
     batches = tuple(iter_batches(selection.eval_samples, protocol.batch_size))
+    sample_offset = 0
     for batch_index, batch in enumerate(batches):
         prepared = tuple(preloaded[sample] for sample in batch)
         crop_boxes = [
@@ -297,7 +319,14 @@ def run_benchmark(
             steps=protocol.generation_steps,
             guidance_scale=protocol.guidance_scale,
             precision=protocol.precision,
+            noise=_per_sample_noise(
+                protocol,
+                generator.model_config,
+                sample_offset=sample_offset,
+                count=len(batch),
+            ),
         )
+        sample_offset += len(batch)
         real = (clean.float().clamp(-1.0, 1.0) + 1.0) / 2.0
         accumulator.update(generated, real, semantic_mask=semantic_mask, torch=torch)
         if scorer is not None:
@@ -319,7 +348,7 @@ def run_benchmark(
     record: dict[str, Any] = {
         "record_version": RUN_RECORD_VERSION,
         "benchmark": spec.name,
-        "protocol_hash": protocol_hash,
+        "eval_hash": eval_hash,
         "protocol": asdict(protocol),
         "experiment": options.experiment,
         "notes": options.notes,
@@ -335,10 +364,37 @@ def run_benchmark(
     record["run_id"] = _run_id(options.experiment, started_at_epoch_utc, record)
     if scorer is not None:
         record["real_adherence_cache"] = scorer.real_cache_payload(
-            protocol_hash=protocol_hash,
+            eval_hash=eval_hash,
             sample_digest=selection.sample_digest,
         )
     return record
+
+
+def _per_sample_noise(
+    protocol: BenchmarkProtocol,
+    model_config: Any,
+    *,
+    sample_offset: int,
+    count: int,
+) -> torch.Tensor:
+    """Seed generation noise per eval sample, not per batch.
+
+    This keeps results identical for any batch_size, so batching is purely a
+    throughput knob and stays out of the eval hash.
+    """
+
+    shape = (model_config.image_channels, model_config.image_size, model_config.image_size)
+    noise = [
+        torch.randn(
+            shape,
+            generator=torch.Generator(device="cpu").manual_seed(
+                protocol.seed + 20_000 + sample_offset + index
+            ),
+            device="cpu",
+        )
+        for index in range(count)
+    ]
+    return torch.stack(noise)
 
 
 def write_run_record(record: Mapping[str, Any], runs_dir: Path) -> Path:
@@ -454,23 +510,23 @@ class _MaskAdherenceScorer:
             "real_scores_from_cache": self.real_scores_from_cache,
         }
 
-    def real_cache_payload(self, *, protocol_hash: str, sample_digest: str) -> dict[str, Any]:
+    def real_cache_payload(self, *, eval_hash: str, sample_digest: str) -> dict[str, Any]:
         return {
             "cache_version": REAL_ADHERENCE_CACHE_VERSION,
             "kind": REAL_ADHERENCE_CACHE_KIND,
-            "protocol_hash": protocol_hash,
+            "eval_hash": eval_hash,
             "sample_digest": sample_digest,
             "segmentation_checkpoint_sha256": self.checkpoint_sha256,
             "confusion": self.real_confusion.tolist(),
         }
 
 
-def real_adherence_cache_path(cache_dir: Path, protocol_hash: str) -> Path:
-    return cache_dir / f"real-adherence-{protocol_hash[:16]}.json"
+def real_adherence_cache_path(cache_dir: Path, eval_hash: str) -> Path:
+    return cache_dir / f"real-adherence-{eval_hash[:16]}.json"
 
 
-def load_real_adherence_cache(cache_dir: Path, protocol_hash: str) -> dict[str, Any] | None:
-    path = real_adherence_cache_path(cache_dir, protocol_hash)
+def load_real_adherence_cache(cache_dir: Path, eval_hash: str) -> dict[str, Any] | None:
+    path = real_adherence_cache_path(cache_dir, eval_hash)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -481,11 +537,11 @@ def load_real_adherence_cache(cache_dir: Path, protocol_hash: str) -> dict[str, 
 
 
 def write_real_adherence_cache(cache_dir: Path, payload: Mapping[str, Any]) -> Path:
-    protocol_hash = payload.get("protocol_hash")
-    if not isinstance(protocol_hash, str) or not protocol_hash:
-        raise ValueError("Real-adherence cache payload is missing protocol_hash")
+    eval_hash = payload.get("eval_hash")
+    if not isinstance(eval_hash, str) or not eval_hash:
+        raise ValueError("Real-adherence cache payload is missing eval_hash")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = real_adherence_cache_path(cache_dir, protocol_hash)
+    path = real_adherence_cache_path(cache_dir, eval_hash)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
@@ -493,7 +549,7 @@ def write_real_adherence_cache(cache_dir: Path, payload: Mapping[str, Any]) -> P
 def _cached_real_confusion(
     cache: Mapping[str, Any] | None,
     *,
-    protocol_hash: str,
+    eval_hash: str,
     sample_digest: str,
     checkpoint_sha256: str,
 ) -> torch.Tensor | None:
@@ -503,7 +559,7 @@ def _cached_real_confusion(
         return None
     if cache.get("kind") != REAL_ADHERENCE_CACHE_KIND:
         return None
-    if cache.get("protocol_hash") != protocol_hash:
+    if cache.get("eval_hash") != eval_hash:
         return None
     if cache.get("sample_digest") != sample_digest:
         return None
@@ -526,7 +582,7 @@ def _load_mask_adherence_scorer(
     spec: BenchmarkSpec,
     options: BenchmarkRunOptions,
     *,
-    protocol_hash: str,
+    eval_hash: str,
     sample_digest: str,
     real_adherence_cache: Mapping[str, Any] | None,
     progress: ProgressReporter | None,
@@ -543,7 +599,7 @@ def _load_mask_adherence_scorer(
     checkpoint_sha256 = _file_sha256(Path(segmentation_checkpoint_path))
     cached_real_confusion = _cached_real_confusion(
         real_adherence_cache,
-        protocol_hash=protocol_hash,
+        eval_hash=eval_hash,
         sample_digest=sample_digest,
         checkpoint_sha256=checkpoint_sha256,
     )
@@ -729,7 +785,7 @@ def _run_with_target(
                 spec.protocol,
                 manifest_path=options.manifest_path,
             ).payload()
-            result["protocol_hash"] = benchmark_protocol_hash(spec.protocol)
+            result["eval_hash"] = benchmark_eval_hash(spec.protocol)
         else:
             result = run_benchmark(
                 spec,
@@ -821,7 +877,7 @@ def benchmark_cli(
             _validate_run_options(options)
             real_adherence_cache = load_real_adherence_cache(
                 Path(cache_dir),
-                benchmark_protocol_hash(spec.protocol),
+                benchmark_eval_hash(spec.protocol),
             )
         result = _run_with_target(
             spec,

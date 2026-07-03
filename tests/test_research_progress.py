@@ -9,7 +9,7 @@ from sim_satellite.research.benchmark import (
     BenchmarkProtocol,
     BenchmarkSpec,
     BenchmarkTarget,
-    benchmark_protocol_hash,
+    benchmark_eval_hash,
 )
 from sim_satellite.research.progress import (
     build_progress_report,
@@ -43,7 +43,7 @@ def _record(
     created_at: float,
     mean_iou: float | None,
     rgb_mae: float | None = 0.1,
-    protocol_hash: str = "",
+    eval_hash: str = "",
     sample_digest: str = "digest-a",
 ) -> dict[str, object]:
     return {
@@ -53,7 +53,7 @@ def _record(
         "notes": "",
         "created_at_epoch_utc": created_at,
         "git_commit": "abc",
-        "protocol_hash": protocol_hash or benchmark_protocol_hash(SPEC.protocol),
+        "eval_hash": eval_hash or benchmark_eval_hash(SPEC.protocol),
         "checkpoint": {"path": f"artifacts/{run_id}.pt", "model_parameters": 10},
         "data": {"sample_digest": sample_digest, "manifest_samples_by_source": {"oem": 4}},
         "generation": {"mask_rgb_mean_mae_macro": rgb_mae},
@@ -80,14 +80,14 @@ def test_progress_report_ranks_runs_and_tracks_targets() -> None:
         _record("baseline", created_at=1.0, mean_iou=0.20, rgb_mae=0.10),
         _record("winner", created_at=2.0, mean_iou=0.60, rgb_mae=0.05),
         _record("middle", created_at=3.0, mean_iou=0.40, rgb_mae=0.08),
-        _record("other-protocol", created_at=4.0, mean_iou=0.99, protocol_hash="different"),
+        _record("other-protocol", created_at=4.0, mean_iou=0.99, eval_hash="different"),
         _record("no-adherence", created_at=5.0, mean_iou=None),
     ]
 
     report = build_progress_report(SPEC, records)
 
     assert report["runs"] == 4
-    assert report["skipped_other_protocol"] == 1
+    assert report["skipped_other_eval"] == 1
     assert [entry["run_id"] for entry in report["leaderboard"]] == [
         "winner",
         "middle",

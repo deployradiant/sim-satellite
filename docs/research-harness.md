@@ -50,9 +50,19 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json \
 
 ## Protocol rules (what keeps runs comparable)
 
-- The spec's `protocol` block is hashed; `benchmark-progress` only compares
-  runs with the spec's exact protocol hash. Never edit a committed protocol in
-  place — copy the file to `flow-oem-v2.json` and start a new leaderboard.
+- Only the eval-defining protocol fields — `manifest_path`, `split`, `seed`,
+  `samples`, `image_size`, `segmentation_checkpoint_path` — are hashed into
+  the eval hash, and `benchmark-progress` only compares runs with the spec's
+  exact eval hash. Never edit those fields in a committed spec — copy the
+  file to `flow-oem-v2.json` and start a new leaderboard.
+- The sampler fields — `generation_steps`, `guidance_scale`, `precision`,
+  `batch_size` — configure the system under test, not the measurement. Runs
+  may vary them freely and stay on the same leaderboard: what we care about is
+  performance, however the model achieves it. Each run's sampler settings are
+  recorded and shown in a leaderboard column (with `wall_seconds`), so a win
+  bought with 10x more sampling steps is visible rather than hidden.
+- Generation noise is seeded per eval sample, not per batch, so `batch_size`
+  is purely a throughput knob and can never change scores.
 - The eval set is chosen deterministically: whole city groups are hash-ranked
   by the protocol seed and held out, then `samples` masks are drawn with the
   same seed. Each run records a `sample_digest`; if digests diverge between
@@ -99,17 +109,18 @@ ever contains human-labeled OpenEarthMap groups from the frozen holdout.
 
 Anything deterministic under a protocol is computed once and reused:
 
-- The judge's real-image scores are identical for every run under one
-  protocol (same frozen eval samples, same crops, same judge weights). The
-  first scored run computes them and the CLI writes
-  `benchmarks/cache/real-adherence-<protocol-hash>.json`; commit it with your
-  run record. Every later run — local or Modal, by any agent — sends the
-  cache along and only segments its *generated* images, which halves judge
-  inference and makes every run's `iou_ratio` denominator exactly identical.
-- The cache self-invalidates: it is keyed on the protocol hash, the eval
+- The judge's real-image scores are identical for every run under one eval
+  hash (same frozen eval samples, same crops, same judge weights — sampler
+  settings do not affect them). The first scored run computes them and the
+  CLI writes `benchmarks/cache/real-adherence-<eval-hash>.json`; commit it
+  with your run record. Every later run — local or Modal, by any agent, with
+  any sampler settings — sends the cache along and only segments its
+  *generated* images, which halves judge inference and makes every run's
+  `iou_ratio` denominator exactly identical.
+- The cache self-invalidates: it is keyed on the eval hash, the eval
   `sample_digest`, and the sha256 of the judge checkpoint file, so a changed
-  protocol, dataset, or judge silently falls back to recomputing (the run
-  record shows `mask_adherence.real_scores_from_cache`).
+  eval protocol, dataset, or judge silently falls back to recomputing (the
+  run record shows `mask_adherence.real_scores_from_cache`).
 - Datasets and prepared tensors are already cached in the Modal data volume
   (`_ensure_modal_training_data`); benchmark runs reuse them and never
   re-download.

@@ -1,9 +1,11 @@
 """Aggregate benchmark run records into a shared progress report.
 
 This is the read side of the benchmark harness: it scans the committed run
-records, keeps only runs that used the requested spec's exact protocol hash,
-and reports a leaderboard plus the remaining gap to each competitiveness
-target. It needs no GPU or dataset, so any agent can call it instantly.
+records, keeps only runs measured on the requested spec's eval hash (the
+data/measurement identity — sampler settings deliberately do not fragment the
+leaderboard), and reports a leaderboard plus the remaining gap to each
+competitiveness target. It needs no GPU or dataset, so any agent can call it
+instantly.
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ import click
 from sim_satellite.research.benchmark import (
     DEFAULT_RUNS_DIR,
     RUN_RECORD_VERSION,
+    SAMPLER_PROTOCOL_FIELDS,
     BenchmarkSpec,
     BenchmarkTarget,
-    benchmark_protocol_hash,
+    benchmark_eval_hash,
     load_benchmark_spec_file,
 )
 
@@ -60,8 +63,8 @@ def build_progress_report(
     *,
     baseline_run_id: str = "",
 ) -> dict[str, Any]:
-    protocol_hash = benchmark_protocol_hash(spec.protocol)
-    matching = [record for record in records if record.get("protocol_hash") == protocol_hash]
+    eval_hash = benchmark_eval_hash(spec.protocol)
+    matching = [record for record in records if record.get("eval_hash") == eval_hash]
     primary_target = _target_for_metric(spec, spec.primary_metric)
     leaderboard = sorted(
         (_leaderboard_entry(spec, record) for record in matching),
@@ -72,9 +75,9 @@ def build_progress_report(
     return {
         "benchmark": spec.name,
         "primary_metric": spec.primary_metric,
-        "protocol_hash": protocol_hash,
+        "eval_hash": eval_hash,
         "runs": len(matching),
-        "skipped_other_protocol": len(records) - len(matching),
+        "skipped_other_eval": len(records) - len(matching),
         "leaderboard": leaderboard,
         "baseline_run_id": baseline["run_id"] if baseline else None,
         "best_run_id": best["run_id"] if best else None,
@@ -89,9 +92,9 @@ def render_progress_markdown(report: Mapping[str, Any]) -> str:
         f"# Benchmark progress: {report['benchmark']}",
         "",
         f"Primary metric: `{report['primary_metric']}` | "
-        f"Protocol: `{str(report['protocol_hash'])[:16]}` | "
+        f"Eval: `{str(report['eval_hash'])[:16]}` | "
         f"Runs: {report['runs']} "
-        f"(skipped from other protocols: {report['skipped_other_protocol']})",
+        f"(skipped from other evals: {report['skipped_other_eval']})",
         "",
         "## Targets",
         "",
@@ -110,16 +113,16 @@ def render_progress_markdown(report: Mapping[str, Any]) -> str:
             "",
             "## Leaderboard",
             "",
-            "| Rank | Run | Experiment | Primary | Eval digest | Notes |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| Rank | Run | Experiment | Primary | Sampler | Eval digest | Notes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for rank, entry in enumerate(report["leaderboard"], start=1):
         digest = str(entry["sample_digest"] or "")[:8]
         lines.append(
             f"| {rank} | {entry['run_id']} | {entry['experiment']} | "
-            f"{_format_value(entry['primary_value'])} | {digest or '-'} | "
-            f"{entry['notes'] or '-'} |"
+            f"{_format_value(entry['primary_value'])} | {_format_sampler(entry['sampler'])} | "
+            f"{digest or '-'} | {entry['notes'] or '-'} |"
         )
     if report["warnings"]:
         lines.extend(["", "## Warnings", ""])
@@ -132,6 +135,8 @@ def _leaderboard_entry(spec: BenchmarkSpec, record: Mapping[str, Any]) -> dict[s
     data = data if isinstance(data, Mapping) else {}
     checkpoint = record.get("checkpoint")
     checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    protocol = record.get("protocol")
+    protocol = protocol if isinstance(protocol, Mapping) else {}
     return {
         "run_id": str(record.get("run_id", "")),
         "experiment": str(record.get("experiment", "")),
@@ -142,10 +147,22 @@ def _leaderboard_entry(spec: BenchmarkSpec, record: Mapping[str, Any]) -> dict[s
         "model_parameters": checkpoint.get("model_parameters"),
         "sample_digest": data.get("sample_digest"),
         "manifest_samples_by_source": data.get("manifest_samples_by_source"),
+        "sampler": {name: protocol.get(name) for name in SAMPLER_PROTOCOL_FIELDS},
         "primary_value": metric_value(record, spec.primary_metric),
         "metrics": {target.metric: metric_value(record, target.metric) for target in spec.targets},
         "wall_seconds": record.get("wall_seconds"),
     }
+
+
+def _format_sampler(sampler: Mapping[str, Any]) -> str:
+    steps = sampler.get("generation_steps")
+    guidance = sampler.get("guidance_scale")
+    precision = sampler.get("precision")
+    if steps is None and guidance is None:
+        return "-"
+    return (
+        f"{steps or '?'} steps, cfg {guidance if guidance is not None else '?'}, {precision or '?'}"
+    )
 
 
 def _sort_key(value: float | None, direction: str) -> tuple[int, float]:

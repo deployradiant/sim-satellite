@@ -17,7 +17,7 @@ from sim_satellite.research.benchmark import (
     BenchmarkRunOptions,
     BenchmarkSpec,
     BenchmarkTarget,
-    benchmark_protocol_hash,
+    benchmark_eval_hash,
     load_benchmark_spec_values,
     load_real_adherence_cache,
     real_adherence_cache_path,
@@ -155,15 +155,30 @@ def test_benchmark_spec_validation_rejects_bad_specs() -> None:
         load_benchmark_spec_values({**base, "protocol": {"precision": "fp16"}})
 
 
-def test_benchmark_protocol_hash_pins_protocol_not_targets() -> None:
+def test_benchmark_eval_hash_pins_eval_fields_not_sampler_config() -> None:
     protocol = BenchmarkProtocol(samples=4)
 
-    assert benchmark_protocol_hash(protocol) == benchmark_protocol_hash(
-        BenchmarkProtocol(samples=4)
-    )
-    assert benchmark_protocol_hash(protocol) != benchmark_protocol_hash(
-        replace(protocol, generation_steps=64)
-    )
+    assert benchmark_eval_hash(protocol) == benchmark_eval_hash(BenchmarkProtocol(samples=4))
+    for sampler_change in (
+        {"generation_steps": 64},
+        {"guidance_scale": 2.0},
+        {"precision": "bf16"},
+        {"batch_size": 1},
+    ):
+        assert benchmark_eval_hash(protocol) == benchmark_eval_hash(
+            replace(protocol, **sampler_change)
+        )
+    for eval_change in (
+        {"seed": 1},
+        {"samples": 8},
+        {"image_size": 64},
+        {"split": "val"},
+        {"manifest_path": "elsewhere.jsonl"},
+        {"segmentation_checkpoint_path": "judge.pt"},
+    ):
+        assert benchmark_eval_hash(protocol) != benchmark_eval_hash(
+            replace(protocol, **eval_change)
+        )
 
 
 def test_select_benchmark_samples_holds_out_whole_groups(tmp_path: Path) -> None:
@@ -226,7 +241,7 @@ def test_run_benchmark_scores_checkpoint_and_writes_record(tmp_path: Path) -> No
 
     assert record["record_version"] == 1
     assert record["benchmark"] == "unit-benchmark"
-    assert record["protocol_hash"] == benchmark_protocol_hash(protocol)
+    assert record["eval_hash"] == benchmark_eval_hash(protocol)
     assert record["experiment"] == "unit test"
     assert record["git_commit"] == "abc1234"
     assert record["generation"]["sample_count"] == 2
@@ -280,7 +295,7 @@ def test_run_benchmark_scores_mask_adherence_with_frozen_segmenter(tmp_path: Pat
     assert set(adherence["generated_class_iou"]) == set(OPENEARTHMAP_CLASSES)
     cache = record["real_adherence_cache"]
     assert cache["cache_version"] == 1
-    assert cache["protocol_hash"] == record["protocol_hash"]
+    assert cache["eval_hash"] == record["eval_hash"]
     assert cache["sample_digest"] == record["data"]["sample_digest"]
     assert cache["segmentation_checkpoint_sha256"]
     assert len(cache["confusion"]) == len(OPENEARTHMAP_CLASSES)
@@ -312,12 +327,38 @@ def test_run_benchmark_scores_mask_adherence_with_frozen_segmenter(tmp_path: Pat
     assert "real_adherence_cache" not in disabled
 
 
+def test_run_benchmark_results_do_not_depend_on_batch_size(tmp_path: Path) -> None:
+    manifest_path = _write_dataset(tmp_path)
+    checkpoint_path = tmp_path / "model.pt"
+    _write_diffusion_checkpoint(checkpoint_path)
+    protocol = BenchmarkProtocol(
+        manifest_path=str(manifest_path),
+        samples=2,
+        batch_size=2,
+        image_size=EVAL_IMAGE_SIZE,
+        generation_steps=2,
+        seed=7,
+    )
+    options = BenchmarkRunOptions(
+        checkpoint_path=str(checkpoint_path),
+        experiment="batch-invariance",
+        device="cpu",
+    )
+
+    batched = run_benchmark(_spec(protocol), options)
+    single = run_benchmark(_spec(replace(protocol, batch_size=1)), options)
+
+    assert batched["eval_hash"] == single["eval_hash"]
+    assert single["generation"]["mse"] == pytest.approx(batched["generation"]["mse"])
+    assert single["generation"]["ssim"] == pytest.approx(batched["generation"]["ssim"])
+
+
 def test_real_adherence_cache_roundtrips_and_ignores_invalid_files(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     payload = {
         "cache_version": 1,
         "kind": "real-mask-adherence",
-        "protocol_hash": "a" * 64,
+        "eval_hash": "a" * 64,
         "sample_digest": "b" * 64,
         "segmentation_checkpoint_sha256": "c" * 64,
         "confusion": [[0] * len(OPENEARTHMAP_CLASSES)] * len(OPENEARTHMAP_CLASSES),
@@ -331,7 +372,7 @@ def test_real_adherence_cache_roundtrips_and_ignores_invalid_files(tmp_path: Pat
     path.write_text("{broken", encoding="utf-8")
     assert load_real_adherence_cache(cache_dir, "a" * 64) is None
 
-    with pytest.raises(ValueError, match="protocol_hash"):
+    with pytest.raises(ValueError, match="eval_hash"):
         write_real_adherence_cache(cache_dir, {"confusion": []})
 
 

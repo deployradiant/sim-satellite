@@ -20,6 +20,7 @@ def generate_conditioned_images(
     steps: int,
     guidance_scale: float,
     precision: str = "float32",
+    noise: Any | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> Any:
     torch.manual_seed(seed)
@@ -30,7 +31,13 @@ def generate_conditioned_images(
         model_config.image_size,
         model_config.image_size,
     )
-    image = torch.randn(image_shape, generator=generator, device="cpu").to(device)
+    if noise is None:
+        noise = torch.randn(image_shape, generator=generator, device="cpu")
+    elif tuple(noise.shape) != image_shape:
+        raise ValueError(
+            f"Generation noise shape {tuple(noise.shape)} does not match images {image_shape}"
+        )
+    image = noise.to(device)
     timesteps, step_size = flow_inference_tensors(steps, torch=torch, device=device)
 
     with torch.inference_mode():

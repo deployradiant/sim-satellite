@@ -29,7 +29,7 @@ from sim_satellite.infer import (
 from sim_satellite.research.benchmark import (
     BenchmarkRunOptions,
     BenchmarkSpec,
-    benchmark_protocol_hash,
+    benchmark_eval_hash,
     load_benchmark_spec_values,
     run_benchmark,
     select_benchmark_samples,
@@ -301,7 +301,7 @@ def benchmark_remote(payload: dict[str, Any]) -> dict[str, Any]:
             spec.protocol,
             manifest_path=options.manifest_path,
         ).payload()
-        result["protocol_hash"] = benchmark_protocol_hash(spec.protocol)
+        result["eval_hash"] = benchmark_eval_hash(spec.protocol)
     else:
         result = run_benchmark(
             spec,
