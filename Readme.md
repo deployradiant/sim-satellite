@@ -148,6 +148,29 @@ prediction writes class-id masks, color masks, and confidence masks by default;
 use `--confidence-threshold 0.85` on `segmentation-predict` to set low-confidence
 pixels to `unlabeled` before using predictions as generated labels.
 
+### Flow-matching benchmark harness
+
+Progress toward a competitive mask-conditioned flow-matching model is measured
+with the frozen benchmark spec `benchmarks/flow-oem-v1.json`. The spec pins a
+deterministic held-out eval set, fixed generation seeds/steps, a frozen
+segmentation judge for mask-adherence mIoU, and explicit competitiveness
+targets. Every scored checkpoint writes one committed run record under
+`benchmarks/runs/`, and the leaderboard plus remaining target gaps come from:
+
+```bash
+uv run sim-satellite benchmark --holdout-only benchmarks/flow-oem-v1.json
+uv run sim-satellite benchmark --target modal \
+  --checkpoint artifacts/my-experiment.pt \
+  --experiment my-experiment benchmarks/flow-oem-v1.json
+uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json
+```
+
+Training runs must exclude the benchmark holdout by copying the
+`validation_holdout_patterns` value from `--holdout-only` into the training
+config. Protocol files are immutable once runs exist; new protocols get a new
+versioned spec file. See `docs/research-harness.md` for the parallel-subagent
+contract and the data-growth workflow.
+
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
 balance report under `/artifacts/vae-research/`. It balances useful land-cover
@@ -360,3 +383,14 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   Decision: this is the current best validated custom VAE checkpoint. The next
   comparison should be latent flow matching with this encoder versus pixel flow
   matching, not more sharpness-loss tuning.
+- 2026-07-03 PDT: Added the flow-matching benchmark harness on branch
+  `claude/flow-matching-diffusion-eval-kdfr1r`. `sim-satellite benchmark`
+  scores any diffusion checkpoint against the frozen spec
+  `benchmarks/flow-oem-v1.json` (deterministic city-group holdout, fixed
+  generation seeds, mask-adherence mIoU judged by the frozen 2026-06-28
+  segmentation checkpoint) and writes one committed run record per run under
+  `benchmarks/runs/`. `sim-satellite benchmark-progress` aggregates records
+  into a leaderboard with remaining gaps to explicit competitiveness targets.
+  No leaderboard entries exist yet; the next step is scoring the current best
+  flow U-Net checkpoint as the baseline run, then dispatching parallel model
+  and data experiments against it.

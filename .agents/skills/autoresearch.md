@@ -33,6 +33,14 @@ Before spawning agents, write a short contract:
 
 For training work, prefer a small shared benchmark first, such as a fixed-seed 1000-step run, plus the production-relevant metric: loss curve, images/sec, GPU utilization, checkpoint quality, validation loss, or qualitative samples.
 
+For diffusion/flow-matching model-quality goals in this repository, the contract's metric, baseline, and validation command are already standardized by the benchmark harness (see `docs/research-harness.md`):
+
+- Validation command: `uv run sim-satellite benchmark --target modal --checkpoint <ckpt> --experiment <name> benchmarks/flow-oem-v1.json`
+- Progress/leaderboard: `uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json`
+- Training holdout exclusion: `uv run sim-satellite benchmark --holdout-only benchmarks/flow-oem-v1.json`
+
+Each worker commits its run record from `benchmarks/runs/` with its change. Do not invent a bespoke validation protocol when a benchmark spec already covers the goal; propose a new versioned spec file instead if the protocol itself is wrong.
+
 ## Hypothesis Selection
 
 Pick 3-8 hypotheses that can be tested independently. Prefer hypotheses with:

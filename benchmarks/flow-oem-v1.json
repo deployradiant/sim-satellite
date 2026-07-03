@@ -1,0 +1,49 @@
+{
+  "name": "flow-oem-v1",
+  "description": "Frozen OpenEarthMap benchmark for mask-conditioned flow-matching checkpoints. The protocol holds out whole city groups (hash-ranked by seed), generates from their masks with fixed seeds, and scores mask adherence with the frozen 2026-06-28 VAE-fused segmentation study checkpoint as the judge. Targets are the current competitiveness bar toward DiffusionSat-class satellite generation. Never edit the protocol block in place: copy this file to flow-oem-v2.json instead, because runs are only comparable within one protocol hash. Training runs must exclude the benchmark holdout; get the exclusion list with `sim-satellite benchmark --holdout-only benchmarks/flow-oem-v1.json` and copy it into the training config's validation_holdout_patterns.",
+  "protocol": {
+    "manifest_path": "data/openearthmap/manifest.jsonl",
+    "split": "train",
+    "seed": 20260703,
+    "samples": 64,
+    "batch_size": 8,
+    "image_size": 256,
+    "generation_steps": 32,
+    "guidance_scale": 1.0,
+    "precision": "float32",
+    "segmentation_checkpoint_path": "artifacts/segmentation-study-2026-06-28-200k/deeplab_unet_vae200k_fused_noaug_lr3e-4_alldata_s200000_val256.pt"
+  },
+  "primary_metric": "mask_adherence.generated_mean_iou",
+  "targets": [
+    {
+      "metric": "mask_adherence.generated_mean_iou",
+      "target": 0.55,
+      "direction": "higher",
+      "label": "Frozen segmenter recovers the conditioning mask from generated images (mIoU)"
+    },
+    {
+      "metric": "mask_adherence.iou_ratio",
+      "target": 0.85,
+      "direction": "higher",
+      "label": "Generated-image mIoU relative to the segmenter's own real-image mIoU"
+    },
+    {
+      "metric": "generation.ssim",
+      "target": 0.35,
+      "direction": "higher",
+      "label": "Paired SSIM against held-out real images from the same masks"
+    },
+    {
+      "metric": "generation.mask_rgb_mean_mae_macro",
+      "target": 0.06,
+      "direction": "lower",
+      "label": "Per-class RGB mean error between generated and real images"
+    },
+    {
+      "metric": "generation.mask_boundary_gradient_delta",
+      "target": 0.015,
+      "direction": "lower",
+      "label": "Edge sharpness mismatch at semantic boundaries"
+    }
+  ]
+}

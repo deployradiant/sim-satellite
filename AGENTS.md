@@ -78,6 +78,17 @@ Use the `thermo-nuclear-code-quality-review` skill as the guide for strict maint
 - Future parallel Modal experiments should set a unique
   `SIM_SATELLITE_MODAL_APP_NAME` to avoid web endpoint label collisions.
 
+## Benchmark Workflow
+
+- Model-quality claims about the diffusion/flow-matching model must be backed
+  by a `sim-satellite benchmark` run against the current committed spec under
+  `benchmarks/` (see `docs/research-harness.md`).
+- Commit the run record from `benchmarks/runs/` together with the change that
+  produced the checkpoint. Never edit or delete other runs' records, and never
+  edit a committed benchmark protocol in place — add a new versioned spec.
+- Exclude the benchmark holdout from training via `validation_holdout_patterns`
+  (get it from `sim-satellite benchmark --holdout-only <spec>`).
+
 ## Segmentation Workflow
 
 - Downstream segmentation/mask-generation classifiers should expose confidence
