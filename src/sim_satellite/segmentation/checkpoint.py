@@ -12,12 +12,10 @@ from torch import nn
 
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.segmentation.config import (
+    SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
     SUPPORTED_SEGMENTATION_MODEL_NAMES,
-    VAE_ASPP_UNET_MODEL_NAME,
-    segmentation_model_uses_vae_features,
 )
 from sim_satellite.segmentation.models import _segmentation_input_channels, build_segmentation_model
-from sim_satellite.segmentation.vae import VAEFeatureEncoder, _load_vae_feature_encoder
 
 
 @dataclass(frozen=True)
@@ -25,7 +23,6 @@ class SegmentationCheckpoint:
     model: nn.Module
     config: dict[str, Any]
     classes: tuple[str, ...]
-    vae_encoder: VAEFeatureEncoder | None
 
 
 def _save_checkpoint(
@@ -37,10 +34,9 @@ def _save_checkpoint(
     step: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    model_name = _checkpoint_model_name(config)
     torch.save(
         {
-            "model": model_name,
+            "model": _checkpoint_model_name(config),
             "model_state": model.state_dict(),
             "classes": list(OPENEARTHMAP_CLASSES),
             "config": config,
@@ -77,23 +73,9 @@ def _load_segmentation_checkpoint(path: Path, *, device: str) -> SegmentationChe
     state = checkpoint.get("model_state")
     if not isinstance(state, Mapping):
         raise RuntimeError(f"Segmentation checkpoint is missing model_state: {path}")
-    vae_encoder = None
-    vae_latent_channels = 0
-    if segmentation_model_uses_vae_features(model_name):
-        vae_encoder = _load_vae_feature_encoder(
-            dict(config),
-            device=torch.device(device),
-            checkpoint_path=path,
-        )
-        vae_latent_channels = _checkpoint_vae_latent_channels(
-            config,
-            vae_encoder=vae_encoder,
-            checkpoint_path=path,
-        )
     model = build_segmentation_model(
         num_classes=len(classes),
         input_channels=_segmentation_input_channels(config),
-        vae_latent_channels=vae_latent_channels,
         model_name=model_name,
     ).to(device)
     model.load_state_dict(state)
@@ -102,37 +84,13 @@ def _load_segmentation_checkpoint(path: Path, *, device: str) -> SegmentationChe
         model=model,
         config=dict(config),
         classes=classes,
-        vae_encoder=vae_encoder,
     )
 
 
 def _checkpoint_model_name(config: Mapping[str, Any]) -> str:
     raw_value = config.get("model_name")
     if raw_value is None:
-        return VAE_ASPP_UNET_MODEL_NAME
+        return SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
     if not isinstance(raw_value, str):
         raise RuntimeError("Segmentation checkpoint config model_name must be a string")
     return raw_value
-
-
-def _checkpoint_vae_latent_channels(
-    config: Mapping[str, Any],
-    *,
-    vae_encoder: VAEFeatureEncoder,
-    checkpoint_path: Path,
-) -> int:
-    raw_value = config.get("vae_latent_channels")
-    if raw_value is None:
-        return vae_encoder.latent_channels
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Segmentation checkpoint vae_latent_channels must be an integer: {checkpoint_path}"
-        ) from exc
-    if value != vae_encoder.latent_channels:
-        raise RuntimeError(
-            f"Segmentation checkpoint vae_latent_channels={value} does not match "
-            f"VAE latent_channels={vae_encoder.latent_channels}: {checkpoint_path}"
-        )
-    return value

@@ -126,7 +126,15 @@ app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .env(MODAL_IMAGE_ENV)
-    .pip_install("click", "fastapi", "matplotlib", "pillow", "torch")
+    .pip_install(
+        "click",
+        "fastapi",
+        "matplotlib",
+        "pillow",
+        "segmentation-models-pytorch",
+        "timm",
+        "torch",
+    )
     .add_local_python_source("sim_satellite")
     .add_local_file(
         LOCAL_WEB_STATIC_ROOT / "index.html",
@@ -490,8 +498,6 @@ def _modal_segmentation_training_config(config: SegmentationTrainingConfig) -> d
     values["device"] = "cuda"
     values["checkpoint_path"] = _modal_artifact_path(config.checkpoint_path)
     values["manifest_path"] = _modal_data_path(config.manifest_path, field_name="manifest_path")
-    if config.vae_checkpoint_path:
-        values["vae_checkpoint_path"] = _modal_artifact_path(config.vae_checkpoint_path)
     return values
 
 

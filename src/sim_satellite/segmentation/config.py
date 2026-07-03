@@ -10,19 +10,15 @@ from typing import Any
 
 from sim_satellite.training_config import DEFAULT_MANIFEST_PATH
 
-DEFAULT_SEGMENTATION_CHECKPOINT_PATH = "artifacts/openearthmap-vae-segmenter.pt"
-DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH = (
-    "artifacts/vae-research/balanced-vae-pool2048-f4-c32-h48-5k-t04-data20274737-train1006705.pt"
+DEFAULT_SEGMENTATION_CHECKPOINT_PATH = (
+    "artifacts/segmentation-openearthmap-smp-unet-efficientnet-b4-scse-official-xbd-full-polish-v1/"
+    "smp-unet-efficientnet-b4-scse-official-xbd-full-polish-s2500.pt"
 )
 DEFAULT_SEGMENTATION_PREDICTION_DIR = "artifacts/segmentation-predictions"
 DEFAULT_SEGMENTATION_PREDICTION_TILE_STRIDE = 256
-VAE_ASPP_UNET_MODEL_NAME = "vae-aspp-unet-v1"
 SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME = "smp-unet-efficientnet-b4-scse"
-LEGACY_SEGMENTATION_MODEL_NAMES = ("deeplab-unet-v1",)
 SUPPORTED_SEGMENTATION_MODEL_NAMES = (
-    VAE_ASPP_UNET_MODEL_NAME,
     SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
-    *LEGACY_SEGMENTATION_MODEL_NAMES,
 )
 SEGMENTATION_LR_SCHEDULES = ("constant", "cosine")
 
@@ -31,7 +27,7 @@ SEGMENTATION_LR_SCHEDULES = ("constant", "cosine")
 class SegmentationTrainingConfig:
     manifest_path: str = DEFAULT_MANIFEST_PATH
     checkpoint_path: str = DEFAULT_SEGMENTATION_CHECKPOINT_PATH
-    model_name: str = VAE_ASPP_UNET_MODEL_NAME
+    model_name: str = SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
     split: str = "train"
     validation_split: str = ""
     validation_holdout_patterns: str = ""
@@ -43,8 +39,6 @@ class SegmentationTrainingConfig:
     batch_size: int = 8
     image_size: int = 128
     context_size: int = 0
-    vae_checkpoint_path: str = DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH
-    vae_normalize_latents: bool = True
     learning_rate: float = 3e-4
     min_learning_rate: float = 0.0
     lr_schedule: str = "constant"
@@ -242,8 +236,6 @@ def _validate_training_config(config: SegmentationTrainingConfig) -> None:
         raise ValueError("manifest_path is required")
     if not config.checkpoint_path:
         raise ValueError("checkpoint_path is required")
-    if segmentation_model_uses_vae_features(config.model_name) and not config.vae_checkpoint_path:
-        raise ValueError("vae_checkpoint_path is required")
 
 
 def _validate_class_weight_mapping(value: object, name: str) -> None:
@@ -326,7 +318,3 @@ def load_segmentation_training_config_file(config_path: Path) -> SegmentationTra
     if not isinstance(values, Mapping):
         raise ValueError("Segmentation training config JSON must be an object")
     return SegmentationTrainingConfig.from_dict(values)
-
-
-def segmentation_model_uses_vae_features(model_name: str) -> bool:
-    return model_name in (*LEGACY_SEGMENTATION_MODEL_NAMES, VAE_ASPP_UNET_MODEL_NAME)

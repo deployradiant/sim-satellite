@@ -1,4 +1,4 @@
-"""Training loop for VAE-fused semantic segmentation classifiers."""
+"""Training loop for semantic segmentation classifiers."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from sim_satellite.segmentation.config import (
     SegmentationTrainingConfig,
     SegmentationTrainingResult,
     _validate_training_config,
-    segmentation_model_uses_vae_features,
 )
 from sim_satellite.segmentation.data import (
     _class_balanced_crop_box,
@@ -42,7 +41,6 @@ from sim_satellite.segmentation.models import (
     build_segmentation_model,
 )
 from sim_satellite.segmentation.utils import ProgressReporter, _report
-from sim_satellite.segmentation.vae import _encode_vae_features, _load_vae_feature_encoder
 
 
 def train_segmentation_model(
@@ -58,16 +56,9 @@ def train_segmentation_model(
     train_samples, validation_samples = _split_training_samples(config)
     cache = _PreparedSampleCache(max_samples=config.cache_samples)
     checkpoint_config = asdict(config)
-    vae_encoder = None
-    vae_latent_channels = 0
-    if segmentation_model_uses_vae_features(config.model_name):
-        vae_encoder = _load_vae_feature_encoder(checkpoint_config, device=device)
-        vae_latent_channels = vae_encoder.latent_channels
-        checkpoint_config["vae_latent_channels"] = vae_encoder.latent_channels
     model = build_segmentation_model(
         num_classes=len(OPENEARTHMAP_CLASSES),
         input_channels=_segmentation_input_channels(config),
-        vae_latent_channels=vae_latent_channels,
         model_name=config.model_name,
     ).to(device)
     optimizer = torch.optim.AdamW(
@@ -128,11 +119,7 @@ def train_segmentation_model(
             rng=rng,
         )
         optimizer.zero_grad(set_to_none=True)
-        logits = _forward_segmentation_model(
-            model,
-            images,
-            vae_latents=_encode_vae_features(vae_encoder, images) if vae_encoder else None,
-        )
+        logits = _forward_segmentation_model(model, images)
         loss = _segmentation_training_loss(
             logits,
             labels,
@@ -160,7 +147,6 @@ def train_segmentation_model(
                 tile_stride=config.evaluation_stride,
                 device=device,
                 cache=cache,
-                vae_encoder=vae_encoder,
                 feather_blending=config.evaluation_feather_blending,
             )
             _report(
@@ -190,7 +176,6 @@ def train_segmentation_model(
         tile_stride=config.evaluation_stride,
         device=device,
         cache=cache,
-        vae_encoder=vae_encoder,
         feather_blending=config.evaluation_feather_blending,
     )
     if best_metrics is None:

@@ -9,16 +9,17 @@ import torch
 from click.testing import CliRunner
 from PIL import Image
 
+import sim_satellite.segmentation.checkpoint as segmentation_checkpoint
 import sim_satellite.segmentation.cli as segmentation_cli
+import sim_satellite.segmentation.training as segmentation_training
 from sim_satellite.cli import cli
 from sim_satellite.data.loader import SatelliteSample, write_manifest
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION, PreparedSample, write_prepared_sample
 from sim_satellite.model import ModelConfig
-from sim_satellite.segmentation.checkpoint import _load_segmentation_checkpoint, _save_checkpoint
+from sim_satellite.segmentation.checkpoint import _save_checkpoint
 from sim_satellite.segmentation.config import (
     SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
-    VAE_ASPP_UNET_MODEL_NAME,
     SegmentationEvaluationConfig,
     SegmentationPredictionConfig,
     SegmentationTrainingConfig,
@@ -54,8 +55,6 @@ from sim_satellite.segmentation.training import (
     _segmentation_training_loss,
     train_segmentation_model,
 )
-from sim_satellite.segmentation.vae import _load_vae_feature_encoder
-from sim_satellite.vae.model import SatelliteVAE, SatelliteVAEConfig
 
 
 def test_segmentation_metrics_exclude_unlabeled_from_mean_iou() -> None:
@@ -104,16 +103,14 @@ def test_segmentation_class_logit_biases_adjust_logits() -> None:
     assert biased[building_id, 0, 0] > biased[road_id, 0, 0]
 
 
-def test_smp_training_config_allows_empty_vae_checkpoint() -> None:
-    _validate_training_config(
-        SegmentationTrainingConfig(
-            model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
-            vae_checkpoint_path="",
-        )
-    )
+def test_segmentation_training_config_is_smp_only() -> None:
+    config = SegmentationTrainingConfig()
 
-    with pytest.raises(ValueError, match="vae_checkpoint_path"):
-        _validate_training_config(SegmentationTrainingConfig(vae_checkpoint_path=""))
+    _validate_training_config(config)
+    assert config.model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
+
+    with pytest.raises(ValueError, match="model_name"):
+        _validate_training_config(SegmentationTrainingConfig(model_name="old-segmentation-model"))
 
 
 def test_production_openearth_training_recipe_loads() -> None:
@@ -124,7 +121,6 @@ def test_production_openearth_training_recipe_loads() -> None:
 
     _validate_training_config(config)
     assert config.model_name == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
-    assert config.vae_checkpoint_path == ""
     assert config.evaluation_stride == 256
     assert config.evaluation_feather_blending is True
     assert "resume_checkpoint_path" not in asdict(config)
@@ -260,28 +256,17 @@ def test_context_segmentation_model_accepts_local_and_context_rgb() -> None:
     model = build_segmentation_model(
         num_classes=len(OPENEARTHMAP_CLASSES),
         input_channels=6,
-        vae_latent_channels=4,
     )
     batch = torch.zeros((2, 6, 32, 32), dtype=torch.float32)
-    vae_latents = torch.zeros((2, 4, 8, 8), dtype=torch.float32)
 
-    logits = model(batch, vae_latents)
+    logits = model(batch)
 
     assert tuple(logits.shape) == (2, len(OPENEARTHMAP_CLASSES), 32, 32)
 
 
-def test_segmentation_model_requires_vae_latent_channels() -> None:
-    with pytest.raises(ValueError, match="vae_latent_channels"):
-        build_segmentation_model(
-            num_classes=len(OPENEARTHMAP_CLASSES),
-            vae_latent_channels=0,
-        )
-
-
-def test_smp_unet_b4_scse_model_does_not_require_vae_latents() -> None:
+def test_smp_unet_b4_scse_model_accepts_rgb() -> None:
     model = build_segmentation_model(
         num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=0,
         model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
     )
     model.eval()
@@ -291,19 +276,6 @@ def test_smp_unet_b4_scse_model_does_not_require_vae_latents() -> None:
         logits = model(image)
 
     assert tuple(logits.shape) == (1, len(OPENEARTHMAP_CLASSES), 32, 32)
-
-
-def test_vae_aspp_unet_segmenter_accepts_vae_latents() -> None:
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=24,
-    )
-    image = torch.zeros((2, 3, 256, 256), dtype=torch.float32)
-    vae_latents = torch.zeros((2, 24, 64, 64), dtype=torch.float32)
-
-    logits = model(image, vae_latents)
-
-    assert tuple(logits.shape) == (2, len(OPENEARTHMAP_CLASSES), 256, 256)
 
 
 def test_prepared_context_crop_keeps_local_label_and_adds_context_channels() -> None:
@@ -392,17 +364,18 @@ def test_segmentation_split_selection_accepts_custom_lists(tmp_path: Path) -> No
     assert len(all_samples) == 3
 
 
-def test_segmentation_train_and_evaluate_use_prepared_tensors(tmp_path: Path) -> None:
+def test_segmentation_train_and_evaluate_use_prepared_tensors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_tiny_segmentation_model(monkeypatch)
     manifest_path = _write_segmentation_fixture(tmp_path, samples=4)
-    vae_path = tmp_path / "vae.pt"
-    _write_vae_checkpoint(vae_path)
     checkpoint_path = tmp_path / "segmenter.pt"
 
     result = train_segmentation_model(
         SegmentationTrainingConfig(
             manifest_path=str(manifest_path),
             checkpoint_path=str(checkpoint_path),
-            vae_checkpoint_path=str(vae_path),
             validation_fraction=0.5,
             max_validation_samples=2,
             steps=2,
@@ -434,28 +407,26 @@ def test_segmentation_train_and_evaluate_use_prepared_tensors(tmp_path: Path) ->
     assert 0.0 <= evaluation.mean_iou <= 1.0
 
 
-def test_segmentation_predict_writes_class_id_and_color_masks(tmp_path: Path) -> None:
-    vae_path = tmp_path / "vae.pt"
-    _write_vae_checkpoint(vae_path)
+def test_segmentation_predict_writes_class_id_and_color_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_tiny_segmentation_model(monkeypatch)
     checkpoint_path = tmp_path / "segmenter.pt"
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=4,
-    )
+    model = _TinySegmentationModel(input_channels=3, num_classes=len(OPENEARTHMAP_CLASSES))
     _save_checkpoint(
         checkpoint_path,
         model,
         config=asdict(
             SegmentationTrainingConfig(
                 image_size=16,
-                vae_checkpoint_path=str(vae_path),
             )
         ),
         metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
         step=0,
     )
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    assert checkpoint["model"] == VAE_ASPP_UNET_MODEL_NAME
+    assert checkpoint["model"] == SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME
     image_path = tmp_path / "unlabeled" / "tile.png"
     image_path.parent.mkdir(parents=True)
     Image.new("RGB", (17, 19), (32, 64, 96)).save(image_path)
@@ -497,21 +468,19 @@ def test_segmentation_predict_writes_class_id_and_color_masks(tmp_path: Path) ->
         assert confidence.size == (17, 19)
 
 
-def test_segmentation_predict_can_gate_low_confidence_pixels(tmp_path: Path) -> None:
-    vae_path = tmp_path / "vae.pt"
-    _write_vae_checkpoint(vae_path)
+def test_segmentation_predict_can_gate_low_confidence_pixels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_tiny_segmentation_model(monkeypatch)
     checkpoint_path = tmp_path / "segmenter.pt"
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=4,
-    )
+    model = _TinySegmentationModel(input_channels=3, num_classes=len(OPENEARTHMAP_CLASSES))
     _save_checkpoint(
         checkpoint_path,
         model,
         config=asdict(
             SegmentationTrainingConfig(
                 image_size=16,
-                vae_checkpoint_path=str(vae_path),
             )
         ),
         metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
@@ -550,119 +519,6 @@ def test_prediction_manifest_requires_object_records(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="image record must be an object"):
         _read_image_records(manifest_path)
-
-
-def test_vae_checkpoint_path_resolves_from_classifier_artifact_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact_root = tmp_path / "artifacts"
-    vae_path = artifact_root / "openearthmap-custom-vae.pt"
-    checkpoint_path = artifact_root / "segmentation-study" / "classifier.pt"
-    vae_config = _write_vae_checkpoint(vae_path)
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=vae_config.latent_channels,
-    )
-    checkpoint_config = asdict(
-        SegmentationTrainingConfig(
-            image_size=16,
-            vae_checkpoint_path="artifacts/openearthmap-custom-vae.pt",
-        )
-    )
-    checkpoint_config["vae_latent_channels"] = vae_config.latent_channels
-    _save_checkpoint(
-        checkpoint_path,
-        model,
-        config=checkpoint_config,
-        metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
-        step=0,
-    )
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
-
-    checkpoint = _load_segmentation_checkpoint(checkpoint_path, device="cpu")
-
-    assert checkpoint.vae_encoder is not None
-    assert checkpoint.vae_encoder.latent_channels == vae_config.latent_channels
-
-
-def test_legacy_deeplab_unet_checkpoint_name_still_loads(
-    tmp_path: Path,
-) -> None:
-    vae_path = tmp_path / "vae.pt"
-    vae_config = _write_vae_checkpoint(vae_path)
-    checkpoint_path = tmp_path / "legacy-name.pt"
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=vae_config.latent_channels,
-    )
-    checkpoint_config = asdict(
-        SegmentationTrainingConfig(
-            image_size=16,
-            vae_checkpoint_path=str(vae_path),
-        )
-    )
-    checkpoint_config["vae_latent_channels"] = vae_config.latent_channels
-    _save_checkpoint(
-        checkpoint_path,
-        model,
-        config=checkpoint_config,
-        metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
-        step=0,
-    )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    checkpoint["model"] = "deeplab-unet-v1"
-    torch.save(checkpoint, checkpoint_path)
-
-    loaded = _load_segmentation_checkpoint(checkpoint_path, device="cpu")
-
-    assert loaded.vae_encoder is not None
-    assert loaded.vae_encoder.latent_channels == vae_config.latent_channels
-
-
-def test_segmentation_checkpoint_rejects_mismatched_vae_latent_channels(
-    tmp_path: Path,
-) -> None:
-    vae_path = tmp_path / "vae.pt"
-    vae_config = _write_vae_checkpoint(vae_path)
-    checkpoint_path = tmp_path / "segmenter.pt"
-    model = build_segmentation_model(
-        num_classes=len(OPENEARTHMAP_CLASSES),
-        vae_latent_channels=vae_config.latent_channels,
-    )
-    checkpoint_config = asdict(
-        SegmentationTrainingConfig(
-            image_size=16,
-            vae_checkpoint_path=str(vae_path),
-        )
-    )
-    checkpoint_config["vae_latent_channels"] = vae_config.latent_channels + 1
-    _save_checkpoint(
-        checkpoint_path,
-        model,
-        config=checkpoint_config,
-        metrics={"mean_iou": 0.0, "pixel_accuracy": 0.0, "class_iou": {}},
-        step=0,
-    )
-
-    with pytest.raises(RuntimeError, match="vae_latent_channels"):
-        _load_segmentation_checkpoint(checkpoint_path, device="cpu")
-
-
-def test_vae_normalization_requires_latent_stats(tmp_path: Path) -> None:
-    vae_path = tmp_path / "vae-without-stats.pt"
-    _write_vae_checkpoint(vae_path, include_latent_stats=False)
-
-    with pytest.raises(RuntimeError, match="latent_stats"):
-        _load_vae_feature_encoder(
-            {
-                "vae_checkpoint_path": str(vae_path),
-                "vae_normalize_latents": True,
-            },
-            device=torch.device("cpu"),
-        )
 
 
 def test_cli_exposes_segmentation_commands() -> None:
@@ -799,27 +655,25 @@ def _write_label_fixture(path: Path, *, index: int) -> None:
     mask.save(path)
 
 
-def _write_vae_checkpoint(
-    path: Path,
-    *,
-    latent_channels: int = 4,
-    include_latent_stats: bool = True,
-) -> SatelliteVAEConfig:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    vae_config = SatelliteVAEConfig(
-        latent_channels=latent_channels,
-        hidden_channels=8,
-        downsample_factor=4,
-    )
-    vae = SatelliteVAE(vae_config)
-    payload = {
-        "vae_config": asdict(vae_config),
-        "model_state": vae.state_dict(),
-    }
-    if include_latent_stats:
-        payload["latent_stats"] = {
-            "mean": [0.0] * vae_config.latent_channels,
-            "std": [1.0] * vae_config.latent_channels,
-        }
-    torch.save(payload, path)
-    return vae_config
+class _TinySegmentationModel(torch.nn.Module):
+    def __init__(self, *, input_channels: int, num_classes: int) -> None:
+        super().__init__()
+        self.head = torch.nn.Conv2d(input_channels, num_classes, kernel_size=1)
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        return self.head(image)
+
+
+def _install_tiny_segmentation_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    def build_tiny_model(
+        *,
+        num_classes: int,
+        input_channels: int = 3,
+        model_name: str = SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
+    ) -> torch.nn.Module:
+        if model_name != SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME:
+            raise ValueError(f"Unsupported segmentation model: {model_name}")
+        return _TinySegmentationModel(input_channels=input_channels, num_classes=num_classes)
+
+    monkeypatch.setattr(segmentation_training, "build_segmentation_model", build_tiny_model)
+    monkeypatch.setattr(segmentation_checkpoint, "build_segmentation_model", build_tiny_model)

@@ -35,7 +35,6 @@ from sim_satellite.segmentation.data import (
 from sim_satellite.segmentation.metrics import _confusion_matrix, _segmentation_metrics
 from sim_satellite.segmentation.models import _forward_segmentation_model
 from sim_satellite.segmentation.utils import ProgressReporter, _report, _should_report
-from sim_satellite.segmentation.vae import VAEFeatureEncoder, _encode_vae_features
 
 
 @dataclass(frozen=True)
@@ -56,7 +55,6 @@ def evaluate_segmentation_model(
     checkpoint = _load_segmentation_checkpoint(checkpoint_path, device=config.device)
     model = checkpoint.model
     model_config = checkpoint.config
-    vae_encoder = checkpoint.vae_encoder
     image_size = int(model_config["image_size"])
     context_size = int(model_config.get("context_size", 0))
     tile_stride = config.tile_stride
@@ -77,7 +75,6 @@ def evaluate_segmentation_model(
         tile_scales=config.tile_scales,
         device=torch.device(config.device),
         cache=cache,
-        vae_encoder=vae_encoder,
         output_class_names=checkpoint.classes,
         class_logit_biases=config.class_logit_biases,
         feather_blending=config.feather_blending,
@@ -123,7 +120,6 @@ def predict_segmentation_masks(
     checkpoint = _load_segmentation_checkpoint(checkpoint_path, device=config.device)
     model = checkpoint.model
     model_config = checkpoint.config
-    vae_encoder = checkpoint.vae_encoder
     image_size = int(model_config["image_size"])
     context_size = int(model_config.get("context_size", 0))
     tile_stride = config.tile_stride
@@ -150,7 +146,6 @@ def predict_segmentation_masks(
             tile_stride=tile_stride,
             tile_scales=config.tile_scales,
             device=device,
-            vae_encoder=vae_encoder,
             output_class_names=checkpoint.classes,
             class_logit_biases=config.class_logit_biases,
             feather_blending=config.feather_blending,
@@ -216,7 +211,6 @@ def _evaluate_samples(
     image_size: int,
     device: torch.device,
     cache: _PreparedSampleCache,
-    vae_encoder: VAEFeatureEncoder | None,
     context_size: int = 0,
     tile_stride: int = 0,
     tile_scales: Sequence[float] = (),
@@ -239,7 +233,7 @@ def _evaluate_samples(
     selected_labeled_pixels = 0
     confidence_sum = 0.0
     selected_confidence_sum = 0.0
-    with torch.no_grad():
+    with torch.inference_mode():
         for index, sample in enumerate(samples, start=1):
             prepared = cache.get(sample)
             logits, sample_tiles = _predict_prepared_sample_logits(
@@ -251,7 +245,6 @@ def _evaluate_samples(
                 tile_scales=tile_scales,
                 device=device,
                 cache=cache,
-                vae_encoder=vae_encoder,
                 output_class_names=output_class_names,
                 feather_blending=feather_blending,
             )
@@ -310,7 +303,6 @@ def _predict_image_mask(
     *,
     image_size: int,
     device: torch.device,
-    vae_encoder: VAEFeatureEncoder | None,
     context_size: int = 0,
     tile_stride: int = 0,
     tile_scales: Sequence[float] = (),
@@ -319,34 +311,34 @@ def _predict_image_mask(
     feather_blending: bool = False,
     confidence_threshold: float = 0.0,
 ) -> dict[str, Any]:
-    with Image.open(image_path) as source:
-        image = source.convert("RGB")
-        logits, _tiles = _predict_image_logits(
-            model,
-            image,
-            image_size=image_size,
-            context_size=context_size,
-            tile_stride=tile_stride,
-            tile_scales=tile_scales,
-            device=device,
-            vae_encoder=vae_encoder,
-            output_class_names=output_class_names,
-            feather_blending=feather_blending,
-        )
-        logits = _apply_class_logit_biases(
-            logits,
-            class_logit_biases,
-            class_names=output_class_names,
-        )
-        probabilities = logits.softmax(dim=0).cpu()
-        confidence, labels = probabilities.max(dim=0)
-        output = labels.to(torch.uint8)
-        high_confidence = confidence >= confidence_threshold
-        if confidence_threshold > 0.0:
-            output = torch.where(high_confidence, output, torch.zeros_like(output))
-        confidence_sum = float(confidence.sum().item())
-        high_confidence_count = int(high_confidence.sum().item())
-        pixel_count = int(confidence.numel())
+    with torch.inference_mode():
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            logits, _tiles = _predict_image_logits(
+                model,
+                image,
+                image_size=image_size,
+                context_size=context_size,
+                tile_stride=tile_stride,
+                tile_scales=tile_scales,
+                device=device,
+                output_class_names=output_class_names,
+                feather_blending=feather_blending,
+            )
+            logits = _apply_class_logit_biases(
+                logits,
+                class_logit_biases,
+                class_names=output_class_names,
+            )
+            probabilities = logits.softmax(dim=0).cpu()
+            confidence, labels = probabilities.max(dim=0)
+            output = labels.to(torch.uint8)
+            high_confidence = confidence >= confidence_threshold
+            if confidence_threshold > 0.0:
+                output = torch.where(high_confidence, output, torch.zeros_like(output))
+            confidence_sum = float(confidence.sum().item())
+            high_confidence_count = int(high_confidence.sum().item())
+            pixel_count = int(confidence.numel())
     counts = torch.bincount(output.long().flatten(), minlength=len(output_class_names))
     return {
         "labels": output,
@@ -388,7 +380,6 @@ def _predict_prepared_sample_logits(
     tile_scales: Sequence[float],
     device: torch.device,
     cache: _PreparedSampleCache,
-    vae_encoder: VAEFeatureEncoder | None,
     output_class_names: Sequence[str],
     feather_blending: bool,
 ) -> tuple[torch.Tensor, int]:
@@ -415,7 +406,7 @@ def _predict_prepared_sample_logits(
                 context_size=context_size,
                 device=device,
             )
-            logits = _forward_segmentation_logits(model, images, vae_encoder=vae_encoder)
+            logits = _forward_segmentation_logits(model, images)
             resized = _resized_tile_logits(logits, crop_box)
             _accumulate_resized_tile_logits(
                 logit_sum,
@@ -441,7 +432,6 @@ def _predict_image_logits(
     tile_stride: int,
     tile_scales: Sequence[float],
     device: torch.device,
-    vae_encoder: VAEFeatureEncoder | None,
     output_class_names: Sequence[str],
     feather_blending: bool,
 ) -> tuple[torch.Tensor, int]:
@@ -465,7 +455,7 @@ def _predict_image_logits(
                 context_size=context_size,
                 device=device,
             )
-            logits = _forward_segmentation_logits(model, batch, vae_encoder=vae_encoder)
+            logits = _forward_segmentation_logits(model, batch)
             resized = _resized_tile_logits(logits, crop_box)
             _accumulate_resized_tile_logits(
                 logit_sum,
@@ -514,14 +504,8 @@ def _scaled_tile_windows_config(
 def _forward_segmentation_logits(
     model: nn.Module,
     images: torch.Tensor,
-    *,
-    vae_encoder: VAEFeatureEncoder | None,
 ) -> torch.Tensor:
-    return _forward_segmentation_model(
-        model,
-        images,
-        vae_latents=_encode_vae_features(vae_encoder, images) if vae_encoder else None,
-    )
+    return _forward_segmentation_model(model, images)
 
 
 def _image_crop_batch(

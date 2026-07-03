@@ -134,7 +134,7 @@ def _run_prediction_with_target(
     return run_segmentation_prediction_target(config)
 
 
-@click.command("segmentation-train", help="Train the VAE-fused segmentation classifier.")
+@click.command("segmentation-train", help="Train the OpenEarth segmentation classifier.")
 @click.argument("config_path", type=click.Path(path_type=Path))
 def train_cli(config_path: Path) -> None:
     try:
@@ -148,7 +148,7 @@ def train_cli(config_path: Path) -> None:
     click.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
-@click.command("segmentation-evaluate", help="Evaluate a VAE-fused segmentation checkpoint.")
+@click.command("segmentation-evaluate", help="Evaluate an OpenEarth segmentation checkpoint.")
 @click.option(
     "--target",
     type=click.Choice(["modal", "local"]),

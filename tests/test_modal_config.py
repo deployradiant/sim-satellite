@@ -237,7 +237,6 @@ def test_modal_segmentation_training_maps_from_scratch_config(
         checkpoint_path="artifacts/segmentation/production.pt",
         manifest_path="data/openearthmap/manifest.jsonl",
         model_name=SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
-        vae_checkpoint_path="",
     )
 
     result = modal_app.run_segmentation_training_target(config)

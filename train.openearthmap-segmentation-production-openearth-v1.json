@@ -15,8 +15,6 @@
   "batch_size": 4,
   "image_size": 512,
   "context_size": 0,
-  "vae_checkpoint_path": "",
-  "vae_normalize_latents": true,
   "learning_rate": 0.000002,
   "min_learning_rate": 0.0000002,
   "lr_schedule": "cosine",

@@ -5,9 +5,7 @@ from sim_satellite.segmentation.config import (
     DEFAULT_SEGMENTATION_CHECKPOINT_PATH,
     DEFAULT_SEGMENTATION_PREDICTION_DIR,
     DEFAULT_SEGMENTATION_PREDICTION_TILE_STRIDE,
-    DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH,
     SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME,
-    VAE_ASPP_UNET_MODEL_NAME,
     SegmentationEvaluationConfig,
     SegmentationEvaluationResult,
     SegmentationPredictionConfig,
@@ -20,20 +18,14 @@ from sim_satellite.segmentation.inference import (
     evaluate_segmentation_model,
     predict_segmentation_masks,
 )
-from sim_satellite.segmentation.models import (
-    VAEASPPUNetSegmentationModel,
-    build_segmentation_model,
-)
+from sim_satellite.segmentation.models import build_segmentation_model
 from sim_satellite.segmentation.training import train_segmentation_model
 
 __all__ = [
     "DEFAULT_SEGMENTATION_CHECKPOINT_PATH",
     "DEFAULT_SEGMENTATION_PREDICTION_DIR",
     "DEFAULT_SEGMENTATION_PREDICTION_TILE_STRIDE",
-    "DEFAULT_SEGMENTATION_VAE_CHECKPOINT_PATH",
     "SMP_UNET_EFFICIENTNET_B4_SCSE_MODEL_NAME",
-    "VAE_ASPP_UNET_MODEL_NAME",
-    "VAEASPPUNetSegmentationModel",
     "SegmentationEvaluationConfig",
     "SegmentationEvaluationResult",
     "SegmentationPredictionConfig",
