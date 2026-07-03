@@ -131,12 +131,23 @@ def run_inference(
 
 
 def load_generator(checkpoint_path: str | Path, *, device: str) -> LoadedGenerator:
-    torch_device = torch.device(device)
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Inference checkpoint not found: {checkpoint_path}")
 
     checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
+    return load_generator_from_checkpoint(
+        checkpoint, checkpoint_path=checkpoint_path, device=device
+    )
+
+
+def load_generator_from_checkpoint(
+    checkpoint: Mapping[str, Any],
+    *,
+    checkpoint_path: Path,
+    device: str,
+) -> LoadedGenerator:
+    torch_device = torch.device(device)
     model_state = checkpoint["model_state"]
     try:
         model_config = ModelConfig.from_dict(checkpoint["model_config"])

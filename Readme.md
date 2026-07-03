@@ -168,8 +168,11 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json
 Training runs must exclude the benchmark holdout by copying the
 `validation_holdout_patterns` value from `--holdout-only` into the training
 config. Protocol files are immutable once runs exist; new protocols get a new
-versioned spec file. See `docs/research-harness.md` for the parallel-subagent
-contract and the data-growth workflow.
+versioned spec file. Deterministic per-protocol artifacts are cached and
+committed under `benchmarks/cache/` — the judge's real-image scores are
+computed by the first run and reused by every later run. See
+`docs/research-harness.md` for the parallel-subagent contract and the
+data-growth workflow.
 
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a

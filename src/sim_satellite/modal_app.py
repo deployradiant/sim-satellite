@@ -11,6 +11,7 @@ import os
 import random
 import shutil
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -305,6 +306,7 @@ def benchmark_remote(payload: dict[str, Any]) -> dict[str, Any]:
         result = run_benchmark(
             spec,
             options,
+            real_adherence_cache=payload.get("real_adherence_cache"),
             progress=lambda message: _print_modal_data_event(
                 "modal_benchmark_progress",
                 message=message,
@@ -417,8 +419,14 @@ def run_benchmark_target(
     options: BenchmarkRunOptions,
     *,
     holdout_only: bool = False,
+    real_adherence_cache: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = _modal_benchmark_payload(spec, options, holdout_only=holdout_only)
+    payload = _modal_benchmark_payload(
+        spec,
+        options,
+        holdout_only=holdout_only,
+        real_adherence_cache=real_adherence_cache,
+    )
     with modal.enable_output():
         with app.run():
             return benchmark_remote.remote(payload)
@@ -517,6 +525,7 @@ def _modal_benchmark_payload(
     options: BenchmarkRunOptions,
     *,
     holdout_only: bool,
+    real_adherence_cache: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     values = asdict(options)
     values["device"] = "cuda"
@@ -537,6 +546,7 @@ def _modal_benchmark_payload(
         "spec": asdict(spec),
         "options": values,
         "holdout_only": holdout_only,
+        "real_adherence_cache": dict(real_adherence_cache) if real_adherence_cache else None,
     }
 
 

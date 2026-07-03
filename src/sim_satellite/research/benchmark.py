@@ -28,7 +28,7 @@ from sim_satellite import evaluation_metrics, training_data
 from sim_satellite.data.loader import SatelliteSample, iter_batches, read_manifest
 from sim_satellite.data.openearthmap import OPENEARTHMAP_CLASSES
 from sim_satellite.generation import generate_conditioned_images
-from sim_satellite.infer import LoadedGenerator, load_generator
+from sim_satellite.infer import LoadedGenerator, _load_checkpoint, load_generator_from_checkpoint
 from sim_satellite.segmentation.checkpoint import (
     SegmentationCheckpoint,
     _load_segmentation_checkpoint,
@@ -41,7 +41,10 @@ from sim_satellite.vae.research import _sample_group
 
 ProgressReporter = Callable[[str], None]
 DEFAULT_RUNS_DIR = "benchmarks/runs"
+DEFAULT_CACHE_DIR = "benchmarks/cache"
 RUN_RECORD_VERSION = 1
+REAL_ADHERENCE_CACHE_VERSION = 1
+REAL_ADHERENCE_CACHE_KIND = "real-mask-adherence"
 TARGET_DIRECTIONS = ("higher", "lower")
 
 
@@ -234,18 +237,35 @@ def run_benchmark(
     spec: BenchmarkSpec,
     options: BenchmarkRunOptions,
     *,
+    real_adherence_cache: Mapping[str, Any] | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     _validate_run_options(options)
     started_at_epoch_utc = time.time()
     started_at_monotonic = time.monotonic()
     protocol = spec.protocol
+    protocol_hash = benchmark_protocol_hash(protocol)
     selection = select_benchmark_samples(protocol, manifest_path=options.manifest_path)
     device = torch.device(options.device)
 
-    generator = load_generator(options.checkpoint_path, device=options.device)
+    checkpoint_path = Path(options.checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Benchmark checkpoint not found: {checkpoint_path}")
+    raw_checkpoint = _load_checkpoint(checkpoint_path, torch=torch)
+    generator = load_generator_from_checkpoint(
+        raw_checkpoint,
+        checkpoint_path=checkpoint_path,
+        device=options.device,
+    )
     _require_protocol_compatible_model(generator, protocol)
-    scorer = _load_mask_adherence_scorer(spec, options)
+    scorer = _load_mask_adherence_scorer(
+        spec,
+        options,
+        protocol_hash=protocol_hash,
+        sample_digest=selection.sample_digest,
+        real_adherence_cache=real_adherence_cache,
+        progress=progress,
+    )
 
     accumulator = evaluation_metrics.GenerationMetricAccumulator(
         class_count=generator.model_config.mask_channels,
@@ -299,20 +319,25 @@ def run_benchmark(
     record: dict[str, Any] = {
         "record_version": RUN_RECORD_VERSION,
         "benchmark": spec.name,
-        "protocol_hash": benchmark_protocol_hash(protocol),
+        "protocol_hash": protocol_hash,
         "protocol": asdict(protocol),
         "experiment": options.experiment,
         "notes": options.notes,
         "git_commit": options.git_commit,
         "created_at_epoch_utc": started_at_epoch_utc,
         "device": str(device),
-        "checkpoint": _checkpoint_payload(generator),
+        "checkpoint": _checkpoint_payload(generator, raw_checkpoint),
         "data": selection.payload(),
         "generation": generation_payload,
         "mask_adherence": mask_adherence_payload,
         "wall_seconds": max(0.0, time.monotonic() - started_at_monotonic),
     }
     record["run_id"] = _run_id(options.experiment, started_at_epoch_utc, record)
+    if scorer is not None:
+        record["real_adherence_cache"] = scorer.real_cache_payload(
+            protocol_hash=protocol_hash,
+            sample_digest=selection.sample_digest,
+        )
     return record
 
 
@@ -335,17 +360,34 @@ class _MaskAdherenceScorer:
     segmented and compared to the mask the generator was conditioned on. The
     same score on real images gives the judge's own ceiling, so `iou_ratio`
     stays meaningful even while the segmentation model itself improves.
+
+    The real-image side is identical for every run under one protocol (same
+    frozen eval samples, same judge), so it can be seeded from a cache and
+    skipped entirely; only the generated images are then segmented.
     """
 
-    def __init__(self, checkpoint: SegmentationCheckpoint, *, checkpoint_path: str) -> None:
+    def __init__(
+        self,
+        checkpoint: SegmentationCheckpoint,
+        *,
+        checkpoint_path: str,
+        checkpoint_sha256: str,
+        cached_real_confusion: torch.Tensor | None = None,
+    ) -> None:
         self.checkpoint_path = checkpoint_path
+        self.checkpoint_sha256 = checkpoint_sha256
         self.model = checkpoint.model
         self.vae_encoder = checkpoint.vae_encoder
         self.image_size = int(checkpoint.config["image_size"])
         self.use_context = int(checkpoint.config.get("context_size", 0)) > self.image_size
         class_count = len(OPENEARTHMAP_CLASSES)
         self.generated_confusion = torch.zeros((class_count, class_count), dtype=torch.long)
-        self.real_confusion = torch.zeros((class_count, class_count), dtype=torch.long)
+        self.real_scores_from_cache = cached_real_confusion is not None
+        self.real_confusion = (
+            cached_real_confusion
+            if cached_real_confusion is not None
+            else torch.zeros((class_count, class_count), dtype=torch.long)
+        )
 
     def update(self, generated: torch.Tensor, real: torch.Tensor, *, labels: torch.Tensor) -> None:
         labels = labels.detach().cpu()
@@ -354,11 +396,12 @@ class _MaskAdherenceScorer:
             labels,
             num_classes=len(OPENEARTHMAP_CLASSES),
         )
-        self.real_confusion += _confusion_matrix(
-            self._predict(real),
-            labels,
-            num_classes=len(OPENEARTHMAP_CLASSES),
-        )
+        if not self.real_scores_from_cache:
+            self.real_confusion += _confusion_matrix(
+                self._predict(real),
+                labels,
+                num_classes=len(OPENEARTHMAP_CLASSES),
+            )
 
     def _predict(self, images: torch.Tensor) -> torch.Tensor:
         target_size = (int(images.shape[-2]), int(images.shape[-1]))
@@ -408,12 +451,85 @@ class _MaskAdherenceScorer:
             "real_pixel_accuracy": float(real["pixel_accuracy"]),
             "real_class_iou": real["class_iou"],
             "iou_ratio": iou_ratio,
+            "real_scores_from_cache": self.real_scores_from_cache,
         }
+
+    def real_cache_payload(self, *, protocol_hash: str, sample_digest: str) -> dict[str, Any]:
+        return {
+            "cache_version": REAL_ADHERENCE_CACHE_VERSION,
+            "kind": REAL_ADHERENCE_CACHE_KIND,
+            "protocol_hash": protocol_hash,
+            "sample_digest": sample_digest,
+            "segmentation_checkpoint_sha256": self.checkpoint_sha256,
+            "confusion": self.real_confusion.tolist(),
+        }
+
+
+def real_adherence_cache_path(cache_dir: Path, protocol_hash: str) -> Path:
+    return cache_dir / f"real-adherence-{protocol_hash[:16]}.json"
+
+
+def load_real_adherence_cache(cache_dir: Path, protocol_hash: str) -> dict[str, Any] | None:
+    path = real_adherence_cache_path(cache_dir, protocol_hash)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    return dict(payload)
+
+
+def write_real_adherence_cache(cache_dir: Path, payload: Mapping[str, Any]) -> Path:
+    protocol_hash = payload.get("protocol_hash")
+    if not isinstance(protocol_hash, str) or not protocol_hash:
+        raise ValueError("Real-adherence cache payload is missing protocol_hash")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = real_adherence_cache_path(cache_dir, protocol_hash)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _cached_real_confusion(
+    cache: Mapping[str, Any] | None,
+    *,
+    protocol_hash: str,
+    sample_digest: str,
+    checkpoint_sha256: str,
+) -> torch.Tensor | None:
+    if not isinstance(cache, Mapping):
+        return None
+    if cache.get("cache_version") != REAL_ADHERENCE_CACHE_VERSION:
+        return None
+    if cache.get("kind") != REAL_ADHERENCE_CACHE_KIND:
+        return None
+    if cache.get("protocol_hash") != protocol_hash:
+        return None
+    if cache.get("sample_digest") != sample_digest:
+        return None
+    if cache.get("segmentation_checkpoint_sha256") != checkpoint_sha256:
+        return None
+    confusion = cache.get("confusion")
+    class_count = len(OPENEARTHMAP_CLASSES)
+    if not isinstance(confusion, list) or len(confusion) != class_count:
+        return None
+    try:
+        tensor = torch.tensor(confusion, dtype=torch.long)
+    except (TypeError, ValueError):
+        return None
+    if tuple(tensor.shape) != (class_count, class_count):
+        return None
+    return tensor
 
 
 def _load_mask_adherence_scorer(
     spec: BenchmarkSpec,
     options: BenchmarkRunOptions,
+    *,
+    protocol_hash: str,
+    sample_digest: str,
+    real_adherence_cache: Mapping[str, Any] | None,
+    progress: ProgressReporter | None,
 ) -> _MaskAdherenceScorer | None:
     segmentation_checkpoint_path = (
         options.segmentation_checkpoint_path or spec.protocol.segmentation_checkpoint_path
@@ -424,7 +540,21 @@ def _load_mask_adherence_scorer(
         Path(segmentation_checkpoint_path),
         device=options.device,
     )
-    return _MaskAdherenceScorer(checkpoint, checkpoint_path=segmentation_checkpoint_path)
+    checkpoint_sha256 = _file_sha256(Path(segmentation_checkpoint_path))
+    cached_real_confusion = _cached_real_confusion(
+        real_adherence_cache,
+        protocol_hash=protocol_hash,
+        sample_digest=sample_digest,
+        checkpoint_sha256=checkpoint_sha256,
+    )
+    if cached_real_confusion is not None:
+        _report(progress, "Reusing cached real-image mask-adherence scores")
+    return _MaskAdherenceScorer(
+        checkpoint,
+        checkpoint_path=segmentation_checkpoint_path,
+        checkpoint_sha256=checkpoint_sha256,
+        cached_real_confusion=cached_real_confusion,
+    )
 
 
 def _disabled_mask_adherence_payload(
@@ -457,8 +587,10 @@ def _require_protocol_compatible_model(
         )
 
 
-def _checkpoint_payload(generator: LoadedGenerator) -> dict[str, Any]:
-    raw_checkpoint = torch.load(generator.checkpoint_path, map_location="cpu")
+def _checkpoint_payload(
+    generator: LoadedGenerator,
+    raw_checkpoint: Mapping[str, Any],
+) -> dict[str, Any]:
     training_config = raw_checkpoint.get("training_config")
     step = raw_checkpoint.get("step")
     return {
@@ -472,6 +604,14 @@ def _checkpoint_payload(generator: LoadedGenerator) -> dict[str, Any]:
 
 def _group_rank(seed: int, group: str) -> str:
     return hashlib.sha256(f"{seed}:{group}".encode()).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sample_identity(sample: SatelliteSample) -> str:
@@ -581,6 +721,7 @@ def _run_with_target(
     *,
     target: str,
     holdout_only: bool,
+    real_adherence_cache: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     if target == "local":
         if holdout_only:
@@ -590,7 +731,12 @@ def _run_with_target(
             ).payload()
             result["protocol_hash"] = benchmark_protocol_hash(spec.protocol)
         else:
-            result = run_benchmark(spec, options, progress=click.echo)
+            result = run_benchmark(
+                spec,
+                options,
+                real_adherence_cache=real_adherence_cache,
+                progress=click.echo,
+            )
         result["execution_target"] = "local"
         return result
 
@@ -599,7 +745,12 @@ def _run_with_target(
 
     from sim_satellite.modal_app import run_benchmark_target
 
-    return run_benchmark_target(spec, options, holdout_only=holdout_only)
+    return run_benchmark_target(
+        spec,
+        options,
+        holdout_only=holdout_only,
+        real_adherence_cache=real_adherence_cache,
+    )
 
 
 @click.command(
@@ -629,6 +780,12 @@ def _run_with_target(
     help="Score generated images against conditioning masks with the frozen segmenter.",
 )
 @click.option(
+    "--cache-dir",
+    default=DEFAULT_CACHE_DIR,
+    show_default=True,
+    help="Directory for committed per-protocol caches such as real-image judge scores.",
+)
+@click.option(
     "--holdout-only",
     is_flag=True,
     help="Print the frozen eval selection and holdout patterns without scoring.",
@@ -645,6 +802,7 @@ def benchmark_cli(
     device: str,
     runs_dir: str,
     mask_adherence: bool,
+    cache_dir: str,
     holdout_only: bool,
     spec_path: Path,
 ) -> None:
@@ -658,10 +816,26 @@ def benchmark_cli(
             git_commit=_current_git_commit(),
             mask_adherence=mask_adherence,
         )
+        real_adherence_cache = None
         if not holdout_only:
             _validate_run_options(options)
-        result = _run_with_target(spec, options, target=target, holdout_only=holdout_only)
+            real_adherence_cache = load_real_adherence_cache(
+                Path(cache_dir),
+                benchmark_protocol_hash(spec.protocol),
+            )
+        result = _run_with_target(
+            spec,
+            options,
+            target=target,
+            holdout_only=holdout_only,
+            real_adherence_cache=real_adherence_cache,
+        )
         if not holdout_only:
+            cache_payload = result.pop("real_adherence_cache", None)
+            if isinstance(cache_payload, Mapping):
+                result["real_adherence_cache_path"] = str(
+                    write_real_adherence_cache(Path(cache_dir), cache_payload)
+                )
             record_path = write_run_record(result, Path(runs_dir))
             result["record_path"] = str(record_path)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

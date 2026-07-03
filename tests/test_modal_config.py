@@ -334,6 +334,7 @@ def test_modal_benchmark_maps_checkpoints_and_manifest(
     payload = fake_benchmark_remote.received
     assert isinstance(payload, dict)
     assert payload["holdout_only"] is True
+    assert payload["real_adherence_cache"] is None
     assert payload["spec"] == asdict(spec)
     assert payload["options"] == {
         **asdict(options),

@@ -19,8 +19,11 @@ from sim_satellite.research.benchmark import (
     BenchmarkTarget,
     benchmark_protocol_hash,
     load_benchmark_spec_values,
+    load_real_adherence_cache,
+    real_adherence_cache_path,
     run_benchmark,
     select_benchmark_samples,
+    write_real_adherence_cache,
     write_run_record,
 )
 from sim_satellite.segmentation.checkpoint import _save_checkpoint
@@ -233,6 +236,7 @@ def test_run_benchmark_scores_checkpoint_and_writes_record(tmp_path: Path) -> No
         "enabled": False,
         "status": "disabled: protocol has no segmentation_checkpoint_path",
     }
+    assert "real_adherence_cache" not in record
     assert record["checkpoint"]["model_parameters"] > 0
     assert record["checkpoint"]["training_config"] is None
     assert record["data"]["eval_samples"] == 2
@@ -269,10 +273,31 @@ def test_run_benchmark_scores_mask_adherence_with_frozen_segmenter(tmp_path: Pat
 
     adherence = record["mask_adherence"]
     assert adherence["enabled"] is True
+    assert adherence["real_scores_from_cache"] is False
     assert 0.0 <= adherence["generated_mean_iou"] <= 1.0
     assert 0.0 <= adherence["real_mean_iou"] <= 1.0
     assert 0.0 <= adherence["generated_pixel_accuracy"] <= 1.0
     assert set(adherence["generated_class_iou"]) == set(OPENEARTHMAP_CLASSES)
+    cache = record["real_adherence_cache"]
+    assert cache["cache_version"] == 1
+    assert cache["protocol_hash"] == record["protocol_hash"]
+    assert cache["sample_digest"] == record["data"]["sample_digest"]
+    assert cache["segmentation_checkpoint_sha256"]
+    assert len(cache["confusion"]) == len(OPENEARTHMAP_CLASSES)
+
+    cached_record = run_benchmark(_spec(protocol), options, real_adherence_cache=cache)
+    cached_adherence = cached_record["mask_adherence"]
+    assert cached_adherence["real_scores_from_cache"] is True
+    assert cached_adherence["real_mean_iou"] == pytest.approx(adherence["real_mean_iou"])
+    assert cached_adherence["generated_mean_iou"] == pytest.approx(adherence["generated_mean_iou"])
+    assert cached_record["real_adherence_cache"] == cache
+
+    stale_record = run_benchmark(
+        _spec(protocol),
+        options,
+        real_adherence_cache={**cache, "sample_digest": "stale"},
+    )
+    assert stale_record["mask_adherence"]["real_scores_from_cache"] is False
 
     disabled = run_benchmark(
         _spec(protocol),
@@ -284,6 +309,30 @@ def test_run_benchmark_scores_mask_adherence_with_frozen_segmenter(tmp_path: Pat
         ),
     )
     assert disabled["mask_adherence"]["enabled"] is False
+    assert "real_adherence_cache" not in disabled
+
+
+def test_real_adherence_cache_roundtrips_and_ignores_invalid_files(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    payload = {
+        "cache_version": 1,
+        "kind": "real-mask-adherence",
+        "protocol_hash": "a" * 64,
+        "sample_digest": "b" * 64,
+        "segmentation_checkpoint_sha256": "c" * 64,
+        "confusion": [[0] * len(OPENEARTHMAP_CLASSES)] * len(OPENEARTHMAP_CLASSES),
+    }
+
+    path = write_real_adherence_cache(cache_dir, payload)
+    assert path == real_adherence_cache_path(cache_dir, "a" * 64)
+    assert load_real_adherence_cache(cache_dir, "a" * 64) == payload
+    assert load_real_adherence_cache(cache_dir, "d" * 64) is None
+
+    path.write_text("{broken", encoding="utf-8")
+    assert load_real_adherence_cache(cache_dir, "a" * 64) is None
+
+    with pytest.raises(ValueError, match="protocol_hash"):
+        write_real_adherence_cache(cache_dir, {"confusion": []})
 
 
 def test_run_benchmark_rejects_protocol_incompatible_checkpoints(tmp_path: Path) -> None:

@@ -95,6 +95,27 @@ masks with `sim-satellite segmentation-predict --confidence-threshold 0.85`
 manifest `source` name, and keep the benchmark eval set untouched — it only
 ever contains human-labeled OpenEarthMap groups from the frozen holdout.
 
+## Cached artifacts
+
+Anything deterministic under a protocol is computed once and reused:
+
+- The judge's real-image scores are identical for every run under one
+  protocol (same frozen eval samples, same crops, same judge weights). The
+  first scored run computes them and the CLI writes
+  `benchmarks/cache/real-adherence-<protocol-hash>.json`; commit it with your
+  run record. Every later run — local or Modal, by any agent — sends the
+  cache along and only segments its *generated* images, which halves judge
+  inference and makes every run's `iou_ratio` denominator exactly identical.
+- The cache self-invalidates: it is keyed on the protocol hash, the eval
+  `sample_digest`, and the sha256 of the judge checkpoint file, so a changed
+  protocol, dataset, or judge silently falls back to recomputing (the run
+  record shows `mask_adherence.real_scores_from_cache`).
+- Datasets and prepared tensors are already cached in the Modal data volume
+  (`_ensure_modal_training_data`); benchmark runs reuse them and never
+  re-download.
+
+Do not hand-edit cache files; delete them to force recomputation.
+
 ## Judge checkpoint availability
 
 `flow-oem-v1` uses the committed segmentation study checkpoint
