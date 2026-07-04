@@ -22,6 +22,7 @@ from sim_satellite.research.benchmark import (
     load_real_adherence_cache,
     real_adherence_cache_path,
     run_benchmark,
+    sample_identity_digest,
     select_benchmark_samples,
     write_real_adherence_cache,
     write_run_record,
@@ -153,6 +154,16 @@ def test_benchmark_spec_validation_rejects_bad_specs() -> None:
         )
     with pytest.raises(ValueError, match="precision"):
         load_benchmark_spec_values({**base, "protocol": {"precision": "fp16"}})
+    with pytest.raises(ValueError, match="eval_sample_identities length"):
+        load_benchmark_spec_values(
+            {
+                **base,
+                "protocol": {
+                    "samples": 2,
+                    "eval_sample_identities": ["openearthmap:train:alpha/images/a.png"],
+                },
+            }
+        )
 
 
 def test_benchmark_eval_hash_pins_eval_fields_not_sampler_config() -> None:
@@ -175,6 +186,7 @@ def test_benchmark_eval_hash_pins_eval_fields_not_sampler_config() -> None:
         {"split": "val"},
         {"manifest_path": "elsewhere.jsonl"},
         {"segmentation_checkpoint_path": "judge.pt"},
+        {"eval_sample_identities": ("openearthmap:train:a/images/0.png",) * 4},
     ):
         assert benchmark_eval_hash(protocol) != benchmark_eval_hash(
             replace(protocol, **eval_change)
@@ -206,6 +218,40 @@ def test_select_benchmark_samples_holds_out_whole_groups(tmp_path: Path) -> None
     assert selection.manifest_samples == 9
     assert selection.manifest_samples_by_source == {"openearthmap": 9}
     assert selection.manifest_samples_by_split == {"train": 9}
+
+
+def test_select_benchmark_samples_can_pin_exact_eval_identities(tmp_path: Path) -> None:
+    manifest_path = _write_dataset(tmp_path, regions=("alpha", "beta", "gamma"), per_region=3)
+    protocol = BenchmarkProtocol(
+        manifest_path=str(manifest_path),
+        samples=3,
+        batch_size=2,
+        image_size=EVAL_IMAGE_SIZE,
+    )
+    initial = select_benchmark_samples(protocol)
+    pinned_protocol = replace(
+        protocol,
+        eval_sample_identities=initial.eval_sample_identities,
+    )
+    pinned = select_benchmark_samples(pinned_protocol)
+
+    _write_dataset(tmp_path, regions=("alpha", "beta", "gamma", "delta"), per_region=3)
+    repinned = select_benchmark_samples(pinned_protocol)
+
+    assert pinned.eval_sample_identities == initial.eval_sample_identities
+    assert repinned.eval_sample_identities == initial.eval_sample_identities
+    assert pinned.sample_digest == sample_identity_digest(initial.eval_sample_identities)
+    assert repinned.sample_digest == pinned.sample_digest
+    assert [str(sample.image_path) for sample in repinned.eval_samples] == [
+        str(sample.image_path) for sample in pinned.eval_samples
+    ]
+
+    missing_protocol = replace(
+        pinned_protocol,
+        eval_sample_identities=("openearthmap:train:missing/images/nope.png",) * 3,
+    )
+    with pytest.raises(RuntimeError, match="missing pinned eval samples"):
+        select_benchmark_samples(missing_protocol)
 
 
 def test_select_benchmark_samples_rejects_undersized_pools(tmp_path: Path) -> None:

@@ -17,13 +17,14 @@ from typing import Any
 
 import click
 
-from sim_satellite.research.benchmark import (
+from sim_satellite.research.spec import (
     DEFAULT_RUNS_DIR,
     RUN_RECORD_VERSION,
     SAMPLER_PROTOCOL_FIELDS,
     BenchmarkSpec,
     BenchmarkTarget,
     benchmark_eval_hash,
+    benchmark_protocol_sample_digest,
     load_benchmark_spec_file,
 )
 
@@ -65,6 +66,7 @@ def build_progress_report(
 ) -> dict[str, Any]:
     eval_hash = benchmark_eval_hash(spec.protocol)
     matching = [record for record in records if record.get("eval_hash") == eval_hash]
+    _require_matching_sample_digest(spec, matching)
     primary_target = _target_for_metric(spec, spec.primary_metric)
     leaderboard = sorted(
         (_leaderboard_entry(spec, record) for record in matching),
@@ -278,6 +280,34 @@ def _report_warnings(
             f"{', '.join(sorted(missing_primary))}"
         )
     return warnings
+
+
+def _require_matching_sample_digest(
+    spec: BenchmarkSpec,
+    records: Sequence[Mapping[str, Any]],
+) -> None:
+    expected = benchmark_protocol_sample_digest(spec.protocol)
+    if not expected:
+        return
+    mismatched = [
+        str(record.get("run_id", ""))
+        for record in records
+        if _record_sample_digest(record) != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "Runs share the eval hash but do not match the spec's pinned sample digest: "
+            f"{', '.join(sorted(mismatched))}. Start a new benchmark spec or rerun against "
+            "the pinned eval_sample_identities."
+        )
+
+
+def _record_sample_digest(record: Mapping[str, Any]) -> str:
+    data = record.get("data")
+    if not isinstance(data, Mapping):
+        return ""
+    value = data.get("sample_digest")
+    return value if isinstance(value, str) else ""
 
 
 def _format_value(value: float | None) -> str:

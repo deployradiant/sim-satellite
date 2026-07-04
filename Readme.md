@@ -167,13 +167,15 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json
 
 Training runs must exclude the benchmark holdout by copying the
 `validation_holdout_patterns` value from `--holdout-only` into the training
-config. Only the eval-defining protocol fields (data, holdout seed, sample
-count, crop size, judge) gate comparability through the eval hash and are
-immutable once runs exist; sampler settings (steps, guidance, precision,
-batch size) belong to the system under test, are recorded per run, and never
-fragment the leaderboard. Deterministic per-eval artifacts are cached and
-committed under `benchmarks/cache/` — the judge's real-image scores are
-computed by the first run and reused by every later run. See
+config. The spec pins exact `eval_sample_identities`; those identities and the
+other eval-defining protocol fields (data path, split, seed, sample count, crop
+size, judge) gate comparability through the eval hash and are immutable once
+runs exist. `benchmark-progress` refuses to rank a run whose recorded
+`sample_digest` does not match the pinned spec digest. Sampler settings (steps,
+guidance, precision, batch size) belong to the system under test, are recorded
+per run, and never fragment the leaderboard. Deterministic per-eval artifacts
+are cached and committed under `benchmarks/cache/` — the judge's real-image
+scores are computed by the first run and reused by every later run. See
 `docs/research-harness.md` for the parallel-subagent contract and the
 data-growth workflow.
 

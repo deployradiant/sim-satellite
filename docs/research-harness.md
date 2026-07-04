@@ -51,10 +51,11 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json \
 ## Protocol rules (what keeps runs comparable)
 
 - Only the eval-defining protocol fields — `manifest_path`, `split`, `seed`,
-  `samples`, `image_size`, `segmentation_checkpoint_path` — are hashed into
-  the eval hash, and `benchmark-progress` only compares runs with the spec's
-  exact eval hash. Never edit those fields in a committed spec — copy the
-  file to `flow-oem-v2.json` and start a new leaderboard.
+  `samples`, `image_size`, `segmentation_checkpoint_path`, and
+  `eval_sample_identities` — are hashed into the eval hash, and
+  `benchmark-progress` only compares runs with the spec's exact eval hash.
+  Never edit those fields in a committed spec — copy the file to
+  `flow-oem-v2.json` and start a new leaderboard.
 - The sampler fields — `generation_steps`, `guidance_scale`, `precision`,
   `batch_size` — configure the system under test, not the measurement. Runs
   may vary them freely and stay on the same leaderboard: what we care about is
@@ -63,11 +64,12 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json \
   bought with 10x more sampling steps is visible rather than hidden.
 - Generation noise is seeded per eval sample, not per batch, so `batch_size`
   is purely a throughput knob and can never change scores.
-- The eval set is chosen deterministically: whole city groups are hash-ranked
-  by the protocol seed and held out, then `samples` masks are drawn with the
-  same seed. Each run records a `sample_digest`; if digests diverge between
-  runs (the dataset grew), the progress report warns that deltas are no longer
-  a pure model comparison.
+- The eval set is pinned as exact `eval_sample_identities`. A new benchmark
+  spec may bootstrap those identities by hash-ranking whole city groups with
+  the protocol seed, but once the spec is committed the identities are part of
+  the measurement contract. Each run records a `sample_digest`; if a run with
+  the same eval hash does not match the pinned digest,
+  `benchmark-progress` fails instead of ranking it.
 - Training must exclude the benchmark holdout. Copy the
   `validation_holdout_patterns` string from `--holdout-only` (or from any run
   record) into the training config field of the same name.
@@ -119,8 +121,10 @@ Anything deterministic under a protocol is computed once and reused:
   `iou_ratio` denominator exactly identical.
 - The cache self-invalidates: it is keyed on the eval hash, the eval
   `sample_digest`, and the sha256 of the judge checkpoint file, so a changed
-  eval protocol, dataset, or judge silently falls back to recomputing (the
-  run record shows `mask_adherence.real_scores_from_cache`).
+  eval protocol or judge falls back to recomputing (the run record shows
+  `mask_adherence.real_scores_from_cache`). A run whose `sample_digest` no
+  longer matches the pinned spec digest is rejected by `benchmark-progress`
+  rather than mixed into the leaderboard.
 - Datasets and prepared tensors are already cached in the Modal data volume
   (`_ensure_modal_training_data`); benchmark runs reuse them and never
   re-download.

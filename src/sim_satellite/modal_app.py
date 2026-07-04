@@ -26,13 +26,13 @@ from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
 )
-from sim_satellite.research.benchmark import (
+from sim_satellite.research.runner import run_benchmark
+from sim_satellite.research.selection import select_benchmark_samples
+from sim_satellite.research.spec import (
     BenchmarkRunOptions,
     BenchmarkSpec,
     benchmark_eval_hash,
     load_benchmark_spec_values,
-    run_benchmark,
-    select_benchmark_samples,
 )
 from sim_satellite.segmentation import (
     SegmentationEvaluationConfig,

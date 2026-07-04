@@ -10,6 +10,7 @@ from sim_satellite.research.benchmark import (
     BenchmarkSpec,
     BenchmarkTarget,
     benchmark_eval_hash,
+    sample_identity_digest,
 )
 from sim_satellite.research.progress import (
     build_progress_report,
@@ -120,6 +121,36 @@ def test_progress_report_warns_on_diverging_sample_digests() -> None:
     report = build_progress_report(SPEC, records)
 
     assert any("different sample digests" in warning for warning in report["warnings"])
+
+
+def test_progress_report_rejects_mismatched_pinned_sample_digest() -> None:
+    identities = tuple(f"openearthmap:train:region/images/{index}.png" for index in range(4))
+    spec = BenchmarkSpec(
+        name="pinned-benchmark",
+        protocol=BenchmarkProtocol(samples=4, eval_sample_identities=identities),
+        primary_metric="mask_adherence.generated_mean_iou",
+        targets=(
+            BenchmarkTarget(
+                metric="mask_adherence.generated_mean_iou",
+                target=0.55,
+                direction="higher",
+            ),
+        ),
+    )
+    record = _record(
+        "stale",
+        created_at=1.0,
+        mean_iou=0.2,
+        eval_hash=benchmark_eval_hash(spec.protocol),
+        sample_digest="stale",
+    )
+
+    with pytest.raises(ValueError, match="pinned sample digest"):
+        build_progress_report(spec, [record])
+
+    record["data"]["sample_digest"] = sample_identity_digest(identities)  # type: ignore[index]
+    report = build_progress_report(spec, [record])
+    assert report["runs"] == 1
 
 
 def test_progress_report_respects_explicit_baseline() -> None:
