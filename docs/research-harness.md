@@ -62,6 +62,9 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json \
   performance, however the model achieves it. Each run's sampler settings are
   recorded and shown in a leaderboard column (with `wall_seconds`), so a win
   bought with 10x more sampling steps is visible rather than hidden.
+- To vary sampler settings for a run, use `sim-satellite benchmark`
+  `--generation-steps`, `--guidance-scale`, `--precision`, or `--batch-size`
+  instead of editing the committed spec.
 - Generation noise is seeded per eval sample, not per batch, so `batch_size`
   is purely a throughput knob and can never change scores.
 - The eval set is pinned as exact `eval_sample_identities`. A new benchmark

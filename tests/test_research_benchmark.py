@@ -311,6 +311,40 @@ def test_run_benchmark_scores_checkpoint_and_writes_record(tmp_path: Path) -> No
         write_run_record(record, runs_dir)
 
 
+def test_run_benchmark_applies_sampler_overrides_without_changing_eval_hash(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_dataset(tmp_path)
+    checkpoint_path = tmp_path / "model.pt"
+    _write_diffusion_checkpoint(checkpoint_path)
+    protocol = BenchmarkProtocol(
+        manifest_path=str(manifest_path),
+        samples=2,
+        batch_size=2,
+        image_size=EVAL_IMAGE_SIZE,
+        generation_steps=2,
+        guidance_scale=1.0,
+        seed=7,
+    )
+    options = BenchmarkRunOptions(
+        checkpoint_path=str(checkpoint_path),
+        experiment="sampler-override",
+        device="cpu",
+        generation_steps=3,
+        guidance_scale=1.4,
+        batch_size=1,
+    )
+
+    record = run_benchmark(_spec(protocol), options)
+
+    assert record["eval_hash"] == benchmark_eval_hash(protocol)
+    assert record["protocol"]["generation_steps"] == 3
+    assert record["protocol"]["guidance_scale"] == pytest.approx(1.4)
+    assert record["protocol"]["batch_size"] == 1
+    assert record["generation"]["generation_steps"] == 3
+    assert record["generation"]["guidance_scale"] == pytest.approx(1.4)
+
+
 def test_run_benchmark_scores_mask_adherence_with_frozen_segmenter(tmp_path: Path) -> None:
     manifest_path = _write_dataset(tmp_path)
     checkpoint_path = tmp_path / "model.pt"

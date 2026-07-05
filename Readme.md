@@ -173,11 +173,13 @@ size, judge) gate comparability through the eval hash and are immutable once
 runs exist. `benchmark-progress` refuses to rank a run whose recorded
 `sample_digest` does not match the pinned spec digest. Sampler settings (steps,
 guidance, precision, batch size) belong to the system under test, are recorded
-per run, and never fragment the leaderboard. Deterministic per-eval artifacts
-are cached and committed under `benchmarks/cache/` — the judge's real-image
-scores are computed by the first run and reused by every later run. See
-`docs/research-harness.md` for the parallel-subagent contract and the
-data-growth workflow.
+per run, and never fragment the leaderboard. Vary those sampler settings with
+the benchmark CLI overrides (`--generation-steps`, `--guidance-scale`,
+`--precision`, `--batch-size`) rather than editing the committed spec.
+Deterministic per-eval artifacts are cached and committed under
+`benchmarks/cache/` — the judge's real-image scores are computed by the first
+run and reused by every later run. See `docs/research-harness.md` for the
+parallel-subagent contract and the data-growth workflow.
 
 The fast pool config writes
 `/data/openearthmap/research/openearthmap-vae-fast-balanced-512-v1.jsonl` and a
@@ -402,3 +404,15 @@ Custom DDPM is easier to understand and debug, but a library-backed implementati
   No leaderboard entries exist yet; the next step is scoring the current best
   flow U-Net checkpoint as the baseline run, then dispatching parallel model
   and data experiments against it.
+- 2026-07-04 UTC: AutoResearch benchmark follow-up on branch
+  `codex/benchmark-improvement-flow` scored the existing
+  `/artifacts/openearthmap-from-dataset-mix-landcoverai50-h100-b10-8k.pt`
+  checkpoint on `flow-oem-v1`. Baseline 32-step, guidance-1.0 sampling reached
+  mask mIoU `0.3716`, iou ratio `0.5968`, SSIM `0.1812`, RGB macro MAE
+  `0.0496`, and boundary-gradient delta `0.1115`. A 32-step, guidance-1.5
+  sampler cleared the two mask targets with mIoU `0.5532` and iou ratio
+  `0.8885`, improved SSIM to `0.2139`, and improved RGB macro MAE to `0.0472`,
+  while worsening boundary-gradient delta to `0.2183`. Decision: keep the
+  benchmark default at 32 steps and update the default guidance scale to `1.5`;
+  next best hypothesis is improving boundary realism/sharpness without giving
+  back mask-adherence gains.
