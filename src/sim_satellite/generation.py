@@ -76,6 +76,13 @@ def guided_prediction(
     guidance_scale: float,
     torch: Any,
 ) -> Any:
+    """Apply classifier-free guidance between empty-mask and conditional predictions.
+
+    A scale of 1.0 is the plain mask-conditioned prediction. Values above 1.0
+    extrapolate farther toward the semantic-mask condition, which can improve
+    mask adherence at the cost of more artificial-looking samples.
+    """
+
     conditional = model(image, semantic_mask, timestep)
     if guidance_scale == 1.0:
         return conditional
