@@ -62,9 +62,14 @@ uv run sim-satellite benchmark-progress benchmarks/flow-oem-v1.json \
   performance, however the model achieves it. Each run's sampler settings are
   recorded and shown in a leaderboard column (with `wall_seconds`), so a win
   bought with 10x more sampling steps is visible rather than hidden.
-- To vary sampler settings for a run, use `sim-satellite benchmark`
-  `--generation-steps`, `--guidance-scale`, `--precision`, or `--batch-size`
-  instead of editing the committed spec.
+- To vary sampler settings for an exploratory run, use `sim-satellite
+  benchmark` `--generation-steps`, `--guidance-scale`, `--precision`, or
+  `--batch-size` instead of editing the committed spec. Update the spec default
+  only when adopting a benchmark-backed default for future runs.
+- `guidance_scale` is classifier-free guidance. `1.0` uses the model's
+  conditional prediction as-is; higher values extrapolate away from the
+  empty-mask prediction toward the semantic-mask condition. That can improve
+  mask adherence, but it may also make samples less realistic or over-sharp.
 - Generation noise is seeded per eval sample, not per batch, so `batch_size`
   is purely a throughput knob and can never change scores.
 - The eval set is pinned as exact `eval_sample_identities`. A new benchmark

@@ -175,7 +175,11 @@ runs exist. `benchmark-progress` refuses to rank a run whose recorded
 guidance, precision, batch size) belong to the system under test, are recorded
 per run, and never fragment the leaderboard. Vary those sampler settings with
 the benchmark CLI overrides (`--generation-steps`, `--guidance-scale`,
-`--precision`, `--batch-size`) rather than editing the committed spec.
+`--precision`, `--batch-size`) for exploratory runs. Adopt a new committed
+sampler default only after recording a benchmark run that justifies it.
+`guidance_scale` is the classifier-free guidance multiplier: `1.0` uses the
+plain mask-conditioned prediction, while larger values push samples harder
+toward the conditioning mask and can trade image realism for mask adherence.
 Deterministic per-eval artifacts are cached and committed under
 `benchmarks/cache/` — the judge's real-image scores are computed by the first
 run and reused by every later run. See `docs/research-harness.md` for the

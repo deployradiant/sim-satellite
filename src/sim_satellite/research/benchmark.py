@@ -138,7 +138,10 @@ def _run_with_target(
     "--guidance-scale",
     type=float,
     default=None,
-    help="Override benchmark guidance scale for this run.",
+    help=(
+        "Override classifier-free guidance scale; 1.0 uses the conditional "
+        "prediction, larger values follow masks more strongly."
+    ),
 )
 @click.option(
     "--precision",
