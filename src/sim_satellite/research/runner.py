@@ -28,6 +28,7 @@ from sim_satellite.research.spec import (
     BenchmarkRunOptions,
     BenchmarkSpec,
     benchmark_eval_hash,
+    benchmark_run_protocol,
     validate_run_options,
 )
 
@@ -44,7 +45,7 @@ def run_benchmark(
     validate_run_options(options)
     started_at_epoch_utc = time.time()
     started_at_monotonic = time.monotonic()
-    protocol = spec.protocol
+    protocol = benchmark_run_protocol(spec.protocol, options)
     eval_hash = benchmark_eval_hash(protocol)
     selection = select_benchmark_samples(protocol, manifest_path=options.manifest_path)
     device = torch.device(options.device)

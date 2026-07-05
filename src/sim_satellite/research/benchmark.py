@@ -27,6 +27,7 @@ from sim_satellite.research.spec import (
     BenchmarkSpec,
     BenchmarkTarget,
     benchmark_eval_hash,
+    benchmark_run_protocol,
     load_benchmark_spec_file,
     load_benchmark_spec_values,
     sample_identity_digest,
@@ -45,6 +46,7 @@ __all__ = [
     "BenchmarkTarget",
     "benchmark_cli",
     "benchmark_eval_hash",
+    "benchmark_run_protocol",
     "load_benchmark_spec_file",
     "load_benchmark_spec_values",
     "load_real_adherence_cache",
@@ -126,6 +128,32 @@ def _run_with_target(
 @click.option("--notes", default="", help="Free-form notes stored in the run record.")
 @click.option("--device", default="cpu", show_default=True, help="Device for --target local.")
 @click.option(
+    "--generation-steps",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Override benchmark generation steps for this run; 0 uses the spec default.",
+)
+@click.option(
+    "--guidance-scale",
+    type=float,
+    default=None,
+    help="Override benchmark guidance scale for this run.",
+)
+@click.option(
+    "--precision",
+    type=click.Choice(["float32", "bf16"]),
+    default=None,
+    help="Override benchmark generation precision for this run.",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Override benchmark batch size for this run; 0 uses the spec default.",
+)
+@click.option(
     "--runs-dir",
     default=DEFAULT_RUNS_DIR,
     show_default=True,
@@ -158,6 +186,10 @@ def benchmark_cli(
     experiment: str,
     notes: str,
     device: str,
+    generation_steps: int,
+    guidance_scale: float | None,
+    precision: str | None,
+    batch_size: int,
     runs_dir: str,
     mask_adherence: bool,
     cache_dir: str,
@@ -173,6 +205,10 @@ def benchmark_cli(
             device=device,
             git_commit=_current_git_commit(),
             mask_adherence=mask_adherence,
+            generation_steps=generation_steps,
+            guidance_scale=guidance_scale,
+            precision=precision or "",
+            batch_size=batch_size,
         )
         real_adherence_cache = None
         if not holdout_only:

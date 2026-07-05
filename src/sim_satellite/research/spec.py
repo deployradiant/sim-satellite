@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,10 @@ class BenchmarkRunOptions:
     manifest_path: str = ""
     segmentation_checkpoint_path: str = ""
     mask_adherence: bool = True
+    generation_steps: int = 0
+    guidance_scale: float | None = None
+    precision: str = ""
+    batch_size: int = 0
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> BenchmarkRunOptions:
@@ -125,6 +129,26 @@ def benchmark_eval_hash(protocol: BenchmarkProtocol) -> str:
     eval_fields = {name: getattr(protocol, name) for name in EVAL_PROTOCOL_FIELDS}
     canonical = json.dumps(eval_fields, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def benchmark_run_protocol(
+    protocol: BenchmarkProtocol,
+    options: BenchmarkRunOptions,
+) -> BenchmarkProtocol:
+    updates: dict[str, Any] = {}
+    if options.generation_steps > 0:
+        updates["generation_steps"] = options.generation_steps
+    if options.guidance_scale is not None:
+        updates["guidance_scale"] = options.guidance_scale
+    if options.precision:
+        updates["precision"] = options.precision
+    if options.batch_size > 0:
+        updates["batch_size"] = options.batch_size
+    if not updates:
+        return protocol
+    run_protocol = replace(protocol, **updates)
+    _validate_protocol(run_protocol)
+    return run_protocol
 
 
 def benchmark_protocol_sample_digest(protocol: BenchmarkProtocol) -> str:
@@ -198,6 +222,14 @@ def validate_run_options(options: BenchmarkRunOptions) -> None:
         raise ValueError("checkpoint_path is required")
     if not options.experiment:
         raise ValueError("experiment is required")
+    if options.generation_steps < 0:
+        raise ValueError("generation_steps override must be non-negative")
+    if options.guidance_scale is not None and options.guidance_scale < 0.0:
+        raise ValueError("guidance_scale override must be non-negative")
+    if options.precision and options.precision not in {"float32", "bf16"}:
+        raise ValueError("precision override must be one of: bf16, float32")
+    if options.batch_size < 0:
+        raise ValueError("batch_size override must be non-negative")
 
 
 def _reject_target(target: object) -> BenchmarkTarget:
