@@ -11,6 +11,7 @@ import os
 import random
 import shutil
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,14 @@ from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import (
     InferenceConfig,
     run_inference,
+)
+from sim_satellite.research.runner import run_benchmark
+from sim_satellite.research.selection import select_benchmark_samples
+from sim_satellite.research.spec import (
+    BenchmarkRunOptions,
+    BenchmarkSpec,
+    benchmark_eval_hash,
+    load_benchmark_spec_values,
 )
 from sim_satellite.segmentation import (
     SegmentationEvaluationConfig,
@@ -282,6 +291,38 @@ def evaluate_segmentation_remote(config: dict[str, Any]) -> dict[str, Any]:
     ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
     volumes=modal_volumes,
 )
+def benchmark_remote(payload: dict[str, Any]) -> dict[str, Any]:
+    spec = load_benchmark_spec_values(payload["spec"])
+    options = BenchmarkRunOptions.from_dict(payload["options"])
+    _ensure_modal_training_data(options.manifest_path)
+    artifact_volume.reload()
+    if payload.get("holdout_only"):
+        result = select_benchmark_samples(
+            spec.protocol,
+            manifest_path=options.manifest_path,
+        ).payload()
+        result["eval_hash"] = benchmark_eval_hash(spec.protocol)
+    else:
+        result = run_benchmark(
+            spec,
+            options,
+            real_adherence_cache=payload.get("real_adherence_cache"),
+            progress=lambda message: _print_modal_data_event(
+                "modal_benchmark_progress",
+                message=message,
+            ),
+        )
+    result["execution_target"] = "modal"
+    return result
+
+
+@app.function(
+    image=image,
+    timeout=MODAL_DATA_SETUP_TIMEOUT,
+    gpu=MODAL_INFERENCE_GPU,
+    ephemeral_disk=MODAL_EPHEMERAL_DISK_MIB,
+    volumes=modal_volumes,
+)
 def infer_remote(config: dict[str, Any]) -> dict[str, Any]:
     _ensure_modal_training_data(config["manifest_path"])
     artifact_volume.reload()
@@ -373,6 +414,24 @@ def run_segmentation_evaluation_target(
             return evaluate_segmentation_remote.remote(modal_config)
 
 
+def run_benchmark_target(
+    spec: BenchmarkSpec,
+    options: BenchmarkRunOptions,
+    *,
+    holdout_only: bool = False,
+    real_adherence_cache: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = _modal_benchmark_payload(
+        spec,
+        options,
+        holdout_only=holdout_only,
+        real_adherence_cache=real_adherence_cache,
+    )
+    with modal.enable_output():
+        with app.run():
+            return benchmark_remote.remote(payload)
+
+
 def run_inference_target(
     config: InferenceConfig,
 ) -> dict[str, Any]:
@@ -459,6 +518,36 @@ def _modal_segmentation_evaluation_config(config: SegmentationEvaluationConfig) 
     if config.output_path:
         values["output_path"] = _modal_artifact_path(config.output_path)
     return values
+
+
+def _modal_benchmark_payload(
+    spec: BenchmarkSpec,
+    options: BenchmarkRunOptions,
+    *,
+    holdout_only: bool,
+    real_adherence_cache: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    values = asdict(options)
+    values["device"] = "cuda"
+    values["checkpoint_path"] = (
+        _modal_artifact_path(options.checkpoint_path) if options.checkpoint_path else ""
+    )
+    values["manifest_path"] = _modal_data_path(
+        options.manifest_path or spec.protocol.manifest_path,
+        field_name="manifest_path",
+    )
+    segmentation_checkpoint_path = (
+        options.segmentation_checkpoint_path or spec.protocol.segmentation_checkpoint_path
+    )
+    values["segmentation_checkpoint_path"] = (
+        _modal_artifact_path(segmentation_checkpoint_path) if segmentation_checkpoint_path else ""
+    )
+    return {
+        "spec": asdict(spec),
+        "options": values,
+        "holdout_only": holdout_only,
+        "real_adherence_cache": dict(real_adherence_cache) if real_adherence_cache else None,
+    }
 
 
 def _modal_inference_config(config: InferenceConfig) -> dict[str, Any]:

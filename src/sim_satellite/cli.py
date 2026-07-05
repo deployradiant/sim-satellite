@@ -6,6 +6,8 @@ from sim_satellite import __version__
 from sim_satellite.data.landcoverai import cli as landcoverai_cli
 from sim_satellite.data.openearthmap import cli as openearthmap_cli
 from sim_satellite.infer import cli as infer_cli
+from sim_satellite.research.benchmark import benchmark_cli
+from sim_satellite.research.progress import progress_cli
 from sim_satellite.segmentation import evaluate_cli as segmentation_evaluate_cli
 from sim_satellite.segmentation import predict_cli as segmentation_predict_cli
 from sim_satellite.segmentation import train_cli as segmentation_train_cli
@@ -29,6 +31,8 @@ cli.add_command(train_vae_cli)
 cli.add_command(vae_research_manifest_cli)
 cli.add_command(vae_research_sweep_cli)
 cli.add_command(infer_cli)
+cli.add_command(benchmark_cli)
+cli.add_command(progress_cli)
 cli.add_command(segmentation_train_cli)
 cli.add_command(segmentation_evaluate_cli)
 cli.add_command(segmentation_predict_cli)

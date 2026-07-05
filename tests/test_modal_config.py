@@ -11,6 +11,12 @@ from sim_satellite import modal_app
 from sim_satellite.data.loader import SatelliteSample, read_manifest, write_manifest
 from sim_satellite.data.prepared import PREPARED_DATA_VERSION
 from sim_satellite.infer import InferenceConfig
+from sim_satellite.research.benchmark import (
+    BenchmarkProtocol,
+    BenchmarkRunOptions,
+    BenchmarkSpec,
+    BenchmarkTarget,
+)
 from sim_satellite.training_config import TrainingConfig
 from sim_satellite.vae.research import VAEResearchManifestConfig
 from sim_satellite.vae.training import VAETrainingConfig
@@ -299,6 +305,46 @@ def test_modal_vae_research_manifest_maps_dataset_to_data_volume(
     }
 
 
+def test_modal_benchmark_maps_checkpoints_and_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_app = _FakeApp()
+    fake_benchmark_remote = _FakeRemote(fake_app, {"execution_target": "modal"})
+    _install_modal_fakes(monkeypatch, fake_app, benchmark_remote=fake_benchmark_remote)
+    spec = BenchmarkSpec(
+        name="flow-oem-test",
+        protocol=BenchmarkProtocol(
+            manifest_path="data/openearthmap/manifest.jsonl",
+            segmentation_checkpoint_path="artifacts/segmenter.pt",
+        ),
+        primary_metric="generation.ssim",
+        targets=(BenchmarkTarget(metric="generation.ssim", target=0.5, direction="higher"),),
+    )
+    options = BenchmarkRunOptions(
+        checkpoint_path="artifacts/checkpoints/model.pt",
+        experiment="mapping-test",
+    )
+
+    result = modal_app.run_benchmark_target(spec, options, holdout_only=True)
+
+    assert result == {"execution_target": "modal"}
+    assert fake_app.run_calls == 1
+    payload = fake_benchmark_remote.received
+    assert isinstance(payload, dict)
+    assert payload["holdout_only"] is True
+    assert payload["real_adherence_cache"] is None
+    assert payload["spec"] == asdict(spec)
+    assert payload["options"] == {
+        **asdict(options),
+        "device": "cuda",
+        "checkpoint_path": "/artifacts/checkpoints/model.pt",
+        "manifest_path": "/data/openearthmap/manifest.jsonl",
+        "segmentation_checkpoint_path": "/artifacts/segmenter.pt",
+    }
+
+
 def test_modal_web_config_uses_artifact_checkpoint_and_remote_local_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -544,6 +590,7 @@ def _install_modal_fakes(
     train_vae_remote: object | None = None,
     vae_research_manifest_remote: object | None = None,
     infer_remote: object | None = None,
+    benchmark_remote: object | None = None,
 ) -> None:
     train_remote = train_remote if train_remote is not None else object()
     train_vae_remote = train_vae_remote if train_vae_remote is not None else object()
@@ -551,11 +598,13 @@ def _install_modal_fakes(
         vae_research_manifest_remote if vae_research_manifest_remote is not None else object()
     )
     infer_remote = infer_remote if infer_remote is not None else object()
+    benchmark_remote = benchmark_remote if benchmark_remote is not None else object()
     monkeypatch.setattr(modal_app, "app", fake_app)
     monkeypatch.setattr(modal_app, "train_remote", train_remote)
     monkeypatch.setattr(modal_app, "train_vae_remote", train_vae_remote)
     monkeypatch.setattr(modal_app, "vae_research_manifest_remote", vae_research_manifest_remote)
     monkeypatch.setattr(modal_app, "infer_remote", infer_remote)
+    monkeypatch.setattr(modal_app, "benchmark_remote", benchmark_remote)
 
 
 def _write_data_file(tmp_path: Path, relative_path: str, *, content: bytes = b"") -> Path:
