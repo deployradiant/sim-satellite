@@ -1,8 +1,8 @@
 # Licensing and Artifact Notice
 
-This repository contains code only. It does not redistribute third-party
-satellite datasets, extracted dataset tiles, prepared tensor data, trained
-checkpoints, or model weights.
+This repository contains source code, documentation, and selected historical
+research checkpoints, metrics, and evaluation figures under `artifacts/`.
+Raw dataset archives and prepared tensor caches are not included.
 
 ## Code
 
@@ -30,7 +30,7 @@ derived from non-commercial/share-alike datasets. This includes:
 - trained checkpoints and model weights
 - evaluation outputs derived from restricted datasets
 
-If these artifacts are published separately, they should be released as
+The selected research artifacts published in this repository are provided as
 non-commercial research artifacts under CC BY-NC-SA 4.0, with attribution to
 the underlying datasets and with notes describing any label remapping,
 filtering, or mixing steps.
@@ -39,10 +39,25 @@ Commercial use of dataset derivatives, trained checkpoints, model weights, or
 other artifacts derived from non-commercial source datasets is not permitted by
 this repository's license policy.
 
-## Public Release Process
+## Included Figures and Checkpoints
 
-Before any public research release, create a clean copy of the repository for
-publication. The release copy should include only code, configs, synthetic test
-fixtures, documentation, and reproduction instructions. It should exclude local
-data caches, prepared tensors, logs, checkpoints, model weights, generated
-images, and any other dataset-derived artifacts.
+The README links to the saved 200,000-step VAE reconstruction grid and the
+200,000-step segmentation comparison. These figures contain OpenEarthMap
+imagery, reference labels, reconstructions, and model predictions. Original
+imagery and labels retain their source terms; the MIT license applies to code.
+The research-artifact terms above do not replace upstream rights or attribution.
+
+Dataset attribution: Xia et al., *OpenEarthMap: A Benchmark Dataset for Global
+High-Resolution Land Cover Mapping*, WACV 2023.
+See the [OpenEarthMap overview](https://open-earth-map.org/overview.html) and
+[source imagery and licenses](https://open-earth-map.org/).
+Run settings and the distinction between these saved evaluations and later
+local experiments are documented in [Reproduction.md](Reproduction.md).
+
+## Public Release Scope
+
+The published repository includes code, configs, tests, documentation,
+reproduction instructions, and the selected historical research artifacts
+listed above. Local data caches, prepared tensors, logs, credentials, and
+unpublished experiments remain outside the release. New generated artifacts
+are ignored by default through `.gitignore`.
